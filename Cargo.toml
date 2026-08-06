@@ -1,13 +1,50 @@
 [workspace]
 resolver = "3"
+# crates/formats is a parent directory for filesystem-format parser crates
+# (ntfs, fat, ext, …), not a crate itself — hence the glob + exclude pair.
+members = ["crates/*", "crates/formats/*"]
+exclude = ["crates/formats"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-# All dependencies are declared here. Member crates import them with
-# `<name> = { workspace = true }` — never with a version of their own.
+# Internal crates
+fsmnt-core = { path = "crates/fsmnt-core" }
+fsmnt-device = { path = "crates/fsmnt-device" }
+fsmnt-device-linux = { path = "crates/fsmnt-device-linux" }
+fsmnt-device-macos = { path = "crates/fsmnt-device-macos" }
+fsmnt-device-windows = { path = "crates/fsmnt-device-windows" }
+fsmnt-dokan = { path = "crates/fsmnt-dokan" }
+fsmnt-fuse = { path = "crates/fsmnt-fuse" }
+
+# All external dependencies are declared here. Member crates import them
+# with `<name> = { workspace = true }` — never with a version of their own.
+bitflags = "2"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+zerocopy = "0.8"
+
+# Windows device access
+windows = "0.62"
+
+# Unix mount backend (FUSE)
+ctrlc = "3.5"
+fuser = "0.17"
+libc = "0.2"
+
+# Windows mount backend (Dokan)
+dokan = { git = "https://github.com/coconutbird/dokan-rust.git", rev = "a01841c855aefd3cbaaf042f90d16d5b4bc34692" }
+widestring = "1.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
 
 [workspace.lints.rust]
 missing_docs = "deny"
@@ -21,6 +58,22 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+clap = { workspace = true }
+fsmnt-core = { workspace = true }
+fsmnt-device = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+fsmnt-fuse = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+fsmnt-device-windows = { workspace = true }
+fsmnt-dokan = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fsmnt-device-linux = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fsmnt-device-macos = { workspace = true }
 
 [lints]
 workspace = true

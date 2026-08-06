@@ -1,0 +1,12 @@
+[package]
+name = "fsmnt-device"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fsmnt-core = { workspace = true }
+thiserror = { workspace = true }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

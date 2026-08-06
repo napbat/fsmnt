@@ -1,5 +1,332 @@
 //! Command-line interface for the `fsmnt` library.
 
-fn main() {
-    println!("{}", fsmnt::greeting());
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+
+use fsmnt::DirFilesystem;
+
+/// Mount filesystem sources as read-only virtual volumes (FUSE on Unix,
+/// Dokan on Windows).
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Mount a host directory as a read-only volume.
+    Mount {
+        /// Source directory to expose.
+        source: PathBuf,
+
+        /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
+        /// empty NTFS directory on Windows.
+        mountpoint: String,
+
+        /// Volume label shown in the OS file manager.
+        #[arg(long, default_value = "fsmnt")]
+        volname: String,
+
+        /// Filesystem type label reported to the OS.
+        #[arg(long, default_value = "fsmnt")]
+        fsname: String,
+    },
+
+    /// List physical drives on this machine.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    Drives,
+
+    /// List partitions on a physical drive.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    Partitions {
+        /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`).
+        drive: String,
+    },
+
+    /// Mount a partition from a physical drive (requires filesystem
+    /// drivers; see the fsmnt library documentation).
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    MountDevice {
+        /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`).
+        drive: String,
+
+        /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
+        /// empty NTFS directory on Windows.
+        mountpoint: String,
+
+        /// Partition number (0-based index over non-empty entries).
+        #[arg(long, default_value_t = 0)]
+        partition: usize,
+
+        /// Volume label shown in the OS file manager (defaults to the
+        /// drive model or ID).
+        #[arg(long)]
+        volname: Option<String>,
+    },
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Mount {
+            source,
+            mountpoint,
+            volname,
+            fsname,
+        } => handle_mount(&source, &mountpoint, &volname, &fsname),
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        Commands::Drives => handle_drives(),
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        Commands::Partitions { drive } => handle_partitions(&drive),
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        Commands::MountDevice {
+            drive,
+            mountpoint,
+            partition,
+            volname,
+        } => handle_mount_device(&drive, partition, &mountpoint, volname.as_deref()),
+    }
+}
+
+/// Mount `source` at `mountpoint` and block until Ctrl+C.
+fn handle_mount(
+    source: &std::path::Path,
+    mountpoint: &str,
+    volname: &str,
+    fsname: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !source.is_dir() {
+        return Err(format!("source is not a directory: {}", source.display()).into());
+    }
+
+    ensure_unix_mountpoint(mountpoint)?;
+
+    let fs = DirFilesystem::new(source);
+    block_on_mount(Box::new(fs), mountpoint, "fsmnt-dir", volname, fsname, 0)
+}
+
+/// On Unix the mountpoint is a directory; create it if needed.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "fallible only on Unix; single signature keeps call sites clean"
+)]
+fn ensure_unix_mountpoint(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    if !std::path::Path::new(mountpoint).exists() {
+        std::fs::create_dir_all(mountpoint)?;
+    }
+    #[cfg(not(unix))]
+    let _ = mountpoint;
+    Ok(())
+}
+
+/// Mount `fs` and block until Ctrl+C, printing progress.
+fn block_on_mount(
+    fs: Box<dyn fsmnt::TargetFilesystem>,
+    mountpoint: &str,
+    kind: &str,
+    volname: &str,
+    fsname: &str,
+    total_bytes: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mp_display = mountpoint.to_string();
+    println!("Mounting {kind} volume at {mountpoint}...");
+    fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
+        println!("Volume mounted at {mp_display}. Press Ctrl+C to unmount.");
+    })?;
+    println!("Unmounted.");
+    Ok(())
+}
+
+/// Format a byte count for human display.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn format_size(bytes: u64) -> String {
+    if bytes == u64::MAX {
+        return "unknown".to_string();
+    }
+    if bytes < 1_000_000_000 {
+        return format!("{} MB", bytes / 1_000_000);
+    }
+    let gb = bytes / 1_000_000_000;
+    let tenths = (bytes % 1_000_000_000) / 100_000_000;
+    format!("{gb}.{tenths} GB")
+}
+
+/// Filesystem type label for a detected boot sector.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn fs_label(detected: fsmnt::device::DetectedBootSector) -> &'static str {
+    use fsmnt::device::DetectedBootSector as D;
+    match detected {
+        D::Ntfs => "ntfs",
+        D::BitLocker => "bitlocker+ntfs",
+        D::Fat12 => "fat12",
+        D::Fat16 => "fat16",
+        D::Fat32 => "fat32",
+        D::ExFat => "exfat",
+        D::Ext => "extfs",
+        D::Apfs => "apfs",
+        D::MbrPartitioned | D::GptPartitioned | D::Unknown => "unknown",
+    }
+}
+
+/// List physical drives.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+    use fsmnt::device::HostDriveEnumerator;
+
+    let drives = HostDrives::enumerate_drives()?;
+    if drives.is_empty() {
+        println!("No drives found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:>12}  {:<10} {:<28} ACCESS",
+        "ID", "SIZE", "BUS", "MODEL"
+    );
+    for d in drives {
+        let size = d
+            .size_bytes
+            .map_or_else(|| "unknown".to_string(), format_size);
+        let bus = d
+            .bus_type
+            .map_or_else(|| "-".to_string(), |b| b.to_string());
+        let model = d.model.as_deref().unwrap_or("-");
+        let access = if d.accessible {
+            "ok".to_string()
+        } else {
+            format!(
+                "inaccessible ({})",
+                d.access_error.as_deref().unwrap_or("unknown"),
+            )
+        };
+        println!(
+            "{:<10} {size:>12}  {bus:<10} {model:<28} {access}",
+            d.id.to_string()
+        );
+    }
+    Ok(())
+}
+
+/// List partitions on a drive.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn handle_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+    use fsmnt::device::{Disk, DiskLayout, HostDriveEnumerator, HostDriveId};
+
+    let id = HostDriveId::new(drive);
+    let info = HostDrives::get_drive_info(&id).ok();
+    let sector_size = info.as_ref().and_then(|i| i.sector_size).unwrap_or(512);
+    let reader = HostDrives::open_drive(&id)?;
+    let mut disk = Disk::with_sector_size(reader, sector_size)?;
+    let sector = disk.sector_size();
+
+    match disk.layout().clone() {
+        DiskLayout::Gpt { header } => {
+            println!("GPT disk (sector size {sector})");
+            println!("{:>4}  {:<26} {:>12}  FILESYSTEM", "#", "TYPE", "SIZE");
+            let count = usize::try_from(header.num_partition_entries.get()).unwrap_or(usize::MAX);
+            let mut ordinal = 0;
+            for i in 0..count {
+                let Ok(entry) = disk.gpt_partition(i) else {
+                    continue;
+                };
+                if entry.is_empty() {
+                    continue;
+                }
+                let offset = entry.start_offset(sector);
+                let size = entry.size_bytes(sector);
+                let detected = disk.detect_boot_sector_at(offset).ok();
+                println!(
+                    "{ordinal:>4}  {:<26} {:>12}  {}",
+                    entry.type_name().unwrap_or("Unknown"),
+                    format_size(size),
+                    detected.map_or_else(|| "unreadable".to_string(), |d| format!("{d:?}")),
+                );
+                ordinal += 1;
+            }
+        }
+        DiskLayout::Mbr { .. } => {
+            println!("MBR disk (sector size {sector})");
+            println!("{:>4}  {:<10} {:>12}  FILESYSTEM", "#", "TYPE", "SIZE");
+            let extents: Vec<(u8, u64, u64)> = disk
+                .mbr_partitions()
+                .map(|e| {
+                    (
+                        e.partition_type,
+                        e.start_offset(sector),
+                        e.size_bytes(sector),
+                    )
+                })
+                .collect();
+            for (i, (ptype, offset, size)) in extents.iter().enumerate() {
+                let detected = disk.detect_boot_sector_at(*offset).ok();
+                println!(
+                    "{i:>4}  0x{ptype:02X}       {:>12}  {}",
+                    format_size(*size),
+                    detected.map_or_else(|| "unreadable".to_string(), |d| format!("{d:?}")),
+                );
+            }
+        }
+        DiskLayout::Bare(fs_type) => {
+            println!("No partition table; whole disk is {fs_type:?}");
+        }
+        DiskLayout::Unknown => {
+            println!("Unrecognized disk layout.");
+        }
+    }
+    Ok(())
+}
+
+/// Mount a partition from a physical drive.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn handle_mount_device(
+    drive: &str,
+    partition: usize,
+    mountpoint: &str,
+    volname: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+    use fsmnt::device::{DriverRegistry, HostDriveEnumerator, HostDriveId};
+
+    let id = HostDriveId::new(drive);
+
+    // No filesystem drivers are compiled into the standalone CLI; the
+    // registry is the plug-in point for library consumers.
+    let drivers = DriverRegistry::new();
+
+    let opened =
+        fsmnt::open_device_partition::<HostDrives>(&id, partition, &drivers).map_err(|e| {
+            format!(
+                "{e}\nnote: the standalone fsmnt CLI includes no filesystem parsers; \
+                 embed fsmnt as a library and register FilesystemDriver adapters \
+                 in a DriverRegistry to mount raw partitions"
+            )
+        })?;
+
+    ensure_unix_mountpoint(mountpoint)?;
+
+    let volname = volname.map_or_else(
+        || {
+            HostDrives::get_drive_info(&id)
+                .ok()
+                .and_then(|i| i.model)
+                .unwrap_or_else(|| drive.to_string())
+        },
+        ToString::to_string,
+    );
+
+    block_on_mount(
+        opened.filesystem,
+        mountpoint,
+        fs_label(opened.detected),
+        &volname,
+        fs_label(opened.detected),
+        opened.size_bytes,
+    )
 }

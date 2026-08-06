@@ -1,0 +1,15 @@
+[package]
+name = "fsmnt-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

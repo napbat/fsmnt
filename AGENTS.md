@@ -5,11 +5,34 @@ rules are enforced by tooling — do not work around them.
 
 ## Project
 
-This repository is a Cargo workspace. Its root package `fsmnt` is a Rust 2024
-crate that ships both a library (`src/lib.rs`) and a CLI binary
-(`src/main.rs`). All functionality belongs in the library; keep `main.rs` a
-thin wrapper over it. The Rust toolchain (latest stable) and `prek` are
-managed by [mise](https://mise.jdx.dev/) via `mise.toml`. Git hooks are
+This repository is a Cargo workspace implementing a cross-platform read-only
+virtual-mount system (ported from tracium's `fs-mount` stack). The root
+package `fsmnt` is the umbrella: a library (`src/lib.rs`) re-exporting the
+member crates plus the platform dispatch, and a CLI binary (`src/main.rs`)
+kept as a thin wrapper over it. Member crates under `crates/`:
+
+- `fsmnt-core` — `TargetFilesystem` trait, entry/metadata types,
+  `DirFilesystem` host-directory backend, listing filters. Platform-neutral.
+- `fsmnt-device` — block-device abstraction: `HostDriveEnumerator` trait,
+  GPT/MBR parsing (`Disk`), `PartitionReader`, boot-sector detection, and
+  the `FilesystemDriver`/`DriverRegistry` plug-in point for filesystem
+  parsers. fsmnt ships **no** parsers; consumers register drivers.
+- `fsmnt-device-windows` / `-linux` / `-macos` — per-OS drive enumeration
+  and raw opening.
+- `fsmnt-fuse` / `fsmnt-dokan` — the mount backends (Unix FUSE / Windows
+  Dokan).
+- `crates/formats/` — parent directory (not a crate) for filesystem-format
+  parser crates (NTFS, FAT, ext, …); members via the `crates/formats/*`
+  glob. Each parser implements `TargetFilesystem` and plugs into device
+  mounting through a `FilesystemDriver` adapter.
+
+Platform-specific crates must self-gate: their dependencies live under
+`[target.'cfg(...)'.dependencies]` and their modules behind `#[cfg(...)]`,
+so they compile to empty libraries on other targets and workspace-wide
+builds succeed on every OS.
+
+The Rust toolchain (latest stable) and `prek` are managed by
+[mise](https://mise.jdx.dev/) via `mise.toml`. Git hooks are
 managed by [prek](https://github.com/j178/prek) via `.pre-commit-config.yaml`.
 
 ## Setup
@@ -62,15 +85,16 @@ Follow the [Cargo project layout](https://doc.rust-lang.org/cargo/guide/project-
 
 ```
 .
-├── Cargo.toml
+├── Cargo.toml         # workspace root + fsmnt umbrella package
 ├── Cargo.lock
-├── src/
-│   ├── main.rs        # default binary entry point
-│   ├── lib.rs         # library root — all functionality lives here
-│   └── bin/           # additional binaries
-├── benches/           # benchmarks
-├── examples/          # examples
-└── tests/             # integration tests
+├── src/               # umbrella library (lib.rs) + CLI (main.rs)
+└── crates/
+    └── <name>/        # member crate, each following the standard layout:
+        ├── Cargo.toml
+        ├── src/       #   lib.rs (+ modules)
+        ├── benches/   #   benchmarks
+        ├── examples/  #   examples
+        └── tests/     #   integration tests
 ```
 
 - All source code lives under `src/`. Integration tests go in `tests/`,
