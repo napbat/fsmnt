@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_helpers::*;
 use alloc::vec;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 #[test]
 fn drive_select_accessor() {

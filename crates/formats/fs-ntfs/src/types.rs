@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn test_vcn_offset_synthetic_exact() {
         let image = synthetic_ntfs_image();
-        let mut cursor = std::io::Cursor::new(image);
+        let mut cursor = fsmnt_testkit::Cursor::new(image);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
         assert_eq!(ntfs.cluster_size(), 4096);
 
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn test_lcn_position_synthetic_exact() {
         let image = synthetic_ntfs_image();
-        let mut cursor = std::io::Cursor::new(image);
+        let mut cursor = fsmnt_testkit::Cursor::new(image);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
 
         // LCN 5 * 4096 = 20480.

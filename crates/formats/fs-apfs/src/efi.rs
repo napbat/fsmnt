@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use crate::object::OBJ_PHYSICAL;
     use crate::types::Paddr;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

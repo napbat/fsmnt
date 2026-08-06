@@ -686,7 +686,7 @@ mod tests {
 
     // --- Multi-device reader ----------------------------------------------
 
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BS: u32 = 4096;
 

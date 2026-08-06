@@ -89,6 +89,9 @@ impl fmt::Display for IoError {
     }
 }
 
+#[cfg(any(feature = "std", test))]
+impl std::error::Error for IoError {}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;

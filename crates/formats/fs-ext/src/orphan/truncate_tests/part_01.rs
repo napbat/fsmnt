@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 use super::*;
 
@@ -35,13 +35,13 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-fn load_dirty_fixture(name: &str) -> Option<(Ext, std::io::Cursor<alloc::vec::Vec<u8>>)> {
+fn load_dirty_fixture(name: &str) -> Option<(Ext, fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>)> {
     let bytes = std::fs::read(fixture_path(name)).ok()?;
-    let cursor = std::io::Cursor::new(bytes);
+    let cursor = fsmnt_testkit::Cursor::new(bytes);
     // We need two cursors: one for open_lenient, one for subsequent ops.
     // Reload so we can pass the same cursor to open_lenient and then use it.
     let bytes2 = std::fs::read(fixture_path(name)).ok()?;
-    let mut cursor2 = std::io::Cursor::new(bytes2);
+    let mut cursor2 = fsmnt_testkit::Cursor::new(bytes2);
     let ext = Ext::open_lenient(&mut cursor2).expect("open_lenient dirty fixture");
     // Rewind so callers start from the beginning.
     cursor2.set_position(0);
@@ -51,7 +51,7 @@ fn load_dirty_fixture(name: &str) -> Option<(Ext, std::io::Cursor<alloc::vec::Ve
 
 fn read_sb_block(
     ext: &Ext,
-    cursor: &mut std::io::Cursor<alloc::vec::Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>,
 ) -> alloc::vec::Vec<u8> {
     use crate::io::SeekFrom;
     let sb_block: u64 = u64::from(ext.block_size() <= 1024);

@@ -104,12 +104,12 @@ fn external_journal_uuid_mismatch_is_rejected() {
     // be rejected.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
     let bytes = std::fs::read(path).expect("read ext4 fixture");
-    let mut fs = std::io::Cursor::new(bytes);
+    let mut fs = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut fs).expect("open ext4.img");
 
     let wrong_uuid = [0xAA; 16];
     let journal_buf = build_external_journal(ext.block_size(), wrong_uuid, 500, 0xCD);
-    let mut journal = std::io::Cursor::new(journal_buf);
+    let mut journal = fsmnt_testkit::Cursor::new(journal_buf);
 
     let err = JournalReplay::build_with_external_journal(&ext, &mut fs, &mut journal)
         .expect_err("UUID mismatch must be rejected");
@@ -129,14 +129,14 @@ fn external_journal_uuid_mismatch_is_rejected() {
 fn external_journal_replays_classic_transaction() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
     let bytes = std::fs::read(path).expect("read ext4 fixture");
-    let mut fs = std::io::Cursor::new(bytes);
+    let mut fs = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut fs).expect("open ext4.img");
     // ext4.img has an internal journal, so s_journal_uuid is zero;
     // the synthetic external journal carries the same zero UUID.
     let target = 500u32;
     let journal_buf =
         build_external_journal(ext.block_size(), ext.journal_uuid(), target, 0xCD);
-    let mut journal = std::io::Cursor::new(journal_buf);
+    let mut journal = fsmnt_testkit::Cursor::new(journal_buf);
 
     let jr = JournalReplay::build_with_external_journal(&ext, &mut fs, &mut journal)
         .expect("external journal replay");
@@ -181,12 +181,12 @@ fn open_with_external_journal_gates_journal_dev_flag() {
     bytes[incompat_off..incompat_off + 4].copy_from_slice(&incompat.to_le_bytes());
 
     // Single-reader paths reject.
-    let mut fs = std::io::Cursor::new(bytes.clone());
+    let mut fs = fsmnt_testkit::Cursor::new(bytes.clone());
     assert!(matches!(
         crate::Ext::open_lenient(&mut fs),
         Err(crate::error::ExtError::UnsupportedJournalDevice),
     ));
-    let mut fs = std::io::Cursor::new(bytes.clone());
+    let mut fs = fsmnt_testkit::Cursor::new(bytes.clone());
     assert!(matches!(
         crate::Ext::new(&mut fs),
         Err(crate::error::ExtError::UnsupportedJournalDevice),
@@ -196,8 +196,8 @@ fn open_with_external_journal_gates_journal_dev_flag() {
     // external journal (zero UUID matches the untouched s_journal_uuid).
     let block_size = 4096u32;
     let journal_buf = build_external_journal(block_size, [0u8; 16], 500, 0xCD);
-    let mut fs = std::io::Cursor::new(bytes);
-    let mut journal = std::io::Cursor::new(journal_buf);
+    let mut fs = fsmnt_testkit::Cursor::new(bytes);
+    let mut journal = fsmnt_testkit::Cursor::new(journal_buf);
     let ext = crate::Ext::open_with_external_journal(&mut fs, &mut journal)
         .expect("open_with_external_journal must accept INCOMPAT_JOURNAL_DEV");
     assert!(ext.uses_external_journal());
@@ -207,7 +207,7 @@ fn open_with_external_journal_gates_journal_dev_flag() {
 fn external_journal_with_fast_commit_is_rejected() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
     let bytes = std::fs::read(path).expect("read ext4 fixture");
-    let mut fs = std::io::Cursor::new(bytes);
+    let mut fs = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut fs).expect("open ext4.img");
 
     let mut journal_buf =
@@ -219,7 +219,7 @@ fn external_journal_with_fast_commit_is_rejected() {
         usize::try_from(crate::journal::source::external_journal_base_block(ext.block_size())).expect("the test fixture value fits in usize") * bs;
     let fc_bit = 0x0000_0020u32;
     journal_buf[sb_off + 0x28..sb_off + 0x2C].copy_from_slice(&fc_bit.to_be_bytes());
-    let mut journal = std::io::Cursor::new(journal_buf);
+    let mut journal = fsmnt_testkit::Cursor::new(journal_buf);
 
     let err = JournalReplay::build_with_external_journal(&ext, &mut fs, &mut journal)
         .expect_err("external journal + fast-commit must be rejected");

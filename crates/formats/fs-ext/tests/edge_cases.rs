@@ -7,7 +7,7 @@ use fs_common::io::FsReadSeek;
 #[test]
 fn corrupted_superblock_rejects_cleanly() {
     let data = vec![0u8; 4096];
-    let mut fs = std::io::Cursor::new(data);
+    let mut fs = fsmnt_testkit::Cursor::new(data);
     match fs_ext::Ext::new(&mut fs) {
         Err(fs_ext::ExtError::InvalidMagic { .. } | fs_ext::ExtError::UnexpectedEof { .. }) => {}
         other => panic!("expected clean rejection, got {other:?}"),
@@ -19,7 +19,7 @@ fn reading_at_eof_returns_zero_bytes() {
     let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, 20).unwrap(); // hello.txt, 17 bytes
     let mut file = inode.open_file().unwrap();
-    file.seek(&mut fs, std::io::SeekFrom::End(0)).unwrap();
+    file.seek(&mut fs, fs_ext::io::SeekFrom::End(0)).unwrap();
     let mut buf = [0u8; 10];
     let n = file.read(&mut fs, &mut buf).unwrap();
     assert_eq!(n, 0, "reading at EOF should return 0 bytes");

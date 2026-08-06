@@ -6,7 +6,7 @@
 //! verification. Journal and orphan replay produce overlays rather than
 //! mutating the source image.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Upstream gated `OnceCell::get_or_try_init` behind
 // `#![feature(once_cell_try)]`. fsmnt builds on stable, so the gate is

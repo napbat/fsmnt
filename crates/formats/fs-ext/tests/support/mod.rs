@@ -1,6 +1,6 @@
 //! Crate-specific helpers shared by fs-ext integration-test targets.
 
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 #[must_use]
 pub(crate) fn load_image(name: &str) -> Cursor<Vec<u8>> {

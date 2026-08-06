@@ -2,8 +2,7 @@
 
 mod support;
 
-use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom};
-
+use fs_ext::io::{Read as _, Seek as _, SeekFrom};
 use fs_ext::{Ext, JournalReplay, OrphanReplay, OverlayReader};
 
 fn fixture_available(name: &str) -> bool {

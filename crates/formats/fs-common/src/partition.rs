@@ -14,6 +14,8 @@
 //! - LBA 1: GPT Header
 //! - LBA 2-33: Partition entries (typically 128 entries × 128 bytes)
 
+use alloc::{format, string::String, vec::Vec};
+
 use zerocopy::byteorder::LittleEndian;
 use zerocopy::{FromBytes, Immutable, KnownLayout, U16, U32, U64, Unaligned};
 
@@ -221,7 +223,6 @@ impl GptPartitionEntry {
     }
 
     /// Get partition name as string (UTF-16LE to String)
-    #[cfg(feature = "std")]
     #[must_use]
     pub fn name_string(&self) -> String {
         let u16_chars: Vec<u16> = self
@@ -235,7 +236,6 @@ impl GptPartitionEntry {
 
     /// Format the type GUID as a standard UUID string
     /// Format: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-    #[cfg(feature = "std")]
     #[must_use]
     pub fn type_guid_string(&self) -> String {
         // GPT GUIDs are stored in mixed-endian format:
@@ -263,7 +263,6 @@ impl GptPartitionEntry {
     }
 
     /// Format the unique partition GUID as a standard UUID string
-    #[cfg(feature = "std")]
     #[must_use]
     pub fn partition_guid_string(&self) -> String {
         format!(

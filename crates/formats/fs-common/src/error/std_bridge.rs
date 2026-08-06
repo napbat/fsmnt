@@ -1,3 +1,5 @@
+use alloc::format;
+
 use crate::error::{ErrorKind, FsError, IoError};
 
 /// Lossy conversion from a filesystem error to [`std::io::Error`].

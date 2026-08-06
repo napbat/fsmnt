@@ -488,7 +488,7 @@ mod tests {
             &data,
             NtfsPosition::new(0x20000),
         ));
-        let mut fs = std::io::Cursor::new(Vec::<u8>::new());
+        let mut fs = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
         let record = NtfsIndexRecord::new(&mut fs, value, 2048).unwrap();
         assert_eq!(record.index_allocated_size(), 1024);
 

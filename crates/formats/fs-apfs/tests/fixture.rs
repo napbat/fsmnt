@@ -7,7 +7,7 @@
 //! builds and passes `cargo test`; CI gains the coverage once the fixtures
 //! are generated.
 
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 /// Loads a fixture image from `testdata/`, or returns `None` (with a note)
 /// when it has not been generated.

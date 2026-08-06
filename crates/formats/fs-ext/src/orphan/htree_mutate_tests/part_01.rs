@@ -8,7 +8,7 @@ const HTREE_DIR: u32 = 21;
 /// Build a `(Ext, image_bytes)` pair from the htree fixture.
 fn fixture() -> (Ext, Vec<u8>) {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes.clone());
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     (ext, bytes)
 }
@@ -44,7 +44,7 @@ fn apply_delta(
 /// `len` is used to force a leaf split; a short `len` to land in a
 /// leaf with room.
 fn name_for_leaf(ext: &Ext, image: &[u8], want_index: usize, len: usize) -> Vec<u8> {
-    let mut cursor = std::io::Cursor::new(image.to_vec());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.to_vec());
     let dir = ext.inode(&mut cursor, HTREE_DIR).expect("htree inode");
     let i_block = dir.i_block();
     let root_pblk = crate::extent::resolve_extent(
@@ -81,7 +81,7 @@ fn name_for_leaf(ext: &Ext, image: &[u8], want_index: usize, len: usize) -> Vec<
 /// `want_index` of the original `dx_root`. Inserting them in order
 /// fills the target leaf and forces a split.
 fn names_for_leaf(ext: &Ext, image: &[u8], want_index: usize, n: usize) -> Vec<Vec<u8>> {
-    let mut cursor = std::io::Cursor::new(image.to_vec());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.to_vec());
     let dir = ext.inode(&mut cursor, HTREE_DIR).expect("htree inode");
     let i_block = dir.i_block();
     let root_pblk = crate::extent::resolve_extent(
@@ -124,7 +124,7 @@ fn names_for_leaf(ext: &Ext, image: &[u8], want_index: usize, n: usize) -> Vec<V
 /// `/htree_dir`, and that every dx node and dir leaf checksum is
 /// valid. `expect` is `Some(inode)` when the name must be present.
 fn assert_consistent(image: &[u8], name: &[u8], expect: Option<u32>) {
-    let mut cursor = std::io::Cursor::new(image.to_vec());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.to_vec());
     let ext = Ext::open_lenient(&mut cursor).expect("re-open image");
     let mut dir = ext.directory_at(HTREE_DIR);
     let htree = dir.lookup(&mut cursor, name);
@@ -149,7 +149,7 @@ fn assert_consistent(image: &[u8], name: &[u8], expect: Option<u32>) {
 /// Sequential directory scan: returns the inode for `name`, or `None`.
 fn sequential_find(
     ext: &Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     name: &[u8],
 ) -> Option<u32> {
     let mut dir = ext.directory_at(HTREE_DIR);
@@ -165,7 +165,7 @@ fn sequential_find(
 /// Walk every directory block of `/htree_dir`: `dx_root/dx_node` blocks
 /// must pass `verify_dx_*`, leaf blocks must pass `verify_dir_block`.
 fn assert_dx_and_leaf_checksums(ext: &Ext, image: &[u8]) {
-    let mut cursor = std::io::Cursor::new(image.to_vec());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.to_vec());
     let dir = ext.inode(&mut cursor, HTREE_DIR).expect("htree inode");
     let seed = ext.checksum_seed().expect("metadata_csum fixture");
     let generation = dir.generation();
@@ -213,9 +213,9 @@ fn assert_dx_and_leaf_checksums(ext: &Ext, image: &[u8]) {
 /// post-replay image bytes.
 fn run_surgery<F>(ext: &Ext, image: &[u8], body: F) -> Vec<u8>
 where
-    F: FnOnce(&mut HtreeSurgeon<'_, '_, std::io::Cursor<Vec<u8>>>) -> DirReplayOutcome,
+    F: FnOnce(&mut HtreeSurgeon<'_, '_, fsmnt_testkit::Cursor<Vec<u8>>>) -> DirReplayOutcome,
 {
-    let mut cursor = std::io::Cursor::new(image.to_vec());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.to_vec());
     let mut mutator = Mutator::new(ext, &sb_host_block(ext, image));
     let outcome = {
         let mut surgeon = HtreeSurgeon::new(ext, &mut cursor, &mut mutator);
@@ -240,7 +240,7 @@ fn creat_into_leaf_with_room_inserts_without_dx_change() {
 
     assert_consistent(&after, &name, Some(child));
     // dx_root count unchanged: leaf had room, no split.
-    let mut cursor = std::io::Cursor::new(after.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(after.clone());
     let reopened = Ext::open_lenient(&mut cursor).expect("reopen");
     assert!(reopened.has_dir_index());
 }
@@ -279,7 +279,7 @@ fn add_entry_skips_unsupported_htree_variant_without_aborting() {
     flags |= InodeFlags::CASEFOLD_FL.bits();
     image[off..off + 4].copy_from_slice(&flags.to_le_bytes());
 
-    let mut cursor = std::io::Cursor::new(image.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.clone());
     let mut mutator = Mutator::new(&ext, &sb_host_block(&ext, &image));
     let outcome = {
         let mut surgeon = HtreeSurgeon::new(&ext, &mut cursor, &mut mutator);
@@ -345,7 +345,7 @@ fn creat_forcing_leaf_split_redistributes_and_updates_dx() {
 
     // The directory grew by one logical block and the dx_root gained
     // a dx_entry (count 4 -> 5).
-    let mut cursor = std::io::Cursor::new(after.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(after.clone());
     let reopened = Ext::open_lenient(&mut cursor).expect("reopen");
     let dir = reopened.inode(&mut cursor, HTREE_DIR).expect("inode");
     assert_eq!(dir.size(), 6 * u64::from(ext.block_size()), "i_size grew");
@@ -383,7 +383,7 @@ fn split_keeps_every_preexisting_name_reachable() {
         last
     });
     // The split moved entries into a freshly appended block.
-    let mut cursor = std::io::Cursor::new(after.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(after.clone());
     let reopened = Ext::open_lenient(&mut cursor).expect("reopen");
     assert_eq!(
         reopened.inode(&mut cursor, HTREE_DIR).unwrap().size(),
@@ -434,7 +434,7 @@ fn unlink_from_htree_parent_removes_entry() {
 #[test]
 fn unlink_missing_name_reports_target_missing() {
     let (ext, image) = fixture();
-    let mut cursor = std::io::Cursor::new(image.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.clone());
     let mut mutator = Mutator::new(&ext, &sb_host_block(&ext, &image));
     let outcome = {
         let mut surgeon = HtreeSurgeon::new(&ext, &mut cursor, &mut mutator);
@@ -450,7 +450,7 @@ fn unlink_emptying_leaf_prunes_dx_entry() {
     // The fourth leaf (dx_entry 3) holds only 8 entries; remove all of
     // them so the leaf empties and its dx_entry is pruned.
     let (ext, image) = fixture();
-    let mut cursor = std::io::Cursor::new(image.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.clone());
     let names = leaf_three_entry_names(&ext, &image);
     assert!(!names.is_empty(), "fourth leaf must hold entries");
 
@@ -469,7 +469,7 @@ fn unlink_emptying_leaf_prunes_dx_entry() {
 
     // dx_root lost the now-empty leaf's dx_entry (count 4 -> 3).
     let bs = ext.block_size() as usize;
-    let mut rc = std::io::Cursor::new(after.clone());
+    let mut rc = fsmnt_testkit::Cursor::new(after.clone());
     let reopened = Ext::open_lenient(&mut rc).expect("reopen");
     let dir = reopened.inode(&mut rc, HTREE_DIR).expect("inode");
     let i_block = dir.i_block();
@@ -493,7 +493,7 @@ fn unlink_emptying_leaf_prunes_dx_entry() {
 /// Collect `(inode, name)` for every entry in the fourth dx leaf
 /// (`dx_entry` index 3) of `/htree_dir`.
 fn leaf_three_entry_names(ext: &Ext, image: &[u8]) -> Vec<(u32, Vec<u8>)> {
-    let mut cursor = std::io::Cursor::new(image.to_vec());
+    let mut cursor = fsmnt_testkit::Cursor::new(image.to_vec());
     let dir = ext.inode(&mut cursor, HTREE_DIR).expect("inode");
     let i_block = dir.i_block();
     let bs = ext.block_size() as usize;

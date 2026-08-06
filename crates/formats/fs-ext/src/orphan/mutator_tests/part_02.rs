@@ -1,7 +1,7 @@
 #[test]
 fn patch_orphan_file_block_records_file_inum_and_generation() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -30,7 +30,7 @@ fn patch_orphan_file_block_records_file_inum_and_generation() {
 #[test]
 fn clear_inode_bitmap_bit_tallies_decrement_and_seeds_bitmap_scratch() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -53,7 +53,7 @@ fn clear_inode_bitmap_bit_tallies_decrement_and_seeds_bitmap_scratch() {
 #[test]
 fn clear_inode_bitmap_bit_tallies_dir_when_was_dir_true() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -69,7 +69,7 @@ fn clear_inode_bitmap_bit_tallies_dir_when_was_dir_true() {
 #[test]
 fn clear_inode_bitmap_bit_is_idempotent_when_bit_already_clear() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -94,7 +94,7 @@ fn clear_inode_bitmap_bit_is_idempotent_when_bit_already_clear() {
 #[test]
 fn free_allocations_non_bigalloc_clears_bits_and_tallies() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     assert!(!ext.has_bigalloc(), "test assumes non-bigalloc fixture");
 
@@ -127,7 +127,7 @@ fn free_allocations_non_bigalloc_clears_bits_and_tallies() {
 #[test]
 fn free_allocations_non_bigalloc_dedupes_and_is_idempotent() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -160,7 +160,7 @@ fn free_allocations_bigalloc_detects_logical_cluster_overlap() {
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(ext, &sb_host_block);
 
-    let mut dummy_overlay = std::io::Cursor::new(alloc::vec![0u8; 1 << 20]);
+    let mut dummy_overlay = fsmnt_testkit::Cursor::new(alloc::vec![0u8; 1 << 20]);
 
     // Two Data runs: physical block 0 from logical cluster 0,
     // physical block 1 from logical cluster 100. Both blocks live in
@@ -209,7 +209,7 @@ fn free_allocations_bigalloc_same_logical_cluster_no_overlap() {
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(ext, &sb_host_block);
 
-    let mut dummy_overlay = std::io::Cursor::new(alloc::vec![0u8; 1 << 20]);
+    let mut dummy_overlay = fsmnt_testkit::Cursor::new(alloc::vec![0u8; 1 << 20]);
 
     let runs = [
         AllocationRun {
@@ -266,7 +266,7 @@ fn first_data_block_of_root<T: crate::io::Read + crate::io::Seek>(
 #[test]
 fn finalize_produces_delta_with_sb_host_override_when_sb_was_patched() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
 
     // Seed sb_host_scratch from the actual on-disk sb-host block (block 0 for 4 KiB fs).
@@ -295,7 +295,7 @@ fn finalize_produces_delta_with_sb_host_override_when_sb_was_patched() {
 #[test]
 fn finalize_preserves_sb_host_override_absent_when_no_sb_patches() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_bytes = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mutator = Mutator::new(&ext, &sb_bytes);
@@ -311,7 +311,7 @@ fn free_allocations_rejects_overflow_physical_start_plus_len() {
     let ext = Ext::dummy_for_test_bigalloc(1);
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(ext, &sb_host_block);
-    let mut dummy = std::io::Cursor::new(alloc::vec![0u8; 1 << 20]);
+    let mut dummy = fsmnt_testkit::Cursor::new(alloc::vec![0u8; 1 << 20]);
     let runs = [AllocationRun {
         physical_start: u64::MAX,
         block_len: 2,
@@ -328,7 +328,7 @@ fn free_allocations_rejects_overflow_physical_start_plus_len() {
 #[test]
 fn free_allocations_rejects_physical_block_at_blocks_count() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -387,7 +387,7 @@ fn mark_block_range_free_bigalloc_aligned_one_cluster_changes_one_unit() {
     let ext = synthetic_bigalloc_ext(1, 0, 16, false);
     let mut bytes = synthetic_overlay(&ext);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 0, 0, true);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -409,7 +409,7 @@ fn mark_block_range_free_bigalloc_mid_cluster_start_changes_two_units() {
     let mut bytes = synthetic_overlay(&ext);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 0, 0, true);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 0, 1, true);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -431,7 +431,7 @@ fn mark_block_range_allocated_inside_already_allocated_cluster_changes_zero() {
     let ext = synthetic_bigalloc_ext(1, 0, 16, false);
     let mut bytes = synthetic_overlay(&ext);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 0, 1, true);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -454,7 +454,7 @@ fn mark_block_range_bigalloc_count_direction_matches_alloc_vs_free() {
 
     let mut free_bytes = synthetic_overlay(&ext);
     set_synthetic_bitmap_bit(&mut free_bytes, &ext, 0, 0, true);
-    let mut free_cursor = std::io::Cursor::new(free_bytes);
+    let mut free_cursor = fsmnt_testkit::Cursor::new(free_bytes);
     let mut free_mutator = Mutator::new(&ext, &sb_host_block);
     assert_eq!(
         free_mutator
@@ -469,7 +469,7 @@ fn mark_block_range_bigalloc_count_direction_matches_alloc_vs_free() {
     );
 
     let alloc_bytes = synthetic_overlay(&ext);
-    let mut alloc_cursor = std::io::Cursor::new(alloc_bytes);
+    let mut alloc_cursor = fsmnt_testkit::Cursor::new(alloc_bytes);
     let mut alloc_mutator = Mutator::new(&ext, &sb_host_block);
     assert_eq!(
         alloc_mutator
@@ -490,7 +490,7 @@ fn mark_block_range_splits_bigalloc_range_across_group_boundary() {
     let mut bytes = synthetic_overlay(&ext);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 0, 3, true);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 1, 0, true);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -519,7 +519,7 @@ fn mark_block_range_finalize_recomputes_bitmap_and_group_descriptor_checksums() 
     let seed = ext.checksum_seed.expect("metadata checksum seed");
     let mut bytes = synthetic_overlay(&ext);
     set_synthetic_bitmap_bit(&mut bytes, &ext, 0, 0, true);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = alloc::vec![0u8; usize::try_from(ext.block_size()).expect("the test block size fits in usize")];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -552,7 +552,7 @@ fn mark_block_range_finalize_recomputes_bitmap_and_group_descriptor_checksums() 
 #[test]
 fn mark_block_range_free_clears_bitmap_bits_and_increments_gdp_count() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     assert!(!ext.has_bigalloc(), "test assumes non-bigalloc fixture");
 
@@ -598,7 +598,7 @@ fn mark_block_range_free_clears_bitmap_bits_and_increments_gdp_count() {
 #[test]
 fn mark_block_range_allocated_already_allocated_unit_changes_zero() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     assert!(!ext.has_bigalloc(), "test assumes non-bigalloc fixture");
 
@@ -704,11 +704,11 @@ fn ext_with_uninitialized_block_bitmap() -> Ext {
     }
 }
 
-fn stale_uninitialized_bitmap_cursor() -> std::io::Cursor<alloc::vec::Vec<u8>> {
+fn stale_uninitialized_bitmap_cursor() -> fsmnt_testkit::Cursor<alloc::vec::Vec<u8>> {
     let mut bytes = alloc::vec![0u8; 128 * 1024];
     bytes[2 * 1024 + 0x12..2 * 1024 + 0x14].copy_from_slice(&BLOCK_UNINIT.to_le_bytes());
     bytes[5 * 1024..6 * 1024].fill(0xFF);
-    std::io::Cursor::new(bytes)
+    fsmnt_testkit::Cursor::new(bytes)
 }
 
 #[test]

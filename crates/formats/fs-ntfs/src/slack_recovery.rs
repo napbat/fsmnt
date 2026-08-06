@@ -10,7 +10,7 @@
 //! ```no_run
 //! # use fs_ntfs::{Ntfs, NtfsAttribute, NtfsSlackEntryScanner, SlackRecoveryConfig};
 //! # use fs_ntfs::structured_values::NtfsIndexRoot;
-//! # let mut fs = std::io::Cursor::new(vec![]);
+//! # let mut fs = fsmnt_testkit::Cursor::new(vec![]);
 //! # let mut ntfs = Ntfs::new(&mut fs).unwrap();
 //! # let root_dir = ntfs.root_directory(&mut fs).unwrap();
 //! // Get INDEX_ROOT from the directory's attributes

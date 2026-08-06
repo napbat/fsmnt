@@ -408,7 +408,7 @@ mod tests {
     use super::*;
     use crate::btree::{BTN_DATA_OFFSET, BTREE_INFO_SIZE};
     use crate::object::OBJ_PHYSICAL;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

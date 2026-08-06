@@ -2,7 +2,7 @@ use super::*;
 use crate::attribute::NtfsAttributeType;
 use crate::data_run_map::DataRunMap;
 use crate::time::NTFS_TIMESTAMP_1997;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 const FRS: u32 = 1024; // file record size
 const CLUSTER: u32 = 512; // cluster size

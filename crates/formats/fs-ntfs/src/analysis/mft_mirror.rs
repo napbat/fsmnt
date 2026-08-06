@@ -260,10 +260,10 @@ mod tests {
 
     /// Places a record at byte offset 512 in a buffer, returning a cursor and
     /// the (non-zero) position to read it from.
-    fn record_at_offset(record: &[u8; synthetic::RECORD_SIZE]) -> std::io::Cursor<Vec<u8>> {
+    fn record_at_offset(record: &[u8; synthetic::RECORD_SIZE]) -> fsmnt_testkit::Cursor<Vec<u8>> {
         let mut buf = vec![0u8; 512 + synthetic::RECORD_SIZE];
         buf[512..512 + synthetic::RECORD_SIZE].copy_from_slice(record);
-        std::io::Cursor::new(buf)
+        fsmnt_testkit::Cursor::new(buf)
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
 
     /// Builds an image with a working $MFT (records 0-3) plus a $`MFTMirr`
     /// region at LCN 4 holding byte-identical copies of records 0-3.
-    fn synthetic_mirror_image() -> std::io::Cursor<Vec<u8>> {
+    fn synthetic_mirror_image() -> fsmnt_testkit::Cursor<Vec<u8>> {
         // Records 1-3 are simple in-use FILE records; record 0 is generated
         // as $MFT by mft_image. We need the mirror to hold the SAME pre-fixup
         // bytes as the primary, so we replicate them.
@@ -322,7 +322,7 @@ mod tests {
             let (a, b) = image.split_at_mut(dst);
             b[..synthetic::RECORD_SIZE].copy_from_slice(&a[src..src + synthetic::RECORD_SIZE]);
         }
-        std::io::Cursor::new(image)
+        fsmnt_testkit::Cursor::new(image)
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
         let corrupt = mirror_byte + synthetic::RECORD_SIZE + 100;
         image[corrupt] ^= 0xFF;
 
-        cursor = std::io::Cursor::new(image);
+        cursor = fsmnt_testkit::Cursor::new(image);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
         let result = validate_mft_mirror(&ntfs, &mut cursor).unwrap();
 
@@ -493,7 +493,7 @@ mod tests {
         let mut data = testfs1.into_inner();
 
         // Parse the intact filesystem first to learn positions.
-        let mut cursor = std::io::Cursor::new(&data[..]);
+        let mut cursor = fsmnt_testkit::Cursor::new(&data[..]);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
         let mirror_pos = usize::try_from(ntfs.mft_mirror_position().value().unwrap().get())
             .expect("test value fits usize");
@@ -503,7 +503,7 @@ mod tests {
         let corrupt_offset = mirror_pos + 40;
         data[corrupt_offset] ^= 0xFF;
 
-        let mut cursor = std::io::Cursor::new(&data[..]);
+        let mut cursor = fsmnt_testkit::Cursor::new(&data[..]);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
         let result = validate_mft_mirror(&ntfs, &mut cursor).unwrap();
 
@@ -539,7 +539,7 @@ mod tests {
         };
         let mut data = testfs1.into_inner();
 
-        let mut cursor = std::io::Cursor::new(&data[..]);
+        let mut cursor = fsmnt_testkit::Cursor::new(&data[..]);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
         let mirror_pos = usize::try_from(ntfs.mft_mirror_position().value().unwrap().get())
             .expect("test value fits usize");
@@ -550,7 +550,7 @@ mod tests {
         let sig_offset = mirror_pos + 2 * record_size;
         data[sig_offset..sig_offset + 4].copy_from_slice(b"BAAD");
 
-        let mut cursor = std::io::Cursor::new(&data[..]);
+        let mut cursor = fsmnt_testkit::Cursor::new(&data[..]);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
         let result = validate_mft_mirror(&ntfs, &mut cursor).unwrap();
 

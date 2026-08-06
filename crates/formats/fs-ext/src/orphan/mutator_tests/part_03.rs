@@ -1,7 +1,7 @@
 #[test]
 fn free_allocations_finalize_updates_superblock_free_count() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     assert!(!ext.has_bigalloc(), "test assumes non-bigalloc fixture");
 
@@ -408,7 +408,7 @@ fn block_class_group_descriptor_carries_desc_block_nr() {
 #[test]
 fn group_desc_slot_classical_unchanged() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host = alloc::vec![0u8; ext.block_size() as usize];
     let mutator = Mutator::new(&ext, &sb_host);
@@ -523,7 +523,7 @@ fn group_desc_slot_meta_bg_mixed() {
     let new_csum = crate::checksum::compute_superblock_csum(sb);
     bytes[1024 + 0x3FC..1024 + 0x400].copy_from_slice(&new_csum.to_le_bytes());
 
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::new(&mut cursor).expect("open mixed-mode patch");
     assert!(ext.is_meta_bg());
     assert_eq!(ext.gdt_layout.first_meta_bg(), 1);

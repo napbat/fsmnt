@@ -279,7 +279,7 @@ mod tests {
         );
 
         let image = synthetic::mft_image(&[r1, r2]);
-        let mut cursor = std::io::Cursor::new(image);
+        let mut cursor = fsmnt_testkit::Cursor::new(image);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
 
         let pmap = NtfsParentMap::build(&ntfs, &mut cursor).unwrap();

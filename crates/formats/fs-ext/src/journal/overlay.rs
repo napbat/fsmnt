@@ -161,7 +161,7 @@ mod tests {
             ..usize::try_from(probe_offset).expect("the test fixture value fits in usize") + 16]
             .to_vec();
 
-        let mut fs = std::io::Cursor::new(img);
+        let mut fs = fsmnt_testkit::Cursor::new(img);
         let mut overlay = OverlayReader::new(&mut fs, &replay);
         overlay
             .seek(SeekFrom::Start(probe_offset))
@@ -182,7 +182,7 @@ mod tests {
         let replay = make_replay(alloc::collections::BTreeMap::new(), u64::MAX, sb_content);
         assert_overlay_source(&replay);
 
-        let mut fs = std::io::Cursor::new(img);
+        let mut fs = fsmnt_testkit::Cursor::new(img);
         let _overlay = OverlayReader::new(&mut fs, &replay);
     }
 
@@ -204,7 +204,7 @@ mod tests {
         assert_ne!(&img[0..4], &expected[..]);
 
         let replay = make_replay(BTreeMap::new(), 0, sb_content);
-        let mut fs = std::io::Cursor::new(img);
+        let mut fs = fsmnt_testkit::Cursor::new(img);
         let mut overlay = OverlayReader::new(&mut fs, &replay);
         // Seek to byte 0 (start of sb-host block 0).
         overlay.seek(SeekFrom::Start(0)).expect("seek overlay");

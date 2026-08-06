@@ -6,8 +6,8 @@
 //! These tests verify that the parser works on a real filesystem
 //! created by real tools, not just hand-crafted byte arrays.
 
+use fsmnt_testkit::Cursor;
 use std::collections::BTreeSet;
-use std::io::Cursor;
 
 use fs_common::FsReadSeek;
 use fs_common::traverse::walk_dir;
@@ -297,7 +297,7 @@ fn seek_and_read_file() {
 
     // Seek to offset 7 ("FAT32!")
     value
-        .seek(&mut cursor, std::io::SeekFrom::Start(7))
+        .seek(&mut cursor, fs_common::io::SeekFrom::Start(7))
         .unwrap();
 
     let mut buf = [0u8; 6];
@@ -315,7 +315,9 @@ fn seek_from_end() {
     let mut value = file.data().unwrap();
 
     // "Hello, FAT32!" — last 6 bytes = "FAT32!"
-    value.seek(&mut cursor, std::io::SeekFrom::End(-6)).unwrap();
+    value
+        .seek(&mut cursor, fs_common::io::SeekFrom::End(-6))
+        .unwrap();
 
     let mut buf = [0u8; 6];
     let n = value.read(&mut cursor, &mut buf).unwrap();
@@ -338,7 +340,7 @@ fn seek_backward_and_reread() {
 
     // Seek back to start with SeekFrom::Current
     value
-        .seek(&mut cursor, std::io::SeekFrom::Current(-7))
+        .seek(&mut cursor, fs_common::io::SeekFrom::Current(-7))
         .unwrap();
 
     // Re-read — should get same data

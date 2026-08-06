@@ -276,7 +276,7 @@ mod tests {
     use crate::file::FatFile;
     use alloc::vec;
     use alloc::vec::Vec;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     /// Build a FAT16 image with a single file spanning 3 clusters
     /// (clusters 2 → 3 → 4) so multi-cluster traversal is exercised.

@@ -44,9 +44,9 @@ fn extent_len_encoding_boundaries_match_ext4_encoding() {
     ));
 }
 
-fn fixture_mutator() -> (&'static Ext, std::io::Cursor<Vec<u8>>, Mutator<'static>) {
+fn fixture_mutator() -> (&'static Ext, fsmnt_testkit::Cursor<Vec<u8>>, Mutator<'static>) {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let ext = Box::leak(Box::new(ext));
@@ -56,9 +56,9 @@ fn fixture_mutator() -> (&'static Ext, std::io::Cursor<Vec<u8>>, Mutator<'static
 
 fn fixture_mutator_with_first_data_block(
     first_data_block: u32,
-) -> (&'static Ext, std::io::Cursor<Vec<u8>>, Mutator<'static>) {
+) -> (&'static Ext, fsmnt_testkit::Cursor<Vec<u8>>, Mutator<'static>) {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let mut ext = Ext::new(&mut cursor).expect("open ext4.img");
     ext.first_data_block = first_data_block;
     let sb_host_block = read_sb_block(&ext, &mut cursor);
@@ -69,9 +69,9 @@ fn fixture_mutator_with_first_data_block(
 
 fn fixture_bigalloc_mutator(
     blocks_per_cluster: u32,
-) -> (&'static Ext, std::io::Cursor<Vec<u8>>, Mutator<'static>) {
+) -> (&'static Ext, fsmnt_testkit::Cursor<Vec<u8>>, Mutator<'static>) {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let mut ext = Ext::new(&mut cursor).expect("open ext4.img");
     ext.ro_compat
         .insert(crate::feature_flags::RoCompatFeatures::BIGALLOC);
@@ -241,8 +241,9 @@ fn stage_inode_size<T: crate::io::Read + crate::io::Seek>(
 ) {
     mutator
         .patch_inode_scratch(cursor, inum, |inode_bytes| {
-            inode_bytes[0x04..0x08].copy_from_slice(&(u32::try_from(size).expect("the test fixture value fits in u32")).to_le_bytes());
-            inode_bytes[0x6C..0x70].copy_from_slice(&((size >> 32) as u32).to_le_bytes());
+            let size_bytes = size.to_le_bytes();
+            inode_bytes[0x04..0x08].copy_from_slice(&size_bytes[..4]);
+            inode_bytes[0x6C..0x70].copy_from_slice(&size_bytes[4..]);
             Ok(())
         })
         .expect("stage inode size");
@@ -268,7 +269,7 @@ fn stage_extent_block<T: crate::io::Read + crate::io::Seek>(
 
 fn write_disk_block(
     ext: &Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     block: u64,
     content: &[u8],
 ) {

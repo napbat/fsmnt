@@ -166,7 +166,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use fs_common::traverse::walk_dir;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
     use zerocopy::FromBytes;
 
     /// Verify that the trait bounds required by `walk_dir` are

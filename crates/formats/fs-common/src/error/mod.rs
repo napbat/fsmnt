@@ -2,9 +2,9 @@ mod io;
 
 pub use io::{ErrorKind, IoError};
 
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", test))]
 mod std_bridge;
-#[cfg(feature = "std")]
+#[cfg(any(feature = "std", test))]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use std_bridge::IntoStdIoError;
 

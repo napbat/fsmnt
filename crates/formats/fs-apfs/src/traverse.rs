@@ -424,8 +424,8 @@ mod tests {
     use crate::object::OBJ_PHYSICAL;
     use crate::types::{Oid, Xid};
     use fs_common::traverse::walk_dir;
+    use fsmnt_testkit::Cursor;
     use std::collections::BTreeSet;
-    use std::io::Cursor;
 
     const BLK: usize = 4096;
 

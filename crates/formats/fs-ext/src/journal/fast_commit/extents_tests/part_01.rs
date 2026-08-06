@@ -4,9 +4,8 @@ use alloc::vec;
 
 use crate::error::ExtError;
 use crate::ext::Ext;
-use crate::io::SeekFrom;
+use crate::io::{Seek as _, SeekFrom};
 use crate::orphan::Mutator;
-use std::io::Seek as _;
 use std::io::Write as _;
 
 use super::{ExtentSurgeon, ExtentSurgeryOutcome, RawExtent};
@@ -622,7 +621,7 @@ fn add_range_noop_when_already_matches() {
 #[test]
 fn add_range_rejects_misaligned_pblk_under_bigalloc() {
     let ext = Ext::dummy_for_test_bigalloc(4);
-    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+    let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
     let sb_host_block = vec![0u8; ext.block_size() as usize].into_boxed_slice();
     let mut mutator = Mutator::new(ext, &sb_host_block);
     let mut surgeon = ExtentSurgeon::new(ext, &mut cursor, &mut mutator);

@@ -556,7 +556,7 @@ fn tree_block_phys() -> usize {
 #[test]
 fn clean_verity_file_reads_and_verifies() {
     let image = build_clean_image();
-    let mut fs = std::io::Cursor::new(image);
+    let mut fs = fsmnt_testkit::Cursor::new(image);
     let ext = Ext::new(&mut fs).expect("open synthesized verity image");
 
     let inode = ext.inode(&mut fs, VERITY_FILE_INO).expect("verity inode");
@@ -580,7 +580,7 @@ fn clean_verity_file_reads_and_verifies() {
 #[test]
 fn verity_descriptor_is_introspectable() {
     let image = build_clean_image();
-    let mut fs = std::io::Cursor::new(image);
+    let mut fs = fsmnt_testkit::Cursor::new(image);
     let ext = Ext::new(&mut fs).expect("open image");
     let inode = ext.inode(&mut fs, VERITY_FILE_INO).expect("verity inode");
 
@@ -605,7 +605,7 @@ fn tampered_data_block_returns_hash_mismatch() {
     // Flip a byte inside data block 1 (file offset 4096..8192).
     image[data_block_phys(1) + 10] ^= 0xFF;
 
-    let mut fs = std::io::Cursor::new(image);
+    let mut fs = fsmnt_testkit::Cursor::new(image);
     let ext = Ext::new(&mut fs).expect("open image");
     let inode = ext.inode(&mut fs, VERITY_FILE_INO).expect("verity inode");
     let mut file = inode.open_file().expect("open verity file");
@@ -632,7 +632,7 @@ fn tampered_merkle_tree_block_returns_hash_mismatch() {
     // Flip a byte in the (single-level) Merkle tree leaf block.
     image[tree_block_phys() + 5] ^= 0x01;
 
-    let mut fs = std::io::Cursor::new(image);
+    let mut fs = fsmnt_testkit::Cursor::new(image);
     let ext = Ext::new(&mut fs).expect("open image");
     let inode = ext.inode(&mut fs, VERITY_FILE_INO).expect("verity inode");
     let mut file = inode.open_file().expect("open verity file");
@@ -650,7 +650,7 @@ fn tampered_merkle_tree_block_returns_hash_mismatch() {
 #[test]
 fn non_verity_file_in_same_image_reads_normally() {
     let image = build_clean_image();
-    let mut fs = std::io::Cursor::new(image);
+    let mut fs = fsmnt_testkit::Cursor::new(image);
     let ext = Ext::new(&mut fs).expect("open image");
 
     let inode = ext.inode(&mut fs, PLAIN_FILE_INO).expect("plain inode");
@@ -673,7 +673,7 @@ fn encrypted_verity_inode_fails_closed() {
     image[off + 0x20..off + 0x24].copy_from_slice(&(flags | encrypt_fl).to_le_bytes());
     fix_inode_checksum(&mut image, off);
 
-    let mut fs = std::io::Cursor::new(image);
+    let mut fs = fsmnt_testkit::Cursor::new(image);
     let ext = Ext::new(&mut fs).expect("open image");
     let inode = ext.inode(&mut fs, VERITY_FILE_INO).expect("verity inode");
     match inode.open_file() {

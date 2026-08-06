@@ -106,7 +106,7 @@ fn test_fat_new_bitlocker_encrypted() {
     buf[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
     buf[0x0D] = 8;
 
-    let mut cursor = std::io::Cursor::new(&buf[..]);
+    let mut cursor = fsmnt_testkit::Cursor::new(&buf[..]);
     let err = Fat::new(&mut cursor).unwrap_err();
     let FatError::BitLockerEncrypted { oem_id } = err else {
         panic!("Expected BitLockerEncrypted, got {err}");
@@ -132,7 +132,7 @@ fn test_fat_new_bitlocker_display() {
 
 use alloc::vec;
 use alloc::vec::Vec;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 /// 1.44 MB floppy-style FAT12: 2880 sectors × 512 B, spc=1, 1 reserved
 /// sector, 2 FATs × 9 sectors, 224 root entries = 14 root sectors.

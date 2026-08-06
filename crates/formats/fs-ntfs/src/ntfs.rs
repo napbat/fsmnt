@@ -436,7 +436,7 @@ mod tests {
     ///   0x28 `total_sectors` (u64), 0x30 `mft_lcn` (u64), 0x38 `mft_mirror_lcn` (u64)
     ///   0x40 `clusters_per_mft_record` (i8), 0x48 `volume_serial_number` (u64)
     ///   0x1FE boot signature (0xAA55)
-    fn build_ntfs_fs() -> std::io::Cursor<std::vec::Vec<u8>> {
+    fn build_ntfs_fs() -> fsmnt_testkit::Cursor<std::vec::Vec<u8>> {
         let mut buf = std::vec![0u8; 512];
         buf[0..3].copy_from_slice(&[0xEB, 0x52, 0x90]);
         buf[3..11].copy_from_slice(b"NTFS    ");
@@ -449,7 +449,7 @@ mod tests {
         buf[0x48..0x50].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes()); // serial
         buf[510] = 0x55;
         buf[511] = 0xAA;
-        std::io::Cursor::new(buf)
+        fsmnt_testkit::Cursor::new(buf)
     }
 
     #[test]

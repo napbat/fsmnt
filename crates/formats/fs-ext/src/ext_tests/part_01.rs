@@ -7,7 +7,7 @@ fn size_reports_blocks_times_block_size_on_clean_ext4() {
         eprintln!("skipping: ext4.img fixture not generated");
         return;
     };
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let expected = u64::from(ext.block_size()) * ext.blocks_count;
     assert_eq!(ext.size(), expected);
@@ -37,7 +37,7 @@ fn free_blocks_is_positive_and_less_than_total_on_clean_ext4() {
         eprintln!("skipping: ext4.img fixture not generated");
         return;
     };
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let free = ext.free_blocks();
     assert!(free > 0, "clean fixture must have some free blocks");
@@ -52,7 +52,7 @@ fn free_bytes_equals_free_blocks_times_block_size_on_clean_ext4() {
         eprintln!("skipping: ext4.img fixture not generated");
         return;
     };
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     assert_eq!(
         ext.free_bytes(),
@@ -81,7 +81,7 @@ fn surfaces_encrypt_pw_salt_and_algos_zero_on_unset() {
         eprintln!("skipping: ext4.img fixture not generated");
         return;
     };
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     // Plain ext4.img has no fscrypt — both fields must be zero.
     assert_eq!(ext.s_encrypt_pw_salt(), [0u8; 16]);
@@ -95,7 +95,7 @@ fn classical_ext4_image_reports_no_meta_bg() {
         eprintln!("skipping: ext4.img fixture not generated");
         return;
     };
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     assert!(!ext.is_meta_bg(), "ext4.img must not have META_BG");
     assert_eq!(
@@ -129,7 +129,7 @@ fn full_mixed_mode_via_first_meta_bg_patch() {
     let new_csum = crate::checksum::compute_superblock_csum(sb);
     bytes[1024 + 0x3FC..1024 + 0x400].copy_from_slice(&new_csum.to_le_bytes());
 
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open mixed-mode patch");
     assert!(ext.is_meta_bg());
     assert_eq!(ext.gdt_layout.first_meta_bg(), 1);

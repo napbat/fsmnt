@@ -18,7 +18,7 @@
 //! ```no_run
 //! # use fs_common::iter::FsTryIterator;
 //! # use fs_ntfs::Ntfs;
-//! # let mut fs = std::io::Cursor::new(vec![]);
+//! # let mut fs = fsmnt_testkit::Cursor::new(vec![]);
 //! let mut ntfs = Ntfs::new(&mut fs).unwrap();
 //! let root_dir = ntfs.root_directory(&mut fs).unwrap();
 //! let index = root_dir.directory_index(&mut fs).unwrap();
@@ -32,7 +32,7 @@
 //!
 //! Check out the [docs](https://docs.rs/ntfs), the tests, and the supplied [`ntfs-shell`](https://github.com/ColinFinck/ntfs/tree/master/examples/ntfs-shell) application for more examples on how to use the `ntfs` library.
 //!
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 // Upstream gated `core::hint::unlikely` behind `#![feature(likely_unlikely)]`.

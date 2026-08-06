@@ -355,7 +355,7 @@ impl NtfsAttributeListEntry {
 mod tests {
     use super::*;
     use fs_common::iter::FsTryIterator;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     /// Build a minimal valid resident attribute list containing one entry.
     /// The entry describes a $`STANDARD_INFORMATION` (type 0x10) attribute with no name.

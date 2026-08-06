@@ -87,7 +87,7 @@ fn collect_unlinked_host_runs_emits_correct_logical_clusters_per_extent() {
         (0, 1, 0, 100), // ee_block=0, len=1, phys=100 -> logical cluster 0
         (8, 1, 0, 101), // ee_block=8, len=1, phys=101 -> logical cluster 2
     ]);
-    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+    let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
     let mut tagged: Vec<ExtentAllocation> = Vec::new();
     crate::extent::collect_tagged_extent_blocks_into(ext, &mut cursor, 1, 0, &i_block, &mut tagged)
@@ -240,7 +240,7 @@ fn indirect_map_test_ext(blocks_count: u64, block_size: u32) -> &'static crate::
 #[test]
 fn collect_unlinked_host_runs_enumerates_indirect_block_map_allocations() {
     use crate::orphan::mutator::AllocationKind;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     let blocks_count = 200_000u64;
     let block_size = 4096u32;
@@ -314,7 +314,7 @@ fn collect_unlinked_host_runs_enumerates_indirect_block_map_allocations() {
 /// `bg_free_blocks_count` in the group descriptor.
 #[test]
 fn invariant_5_per_group_bitmap_matches_free_blocks_counter() {
-    use std::io::{Read as _, Seek as _, SeekFrom};
+    use crate::io::{Read as _, Seek as _, SeekFrom};
 
     let happy_path = [
         "ext4-dirty-orphan-truncate-unlink.img",
@@ -763,7 +763,7 @@ fn collect_tagged_extent_blocks_into_handles_uninitialized_extent() {
     let ext = crate::ext::Ext::dummy_for_test_bigalloc(1);
     // ee_len = 32770 -> uninitialized, actual len = 32770 - 32768 = 2
     let i_block = make_leaf_iblock_for_replay(&[(4, 32770, 0, 200)]);
-    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+    let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
     let mut tagged: Vec<ExtentAllocation> = Vec::new();
     crate::extent::collect_tagged_extent_blocks_into(ext, &mut cursor, 1, 0, &i_block, &mut tagged)

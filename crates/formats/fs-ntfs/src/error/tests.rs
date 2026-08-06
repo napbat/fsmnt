@@ -71,7 +71,7 @@ fn test_mft_record_parse_failed_pattern_match() {
 
 #[test]
 fn fs_error_io_kind_maps_correctly() {
-    let err = NtfsError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "test"));
+    let err = NtfsError::Io(io::ErrorKind::UnexpectedEof.into());
     assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof),);
 }
 
@@ -86,16 +86,16 @@ fn into_io_error_unwraps_io_variant() {
     // The `NtfsError::Io(e) => e` arm must return the wrapped error
     // unchanged, preserving its original kind. Deleting the arm would
     // re-wrap it via `io::Error::other`, downgrading the kind to `Other`.
-    let original = NtfsError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
+    let original = NtfsError::Io(io::ErrorKind::InvalidInput.into());
     let converted: io::Error = original.into();
-    assert_eq!(converted.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(converted.kind(), io::ErrorKind::InvalidInput);
 }
 
 #[test]
 fn into_io_error_wraps_non_io_variant() {
     // A non-Io error has no inherent io kind, so the conversion wraps it.
     let converted: io::Error = NtfsError::InvalidTime.into();
-    assert_ne!(converted.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(converted.kind(), io::ErrorKind::Other);
 }
 
 #[test]

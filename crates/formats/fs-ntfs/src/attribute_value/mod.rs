@@ -206,14 +206,14 @@ mod tests {
     /// hold without real I/O.
     struct UnusedFs;
 
-    impl std::io::Read for UnusedFs {
-        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+    impl crate::io::Read for UnusedFs {
+        fn read(&mut self, _buf: &mut [u8]) -> crate::io::Result<usize> {
             panic!("resident value must not read from the filesystem")
         }
     }
 
-    impl std::io::Seek for UnusedFs {
-        fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+    impl crate::io::Seek for UnusedFs {
+        fn seek(&mut self, _pos: crate::io::SeekFrom) -> crate::io::Result<u64> {
             panic!("resident value must not seek the filesystem")
         }
     }

@@ -1,6 +1,6 @@
 //! Integration tests for ext4 fast-commit and classic-journal replay composition.
 
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 use fs_ext::io::{Read, Seek, SeekFrom};
 use fs_ext::{Ext, JournalReplay, OverlayReader};
@@ -188,10 +188,14 @@ fn dirty_classic_plus_dirty_fc_composes_full_state() -> Result<(), Box<dyn std::
     let mut overlay = OverlayReader::new(&mut cursor, &jr);
     for expected in &classic_replay.writes {
         let mut block = vec![0u8; usize::try_from(layout.block_size)?];
-        overlay.seek(SeekFrom::Start(
-            expected.fs_block * u64::from(layout.block_size),
-        ))?;
-        overlay.read_exact(&mut block)?;
+        overlay
+            .seek(SeekFrom::Start(
+                expected.fs_block * u64::from(layout.block_size),
+            ))
+            .expect("seek composed replay overlay");
+        overlay
+            .read_exact(&mut block)
+            .expect("read composed replay overlay");
         assert!(
             block.iter().all(|&byte| byte == expected.fill_byte),
             "classic write to fs block {} should survive FC overlay composition",

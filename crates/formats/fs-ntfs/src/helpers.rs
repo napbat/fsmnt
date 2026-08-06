@@ -15,7 +15,7 @@ macro_rules! iter_try {
     };
 }
 
-/// A simplified `std::io::Cursor`-like type that implements only `Read` but not `Seek`.
+/// A simplified `fsmnt_testkit::Cursor`-like type that implements only `Read` but not `Seek`.
 ///
 /// This is all we need inside this crate.
 pub(crate) struct ReadOnlyCursor<'a>(&'a [u8]);
@@ -66,8 +66,9 @@ where
 
 #[cfg(test)]
 pub mod tests {
+    use fsmnt_testkit::Cursor;
     use std::fs::File;
-    use std::io::{Cursor, Read};
+    use std::io::Read;
     use std::sync::Once;
 
     /// Loads the `testdata/testfs1` NTFS image fixture, or returns `None`

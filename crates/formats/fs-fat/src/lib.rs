@@ -19,7 +19,7 @@
 //! ```no_run
 //! # use fs_common::iter::FsTryIterator;
 //! # use fs_fat::Fat;
-//! # let mut fs = std::io::Cursor::new(vec![0u8; 512]);
+//! # let mut fs = fsmnt_testkit::Cursor::new(vec![0u8; 512]);
 //! let fat = Fat::new(&mut fs).unwrap();
 //! let mut entries = fat.root_dir_entries();
 //!
@@ -42,7 +42,7 @@
 //! ```
 //!
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 

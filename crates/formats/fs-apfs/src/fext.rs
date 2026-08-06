@@ -179,7 +179,7 @@ fn parse_fext_record(key: &[u8], value: Option<&[u8]>) -> Result<(u64, FileExten
 mod tests {
     use super::*;
     use crate::btree::{BTN_DATA_OFFSET, BTREE_INFO_SIZE};
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

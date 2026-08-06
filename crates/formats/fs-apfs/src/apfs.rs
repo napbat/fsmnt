@@ -149,7 +149,7 @@ mod tests {
     use crate::btree::{BTN_DATA_OFFSET, BTREE_INFO_SIZE};
     use crate::checksum::fletcher64;
     use crate::object::{OBJ_EPHEMERAL, OBJ_PHYSICAL, OBJ_VIRTUAL};
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

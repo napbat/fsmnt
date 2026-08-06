@@ -121,7 +121,10 @@ mod tests {
     const SECURE_FILE_RECORD_NUMBER: u64 = 9;
 
     /// Helper: find any MFT entry with a nonzero `security_id`.
-    fn find_nonzero_security_id(ntfs: &Ntfs, fs: &mut std::io::Cursor<Vec<u8>>) -> Option<u32> {
+    fn find_nonzero_security_id(
+        ntfs: &Ntfs,
+        fs: &mut fsmnt_testkit::Cursor<Vec<u8>>,
+    ) -> Option<u32> {
         for record in 0..12u64 {
             if let Ok(file) = ntfs.file(fs, record)
                 && let Ok(info) = file.info()
@@ -588,7 +591,7 @@ mod tests {
 
     /// Map $SDS stream offsets to physical disk offsets.
     fn sds_physical_offsets(
-        testfs: &mut std::io::Cursor<Vec<u8>>,
+        testfs: &mut fsmnt_testkit::Cursor<Vec<u8>>,
         secure_file: &NtfsFile<'_>,
         stream_offset: u64,
     ) -> Vec<usize> {
@@ -622,7 +625,7 @@ mod tests {
 
     /// Corrupt the `entry_size` field at physical locations.
     fn corrupt_sds_entry_size(
-        testfs: &mut std::io::Cursor<Vec<u8>>,
+        testfs: &mut fsmnt_testkit::Cursor<Vec<u8>>,
         secure_file: &NtfsFile<'_>,
         stream_offset: u64,
         new_entry_size: u32,
@@ -635,8 +638,8 @@ mod tests {
         raw
     }
 
-    fn ntfs_from_raw_bytes(raw: Vec<u8>) -> (std::io::Cursor<Vec<u8>>, Ntfs) {
-        let mut cursor = std::io::Cursor::new(raw);
+    fn ntfs_from_raw_bytes(raw: Vec<u8>) -> (fsmnt_testkit::Cursor<Vec<u8>>, Ntfs) {
+        let mut cursor = fsmnt_testkit::Cursor::new(raw);
         let ntfs = Ntfs::new(&mut cursor).expect("Ntfs::new on modified image");
         (cursor, ntfs)
     }

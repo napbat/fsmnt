@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn new_mutator_starts_with_empty_scratch() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; ext.block_size() as usize];
     let mutator = Mutator::new(&ext, &sb_host_block);
@@ -17,7 +17,7 @@ fn new_mutator_starts_with_empty_scratch() {
 #[test]
 fn patch_superblock_bytes_mutates_sb_host_scratch() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let mut sb_host_block = alloc::vec![0u8; ext.block_size() as usize];
     sb_host_block[0x1C] = 0xAA;
@@ -34,7 +34,7 @@ fn patch_superblock_bytes_mutates_sb_host_scratch() {
 #[test]
 fn patch_inode_scratch_seeds_from_overlay_and_records_mutation() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; ext.block_size() as usize];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -59,7 +59,7 @@ fn patch_inode_scratch_seeds_from_overlay_and_records_mutation() {
 #[test]
 fn patch_inode_scratch_second_patch_sees_first_patch() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; ext.block_size() as usize];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -85,7 +85,7 @@ fn patch_inode_scratch_second_patch_sees_first_patch() {
 #[test]
 fn adjust_links_count_applies_increment() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -123,7 +123,7 @@ fn adjust_links_count_applies_increment() {
 #[test]
 fn adjust_links_count_returns_underflow_without_modifying_bytes() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -163,11 +163,11 @@ fn adjust_links_count_returns_underflow_without_modifying_bytes() {
 #[test]
 fn adjust_links_count_underflow_without_existing_scratch_does_not_patch_inode() {
     let mut bytes = crate::test_support::load_clean_ext4_image();
-    let mut layout_cursor = std::io::Cursor::new(bytes.clone());
+    let mut layout_cursor = fsmnt_testkit::Cursor::new(bytes.clone());
     let ext = Ext::open_lenient(&mut layout_cursor).expect("open ext4.img");
     let inum = 11u32;
     set_inode_links_count_in_image(&mut bytes, &ext, inum, 0);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
     let (inode_block, _inode_offset, _inode_size) =
@@ -199,7 +199,7 @@ fn adjust_links_count_underflow_without_existing_scratch_does_not_patch_inode() 
 #[test]
 fn adjust_links_count_returns_overflow_at_u16_max() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -239,11 +239,11 @@ fn adjust_links_count_returns_overflow_at_u16_max() {
 #[test]
 fn adjust_links_count_overflow_without_existing_scratch_does_not_patch_inode() {
     let mut bytes = crate::test_support::load_clean_ext4_image();
-    let mut layout_cursor = std::io::Cursor::new(bytes.clone());
+    let mut layout_cursor = fsmnt_testkit::Cursor::new(bytes.clone());
     let ext = Ext::open_lenient(&mut layout_cursor).expect("open ext4.img");
     let inum = 12u32;
     set_inode_links_count_in_image(&mut bytes, &ext, inum, u16::MAX);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
     let (inode_block, _inode_offset, _inode_size) =
@@ -275,7 +275,7 @@ fn adjust_links_count_overflow_without_existing_scratch_does_not_patch_inode() {
 #[test]
 fn patch_xattr_block_records_xattr_block_class() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; ext.block_size() as usize];
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -297,7 +297,7 @@ fn patch_xattr_block_records_xattr_block_class() {
 #[test]
 fn patch_directory_block_records_directory_block_class() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
 
     // Root dir is at block 8 in the standard layout for ext4.img.
@@ -325,7 +325,7 @@ fn patch_directory_block_records_directory_block_class() {
 #[test]
 fn dir_append_entry_appends_to_linear_directory() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let parent_inum = 2u32;
     let dir_block = dir_physical_block(&ext, &mut cursor, parent_inum, 0)
@@ -378,7 +378,7 @@ fn dir_append_entry_appends_to_linear_directory() {
 #[test]
 fn dir_append_entry_composes_multiple_appends_before_finalize() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let parent_inum = 2u32;
     let dir_block = dir_physical_block(&ext, &mut cursor, parent_inum, 0)
@@ -418,7 +418,7 @@ fn dir_append_entry_composes_multiple_appends_before_finalize() {
 #[test]
 fn dir_append_entry_rejects_invalid_dir_tail_checksum() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     assert!(
         ext.has_metadata_csum(),
@@ -452,10 +452,10 @@ fn dir_append_entry_rejects_invalid_dir_tail_checksum() {
 #[test]
 fn dir_append_entry_returns_skipped_htree_for_indexed_directory() {
     let mut bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes.clone());
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     set_inode_flags_in_image(&mut bytes, &ext, 2, crate::inode::InodeFlags::INDEX_FL);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -474,7 +474,7 @@ fn dir_append_entry_returns_skipped_htree_for_indexed_directory() {
 #[test]
 fn dir_append_entry_observes_parent_flags_from_inode_scratch() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let dir_block =
         dir_physical_block(&ext, &mut cursor, 2, 0).expect("resolve root directory block");
@@ -512,7 +512,7 @@ fn dir_append_entry_observes_parent_flags_from_inode_scratch() {
 #[test]
 fn dir_remove_entry_removes_from_linear_directory() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let parent_inum = 2u32;
     let dir_block = dir_physical_block(&ext, &mut cursor, parent_inum, 0)
@@ -560,7 +560,7 @@ fn dir_remove_entry_removes_from_linear_directory() {
 #[test]
 fn dir_remove_entry_returns_skipped_target_missing_without_patching() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
@@ -580,7 +580,7 @@ fn dir_remove_entry_returns_skipped_target_missing_without_patching() {
 #[test]
 fn dir_remove_entry_returns_skipped_when_name_matches_different_inode() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let dir_block =
         dir_physical_block(&ext, &mut cursor, 2, 0).expect("resolve root directory block");
@@ -607,12 +607,12 @@ fn dir_remove_entry_returns_skipped_when_name_matches_different_inode() {
 #[test]
 fn dir_remove_entry_returns_skipped_htree_for_indexed_directory() {
     let mut bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes.clone());
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes.clone());
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let dir_block =
         dir_physical_block(&ext, &mut cursor, 2, 0).expect("resolve root directory block");
     set_inode_flags_in_image(&mut bytes, &ext, 2, crate::inode::InodeFlags::INDEX_FL);
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let sb_host_block = read_sb_block(&ext, &mut cursor);
     let mut mutator = Mutator::new(&ext, &sb_host_block);
 
@@ -638,7 +638,7 @@ fn dir_remove_entry_returns_skipped_htree_for_indexed_directory() {
 #[test]
 fn dir_remove_entry_observes_parent_flags_from_inode_scratch() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let dir_block =
         dir_physical_block(&ext, &mut cursor, 2, 0).expect("resolve root directory block");
@@ -676,7 +676,7 @@ fn dir_remove_entry_observes_parent_flags_from_inode_scratch() {
 #[test]
 fn dir_remove_entry_composes_with_append_before_finalize() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let parent_inum = 2u32;
     let dir_block = dir_physical_block(&ext, &mut cursor, parent_inum, 0)
@@ -708,7 +708,7 @@ fn dir_remove_entry_composes_with_append_before_finalize() {
 #[test]
 fn dir_remove_entry_clears_inode_for_head_entry_in_later_block() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     let parent_inum = 2u32;
     let first_dir_block = dir_physical_block(&ext, &mut cursor, parent_inum, 0)
@@ -775,7 +775,7 @@ fn dir_remove_entry_clears_inode_for_head_entry_in_later_block() {
 #[test]
 fn dir_remove_entry_rejects_invalid_dir_tail_checksum() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open ext4.img");
     assert!(
         ext.has_metadata_csum(),
@@ -811,7 +811,7 @@ fn dir_remove_entry_rejects_invalid_dir_tail_checksum() {
 #[test]
 fn patch_extent_block_records_owner_inum_and_generation() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::new(&mut cursor).expect("open ext4.img");
     let sb_host_block = alloc::vec![0u8; ext.block_size() as usize];
     let mut mutator = Mutator::new(&ext, &sb_host_block);

@@ -2,12 +2,13 @@
 //!
 //! This crate provides `no_std`-compatible abstractions that work in both `std` and `no_std` environments.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 /// Error types shared by filesystem parsers.
 pub mod error;

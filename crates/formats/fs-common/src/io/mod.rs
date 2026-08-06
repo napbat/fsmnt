@@ -11,6 +11,9 @@ mod no_std;
 #[cfg(not(feature = "std"))]
 pub use no_std::*;
 
+#[cfg(all(not(feature = "std"), test))]
+mod std_compat;
+
 mod attached;
 pub use attached::Attached;
 

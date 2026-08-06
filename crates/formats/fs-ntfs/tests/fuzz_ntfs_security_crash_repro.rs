@@ -54,7 +54,7 @@ fn exercise_acl(acl: &NtfsAcl<'_>) {
 fn run_fuzz_ntfs_security_artifact(file_name: &str) {
     let data = read_required_fixture(
         env!("CARGO_MANIFEST_DIR"),
-        format!("../../crashes/libfuzzer/fuzz_ntfs_security/{file_name}"),
+        format!("../../../crashes/libfuzzer/fuzz_ntfs_security/{file_name}"),
         "Regenerate the fuzz_ntfs_security corpus with cargo-fuzz.",
     );
 

@@ -235,11 +235,11 @@ mod tests {
 
     #[test]
     fn from_io_error() {
-        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let io_err: io::Error = io::ErrorKind::InvalidInput.into();
         let exfat_err: ExFatError = io_err.into();
         match exfat_err {
             ExFatError::Io(e) => {
-                assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
             }
             _ => panic!("Expected ExFatError::Io variant"),
         }
@@ -247,10 +247,10 @@ mod tests {
 
     #[test]
     fn into_io_error_unwraps_io_variant() {
-        let original = io::Error::new(io::ErrorKind::NotFound, "original error");
+        let original: io::Error = io::ErrorKind::InvalidData.into();
         let exfat_err = ExFatError::Io(original);
         let converted: io::Error = exfat_err.into();
-        assert_eq!(converted.kind(), io::ErrorKind::NotFound);
+        assert_eq!(converted.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

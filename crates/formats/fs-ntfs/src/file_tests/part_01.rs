@@ -82,7 +82,7 @@ fn test_synthetic_validate_signature_rejects_bad() {
     let mut image = vec![0u8; usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize") + synthetic::RECORD_SIZE];
     image[..synthetic::SECTOR_SIZE].copy_from_slice(&synthetic::boot_sector());
     image[usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize")..].copy_from_slice(&record);
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let ntfs = Ntfs::new(&mut cursor).unwrap();
     let result = NtfsFile::new(
         &ntfs,
@@ -108,7 +108,7 @@ fn test_synthetic_validate_sizes_rejects_oversized_allocated() {
     let mut image = vec![0u8; usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize") + synthetic::RECORD_SIZE];
     image[..synthetic::SECTOR_SIZE].copy_from_slice(&synthetic::boot_sector());
     image[usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize")..].copy_from_slice(&record);
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let ntfs = Ntfs::new(&mut cursor).unwrap();
     let result = NtfsFile::new(
         &ntfs,
@@ -133,7 +133,7 @@ fn test_synthetic_validate_sizes_rejects_data_gt_allocated() {
     let mut image = vec![0u8; usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize") + synthetic::RECORD_SIZE];
     image[..synthetic::SECTOR_SIZE].copy_from_slice(&synthetic::boot_sector());
     image[usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize")..].copy_from_slice(&record);
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let ntfs = Ntfs::new(&mut cursor).unwrap();
     let result = NtfsFile::new(
         &ntfs,
@@ -158,7 +158,7 @@ fn test_synthetic_validate_sizes_accepts_equal_boundaries() {
     let mut image = vec![0u8; usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize") + synthetic::RECORD_SIZE];
     image[..synthetic::SECTOR_SIZE].copy_from_slice(&synthetic::boot_sector());
     image[usize::try_from(synthetic::RECORD_POSITION).expect("test value fits usize")..].copy_from_slice(&record);
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let ntfs = Ntfs::new(&mut cursor).unwrap();
     let file = NtfsFile::new(
         &ntfs,
@@ -223,7 +223,7 @@ fn test_synthetic_data_named_stream_lookup() {
     ];
     let file_record = synthetic::file_record(0x0001, 1, 1, &attrs);
     let image = synthetic::mft_image_with_upcase(&[file_record]);
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let mut ntfs = Ntfs::new(&mut cursor).unwrap();
     ntfs.read_upcase_table(&mut cursor)
         .expect("synthetic $UpCase must load");
@@ -542,7 +542,7 @@ fn test_synthetic_directory_index_succeeds_for_directory() {
     // `!self.is_directory()` check (deleting `!` would error here).
     let dir = synthetic::directory_record(7, false, "child.txt");
     let image = synthetic::mft_image(&[dir]);
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let ntfs = Ntfs::new(&mut cursor).unwrap();
 
     let dir_file = ntfs.file(&mut cursor, 1).unwrap();

@@ -5,7 +5,7 @@ use crate::ntfs::Ntfs;
 use crate::structured_values::NtfsStandardInformation;
 use core::num::NonZeroU64;
 use fs_common::io::FsReadSeek;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 /// Byte position of the synthetic FILE record inside the image.
 /// Chosen well clear of the 512-byte boot sector.

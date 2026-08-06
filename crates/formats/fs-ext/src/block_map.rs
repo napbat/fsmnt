@@ -360,7 +360,7 @@ mod tests {
         let ext = test_ext();
         let ptrs = [100, 101, 102, 0, 104, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let iblock = make_direct_iblock(&ptrs);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         // Block 0 -> 100
         let result = resolve_block_map(&ext, &mut cursor, &iblock, 0).expect("should not error");
@@ -384,7 +384,7 @@ mod tests {
         let ext = test_ext(); // blocks_count = 10000
         let ptrs = [99999, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let iblock = make_direct_iblock(&ptrs);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let err = resolve_block_map(&ext, &mut cursor, &iblock, 0)
             .expect_err("should fail with block out of range");
@@ -417,7 +417,7 @@ mod tests {
         // Entry 5 -> physical block 300
         ib[20..24].copy_from_slice(&300u32.to_le_bytes());
 
-        let mut cursor = std::io::Cursor::new(disk);
+        let mut cursor = fsmnt_testkit::Cursor::new(disk);
 
         // Logical block 12 -> indirect entry 0 -> 200
         let result = resolve_block_map(&ext, &mut cursor, &iblock, 12).expect("should not error");
@@ -438,7 +438,7 @@ mod tests {
         // i_block[12] = 0 (no indirect block allocated)
         let ptrs = [0u32; 15];
         let iblock = make_direct_iblock(&ptrs);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let result = resolve_block_map(&ext, &mut cursor, &iblock, 12).expect("should not error");
         assert_eq!(result, None);
@@ -472,7 +472,7 @@ mod tests {
             &mut disk[usize::try_from(ind_offset).expect("the test fixture value fits in usize")..];
         ind[0..4].copy_from_slice(&500u32.to_le_bytes());
 
-        let mut cursor = std::io::Cursor::new(disk);
+        let mut cursor = fsmnt_testkit::Cursor::new(disk);
 
         let result = resolve_block_map(&ext, &mut cursor, &iblock, 1036).expect("should not error");
         assert_eq!(result, Some(500));
@@ -483,7 +483,7 @@ mod tests {
         let ext = test_ext();
         let ptrs = [0u32; 15];
         let iblock = make_direct_iblock(&ptrs);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         // A very large logical block that exceeds triple indirect range
         let result =

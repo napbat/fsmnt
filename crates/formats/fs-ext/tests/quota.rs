@@ -141,10 +141,7 @@ fn corrupt_magic_yields_structured_error() {
         u32::from_le_bytes(buf[1024 + 0x240..1024 + 0x244].try_into().unwrap())
     };
     let inode_offset = locate_inode_offset(fs.get_ref(), usr_inum);
-    let extent_block = first_extent_block(fs.get_ref(), inode_offset);
-    let block_size = block_size(fs.get_ref());
-    let magic_offset = usize::try_from(extent_block).expect("fixture extent block fits usize")
-        * usize::try_from(block_size).expect("fixture block size fits usize");
+    let magic_offset = quota_file_byte_image_offset(fs.get_ref(), inode_offset, 0);
     {
         let buf = fs.get_mut();
         buf[magic_offset..magic_offset + 4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
@@ -175,15 +172,12 @@ fn corrupt_tree_pointer_yields_structured_error() {
         u32::from_le_bytes(buf[1024 + 0x240..1024 + 0x244].try_into().unwrap())
     };
     let inode_offset = locate_inode_offset(fs.get_ref(), usr_inum);
-    let extent_block = first_extent_block(fs.get_ref(), inode_offset);
-    let block_size =
-        usize::try_from(block_size(fs.get_ref())).expect("fixture block size fits usize");
     // Quota block 1 lives in the first fs block of the data extent at
-    // offset 1024 (since fs block size is 4096 and quota block is 1024).
+    // file offset 1024. Its physical block need not be contiguous with
+    // quota block 0.
     // Patch the first u32 of quota block 1 to point to an out-of-range
     // tree-block number.
-    let qblock1_off =
-        usize::try_from(extent_block).expect("fixture extent block fits usize") * block_size + 1024;
+    let qblock1_off = quota_file_byte_image_offset(fs.get_ref(), inode_offset, 1024);
     {
         let buf = fs.get_mut();
         buf[qblock1_off..qblock1_off + 4].copy_from_slice(&999u32.to_le_bytes());
@@ -229,14 +223,62 @@ fn locate_inode_offset(buf: &[u8], inum: u32) -> usize {
             * usize::from(inode_size)
 }
 
-fn first_extent_block(buf: &[u8], inode_off: usize) -> u64 {
-    // i_block at inode-relative offset 0x28; extent header + first extent.
+fn quota_file_byte_image_offset(buf: &[u8], inode_off: usize, file_offset: usize) -> usize {
+    // i_block at inode-relative offset 0x28; extent header + extent records.
     let i_block = &buf[inode_off + 0x28..inode_off + 0x28 + 60];
     let magic = u16::from_le_bytes(i_block[0..2].try_into().unwrap());
     assert_eq!(magic, 0xF30A, "expected ext4 extent magic");
+    let entries = u16::from_le_bytes(i_block[2..4].try_into().unwrap());
     let depth = u16::from_le_bytes(i_block[6..8].try_into().unwrap());
-    assert_eq!(depth, 0, "expected single-extent inode for quota tree");
-    let ee_start_hi = u16::from_le_bytes(i_block[12 + 6..12 + 8].try_into().unwrap());
-    let ee_start_lo = u32::from_le_bytes(i_block[12 + 8..12 + 12].try_into().unwrap());
-    (u64::from(ee_start_hi) << 32) | u64::from(ee_start_lo)
+    assert_eq!(depth, 0, "expected depth-zero quota inode");
+
+    let fs_block_size = usize::try_from(block_size(buf)).expect("fixture block size fits usize");
+    let logical_block =
+        u32::try_from(file_offset / fs_block_size).expect("fixture logical block fits u32");
+    let block_offset = file_offset % fs_block_size;
+
+    for index in 0..usize::from(entries) {
+        let extent_offset = 12 + index * 12;
+        let ee_block = u32::from_le_bytes(
+            i_block[extent_offset..extent_offset + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let raw_len = u16::from_le_bytes(
+            i_block[extent_offset + 4..extent_offset + 6]
+                .try_into()
+                .unwrap(),
+        );
+        let extent_len = if raw_len > 0x8000 {
+            u32::from(raw_len - 0x8000)
+        } else {
+            u32::from(raw_len)
+        };
+        let Some(logical_end) = ee_block.checked_add(extent_len) else {
+            continue;
+        };
+        if !(ee_block..logical_end).contains(&logical_block) {
+            continue;
+        }
+
+        let ee_start_hi = u16::from_le_bytes(
+            i_block[extent_offset + 6..extent_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let ee_start_lo = u32::from_le_bytes(
+            i_block[extent_offset + 8..extent_offset + 12]
+                .try_into()
+                .unwrap(),
+        );
+        let physical_start = (u64::from(ee_start_hi) << 32) | u64::from(ee_start_lo);
+        let physical_block = physical_start + u64::from(logical_block - ee_block);
+        return usize::try_from(physical_block)
+            .expect("fixture physical block fits usize")
+            .checked_mul(fs_block_size)
+            .and_then(|offset| offset.checked_add(block_offset))
+            .expect("fixture image offset fits usize");
+    }
+
+    panic!("quota fixture byte offset {file_offset} is not extent-mapped");
 }

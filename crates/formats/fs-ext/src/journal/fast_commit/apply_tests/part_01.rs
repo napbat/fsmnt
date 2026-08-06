@@ -20,7 +20,7 @@ const EXTENT_MAGIC: u16 = 0xF30A;
 
 fn classic_overlay_for_fixture(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
 ) -> BlockOverlay {
     let block_size = ext.block_size();
     let sb_host_block = u64::from(block_size <= 1024);
@@ -39,17 +39,17 @@ fn classic_overlay_for_fixture(
     }
 }
 
-fn fixture_ext() -> (crate::Ext, std::io::Cursor<Vec<u8>>) {
+fn fixture_ext() -> (crate::Ext, fsmnt_testkit::Cursor<Vec<u8>>) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
     let bytes = std::fs::read(path).expect("read ext4 fixture");
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
     (ext, cursor)
 }
 
 fn raw_inode_from_overlay(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     overlay: &BlockOverlay,
     inum: u32,
 ) -> Vec<u8> {
@@ -69,7 +69,7 @@ fn raw_inode_from_overlay(
 
 fn read_links_count_from_overlay(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     overlay: &BlockOverlay,
     inum: u32,
 ) -> u16 {
@@ -88,7 +88,7 @@ fn inode_byte_offset(ext: &crate::Ext, inum: u32, inode_relative_offset: usize) 
 
 fn set_links_count_in_image(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     inum: u32,
     links_count: u16,
 ) {
@@ -98,7 +98,7 @@ fn set_links_count_in_image(
 
 fn write_raw_inode_to_image(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     inum: u32,
     raw_inode: &[u8],
 ) {
@@ -162,7 +162,7 @@ fn encoded_len(extent: RawExtent) -> u16 {
 
 fn inode_extent_records(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     overlay: &BlockOverlay,
     inum: u32,
 ) -> Vec<(u32, u16, u64, bool)> {
@@ -197,7 +197,7 @@ fn decoded_extent_records(node: &[u8]) -> Vec<(u32, u16, u64, bool)> {
 
 fn inode_size_from_overlay(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     overlay: &BlockOverlay,
     inum: u32,
 ) -> u64 {
@@ -209,7 +209,7 @@ fn inode_size_from_overlay(
 
 fn overlay_block_bitmap_bit(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     overlay: &BlockOverlay,
     pblk: u64,
 ) -> bool {
@@ -252,7 +252,7 @@ fn inode_table_block(ext: &crate::Ext, inum: u32) -> u64 {
 
 fn raw_dir_entry_from_overlay(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     overlay: &BlockOverlay,
     parent: u32,
     name: &[u8],
@@ -270,7 +270,7 @@ fn raw_dir_entry_from_overlay(
 
 fn apply_single_tx(
     ext: &crate::Ext,
-    cursor: &mut std::io::Cursor<Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
     tx: Vec<u8>,
 ) -> ApplyState {
     let composed = classic_overlay_for_fixture(ext, cursor);

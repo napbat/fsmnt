@@ -259,7 +259,7 @@ mod tests {
     /// `set_bits` lists the cluster numbers marked allocated. The bitmap
     /// occupies `ceil(SYNTH_TOTAL/8)` bytes (rounded up to whole cached
     /// clusters), laid out on disk starting at `SYNTH_BASE`.
-    fn build_bitmap(set_bits: &[u64]) -> (NtfsClusterBitmap, std::io::Cursor<Vec<u8>>) {
+    fn build_bitmap(set_bits: &[u64]) -> (NtfsClusterBitmap, fsmnt_testkit::Cursor<Vec<u8>>) {
         build_bitmap_with_total(SYNTH_TOTAL, set_bits)
     }
 
@@ -267,7 +267,7 @@ mod tests {
     fn build_bitmap_with_total(
         total: u64,
         set_bits: &[u64],
-    ) -> (NtfsClusterBitmap, std::io::Cursor<Vec<u8>>) {
+    ) -> (NtfsClusterBitmap, fsmnt_testkit::Cursor<Vec<u8>>) {
         let bits_per_cache = u64::from(SYNTH_CLUSTER_SIZE) * 8;
         let bitmap_clusters = total.div_ceil(bits_per_cache);
         let bitmap_len = usize::try_from(bitmap_clusters * u64::from(SYNTH_CLUSTER_SIZE))
@@ -283,7 +283,7 @@ mod tests {
         // Disk image: SYNTH_BASE bytes of padding, then the bitmap bytes.
         let mut disk = vec![0u8; usize::try_from(SYNTH_BASE).expect("test value fits usize")];
         disk.extend_from_slice(&bitmap);
-        let cursor = std::io::Cursor::new(disk);
+        let cursor = fsmnt_testkit::Cursor::new(disk);
 
         // One contiguous segment maps virtual offset 0 -> disk SYNTH_BASE.
         let bitmap_len_u64 = u64::try_from(bitmap_len).expect("test bitmap length fits u64");
@@ -394,7 +394,7 @@ mod tests {
 
         let mut disk = vec![0u8; usize::try_from(SYNTH_BASE).expect("test value fits usize")];
         disk.extend_from_slice(&bitmap);
-        let mut fs = std::io::Cursor::new(disk);
+        let mut fs = fsmnt_testkit::Cursor::new(disk);
         let bitmap_len_u64 = u64::try_from(bitmap_len).expect("test bitmap length fits u64");
         let map = DataRunMap::from_segments_for_test(&[(Some(SYNTH_BASE), bitmap_len_u64)]);
         let mut bm = NtfsClusterBitmap::from_parts_for_test(map, SYNTH_TOTAL, SYNTH_CLUSTER_SIZE);
@@ -434,7 +434,7 @@ mod tests {
         let bitmap_len = bitmap_clusters * u64::from(SYNTH_CLUSTER_SIZE);
         let map = DataRunMap::from_segments_for_test(&[(None, bitmap_len)]);
         let mut bm = NtfsClusterBitmap::from_parts_for_test(map, SYNTH_TOTAL, SYNTH_CLUSTER_SIZE);
-        let mut fs = std::io::Cursor::new(Vec::<u8>::new());
+        let mut fs = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         assert!(!bm.is_allocated(&mut fs, 0).unwrap());
         assert_eq!(bm.free_clusters(&mut fs).unwrap(), SYNTH_TOTAL);

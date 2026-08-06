@@ -3,7 +3,7 @@
 mod support;
 
 /// Look up a root-level entry by name and return its inode number.
-fn lookup_inode(ext: &fs_ext::Ext, fs: &mut std::io::Cursor<Vec<u8>>, name: &[u8]) -> u32 {
+fn lookup_inode(ext: &fs_ext::Ext, fs: &mut fsmnt_testkit::Cursor<Vec<u8>>, name: &[u8]) -> u32 {
     let mut dir = ext.root_directory();
     let entry = dir.lookup(fs, name).unwrap();
     entry.inode_number

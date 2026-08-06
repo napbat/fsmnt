@@ -1222,22 +1222,33 @@ def quota_inum(field_offset: int) -> int:
         f.seek(SB_OFFSET + field_offset)
         return struct.unpack("<I", f.read(4))[0]
 
-def first_extent_block(image_path: str, inum: int) -> int:
-    """Return the first physical block of the inode's data via the
-    extent at i_block[0..12]. Assumes a single 12-byte extent header
-    + first 12-byte ext4_extent record (depth 0)."""
-    (off, isize, _bs) = locate_inode(image_path, inum)
+def file_byte_image_offset(image_path: str, inum: int,
+                           file_byte_offset: int) -> int:
+    """Map a byte offset in a depth-zero extent file to the image."""
+    (off, isize, fs_block_size) = locate_inode(image_path, inum)
     with open(image_path, "rb") as f:
         f.seek(off + 0x28)  # i_block
         i_block = f.read(60)
     # extent header: u16 magic, u16 entries, u16 max, u16 depth, u32 generation
-    magic, _entries, _max, depth, _gen = struct.unpack_from("<HHHHI", i_block, 0)
+    magic, entries, _max, depth, _gen = struct.unpack_from(
+        "<HHHHI", i_block, 0)
     assert magic == 0xF30A, f"expected ext4 extent magic, got {magic:#x}"
-    assert depth == 0, "expected single-extent inode for quota tree"
-    # ext4_extent: u32 ee_block, u16 ee_len, u16 ee_start_hi, u32 ee_start_lo
-    _ee_block, _ee_len, ee_start_hi, ee_start_lo = struct.unpack_from(
-        "<IHHI", i_block, 12)
-    return (ee_start_hi << 32) | ee_start_lo
+    assert depth == 0, "expected depth-zero extent inode for quota tree"
+
+    logical_block, block_offset = divmod(file_byte_offset, fs_block_size)
+    for index in range(entries):
+        # ext4_extent: u32 ee_block, u16 ee_len, u16 ee_start_hi,
+        # u32 ee_start_lo.
+        ee_block, ee_len, ee_start_hi, ee_start_lo = struct.unpack_from(
+            "<IHHI", i_block, 12 + index * 12)
+        extent_len = ee_len - 0x8000 if ee_len > 0x8000 else ee_len
+        if ee_block <= logical_block < ee_block + extent_len:
+            physical_start = (ee_start_hi << 32) | ee_start_lo
+            physical_block = physical_start + logical_block - ee_block
+            return physical_block * fs_block_size + block_offset
+
+    raise AssertionError(
+        f"quota file offset {file_byte_offset} is not extent-mapped")
 
 def patch_quota_leaf(image_path: str, inum: int, leaf_qblk: int,
                      records: list[tuple[int, dict]]) -> None:
@@ -1245,9 +1256,8 @@ def patch_quota_leaf(image_path: str, inum: int, leaf_qblk: int,
     quota file at `inum`. Each record is (id, fields) where fields is a
     dict with optional keys curinodes, curspace, isoftlimit, ihardlimit,
     bsoftlimit, bhardlimit, btime, itime."""
-    phys = first_extent_block(image_path, inum)
-    (_off, _isize, fs_block_size) = locate_inode(image_path, inum)
-    leaf_byte_off = phys * fs_block_size + leaf_qblk * QBLK_SIZE
+    leaf_byte_off = file_byte_image_offset(
+        image_path, inum, leaf_qblk * QBLK_SIZE)
     with open(image_path, "r+b") as f:
         f.seek(leaf_byte_off)
         leaf = bytearray(f.read(QBLK_SIZE))

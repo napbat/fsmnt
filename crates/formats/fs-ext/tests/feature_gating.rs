@@ -65,6 +65,6 @@ fn rejects_invalid_inode_size() {
 #[test]
 fn rejects_short_image() {
     let data = vec![0u8; 1024];
-    let mut fs = std::io::Cursor::new(data);
+    let mut fs = fsmnt_testkit::Cursor::new(data);
     assert!(fs_ext::Ext::new(&mut fs).is_err());
 }

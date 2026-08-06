@@ -4,3 +4,7 @@
 # testdata/gen-fixtures.sh (or create-testfs*.sh), not committed.
 **/testdata/*.img
 **/testdata/testfs*
+
+# Canonical upstream fixtures required by integration tests.
+!crates/formats/fs-exfat/testdata/testfs1
+!crates/formats/fs-ext/testdata/ext4-fscrypt.img

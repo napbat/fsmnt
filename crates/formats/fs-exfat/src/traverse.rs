@@ -168,7 +168,7 @@ mod tests {
     use crate::test_helpers::*;
     use alloc::vec;
     use alloc::vec::Vec;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     #[test]
     fn directory_iter_implements_fstryiterator() {

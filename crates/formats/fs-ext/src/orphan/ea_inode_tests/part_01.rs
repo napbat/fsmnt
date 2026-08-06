@@ -70,7 +70,7 @@ fn ea_raw_inode(i_block: [u8; 60]) -> crate::inode::RawInode {
 fn enumerate_depth0(ext: &Ext, i_block: [u8; 60]) -> Vec<AllocationRun> {
     let inode = crate::inode::ExtInode::from_raw_for_test(ea_raw_inode(i_block), 77);
     // Depth-0 fast path never touches the reader; an empty cursor is fine.
-    let mut empty = std::io::Cursor::new(alloc::vec::Vec::<u8>::new());
+    let mut empty = fsmnt_testkit::Cursor::new(alloc::vec::Vec::<u8>::new());
     enumerate_ea_inode_data_blocks(ext, &mut empty, &inode, 77)
         .expect("depth-0 enumeration must not error")
 }
@@ -275,12 +275,12 @@ fn fixture_available(name: &str) -> bool {
     fixture_path(name).exists()
 }
 
-fn load_dirty(name: &str) -> Option<(Ext, std::io::Cursor<alloc::vec::Vec<u8>>)> {
+fn load_dirty(name: &str) -> Option<(Ext, fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>)> {
     if !fixture_available(name) {
         return None;
     }
     let bytes = std::fs::read(fixture_path(name)).ok()?;
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = Ext::open_lenient(&mut cursor).expect("open_lenient");
     Some((ext, cursor))
 }
@@ -460,7 +460,7 @@ fn plan_value_checksum_mismatch_stops() {
 
 fn read_sb_block_from_overlay(
     ext: &Ext,
-    cursor: &mut std::io::Cursor<alloc::vec::Vec<u8>>,
+    cursor: &mut fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>,
 ) -> alloc::vec::Vec<u8> {
     use crate::io::SeekFrom;
     let sb_block: u64 = u64::from(ext.block_size() <= 1024);
@@ -655,7 +655,7 @@ fn depth_one_bigalloc_ext() -> &'static Ext {
     }))
 }
 
-fn depth_one_bigalloc_overlay(ext: &Ext) -> std::io::Cursor<alloc::vec::Vec<u8>> {
+fn depth_one_bigalloc_overlay(ext: &Ext) -> fsmnt_testkit::Cursor<alloc::vec::Vec<u8>> {
     let mut i_block = [0u8; 60];
     i_block[0..2].copy_from_slice(&DEPTH_ONE_EXTENT_MAGIC.to_le_bytes());
     i_block[2..4].copy_from_slice(&2u16.to_le_bytes());
@@ -722,7 +722,7 @@ fn depth_one_bigalloc_overlay(ext: &Ext) -> std::io::Cursor<alloc::vec::Vec<u8>>
         disk[bitmap_base + bit / 8] |= 1u8 << (cluster_bit % 8);
     }
 
-    std::io::Cursor::new(disk)
+    fsmnt_testkit::Cursor::new(disk)
 }
 
 /// Locks in the bigalloc invariant for depth > 0 EA-inode extent trees:

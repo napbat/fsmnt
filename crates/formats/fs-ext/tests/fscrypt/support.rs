@@ -1,4 +1,4 @@
-pub(crate) use std::io::Cursor;
+pub(crate) use fsmnt_testkit::Cursor;
 
 pub(crate) use fs_common::FsTryIterator;
 pub(crate) use fs_common::io::FsReadSeek;

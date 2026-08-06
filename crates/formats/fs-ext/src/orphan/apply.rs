@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn free_owned_blocks_flips_bitmap_bits_on_hello_txt() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let entry = crate::test_support::lookup_entry(&ext, &mut fs, "/hello.txt").expect("lookup");
         let inum = entry.inode_number;
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn classify_empty_plan_returns_empty_sets_and_no_stop() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let mut plan = OrphanPlan::default();
         let classified = classify_apply(&ext, &mut fs, &mut plan).expect("classify");
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn clear_inode_bitmap_bit_tallies_decrement_when_bit_was_set() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let entry = crate::test_support::lookup_entry(&ext, &mut fs, "/hello.txt").expect("lookup");
         let inum = entry.inode_number;
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn clear_inode_bitmap_bit_is_idempotent() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let entry = crate::test_support::lookup_entry(&ext, &mut fs, "/hello.txt").expect("lookup");
         let inum = entry.inode_number;
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn finalize_group_descriptors_updates_free_counts_and_checksums() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let entry = crate::test_support::lookup_entry(&ext, &mut fs, "/hello.txt").expect("lookup");
         let inum = entry.inode_number;
@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn clear_legacy_linkage_zeroes_i_dtime_and_recomputes_checksum() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let entry = crate::test_support::lookup_entry(&ext, &mut fs, "/hello.txt").expect("lookup");
         let inum = entry.inode_number;
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn zero_unlinked_inode_round_trips_on_ext4_fixture() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let entry = crate::test_support::lookup_entry(&ext, &mut fs, "/hello.txt").expect("lookup");
         let inum = entry.inode_number;
@@ -707,7 +707,7 @@ mod tests {
 
     fn load_dirty_fixture(
         name: &str,
-    ) -> Option<(crate::Ext, std::io::Cursor<alloc::vec::Vec<u8>>)> {
+    ) -> Option<(crate::Ext, fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>)> {
         if !crate::test_support::fixture_available(name) {
             return None;
         }
@@ -718,7 +718,7 @@ mod tests {
 
     fn build_plan_from_fixture(
         ext: &crate::Ext,
-        cursor: &mut std::io::Cursor<alloc::vec::Vec<u8>>,
+        cursor: &mut fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>,
     ) -> crate::orphan::plan::OrphanPlan {
         use crate::orphan::parse::{scan_orphan_file, walk_legacy_chain};
         let mut plan = crate::orphan::plan::OrphanPlan::default();
@@ -846,7 +846,7 @@ mod tests {
 
     #[test]
     fn classify_empty_plan_produces_empty_ea_and_xattr_plans() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let mut plan = crate::orphan::plan::OrphanPlan::default();
         let classified = classify_apply(&ext, &mut fs, &mut plan).expect("classify");

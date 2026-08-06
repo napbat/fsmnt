@@ -233,7 +233,7 @@ mod tests {
     use super::*;
     use crate::attribute_value::NtfsDataRuns;
     use core::num::NonZeroU64;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     /// Helper: build a `DataRunMap` from raw (position, size) pairs.
     fn map_from_raw(runs: &[(Option<u64>, u64)]) -> DataRunMap {

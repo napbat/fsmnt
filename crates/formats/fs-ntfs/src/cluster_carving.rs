@@ -458,7 +458,7 @@ mod tests {
     fn build_carver(
         cluster_contents: &[[u8; 8]],
         allocated: &[u64],
-    ) -> (NtfsClusterCarver, std::io::Cursor<Vec<u8>>) {
+    ) -> (NtfsClusterCarver, fsmnt_testkit::Cursor<Vec<u8>>) {
         let content_len =
             usize::try_from(CARVE_TOTAL * CARVE_CLUSTER_SIZE).expect("test value fits usize");
         let mut disk = vec![0u8; content_len];
@@ -477,7 +477,7 @@ mod tests {
         }
         disk.extend_from_slice(&bitmap);
 
-        let cursor = std::io::Cursor::new(disk);
+        let cursor = fsmnt_testkit::Cursor::new(disk);
         let map =
             DataRunMap::from_segments_for_test(&[(Some(bitmap_disk_offset), CARVE_CLUSTER_SIZE)]);
         let bitmap = NtfsClusterBitmap::from_parts_for_test(

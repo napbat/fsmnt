@@ -7,7 +7,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 use crate::attribute::NtfsAttributeType;
 use crate::ntfs::Ntfs;

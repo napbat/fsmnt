@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! # use fs_ntfs::Ntfs;
-//! # let mut fs = std::io::Cursor::new(vec![]);
+//! # let mut fs = fsmnt_testkit::Cursor::new(vec![]);
 //! let ntfs = Ntfs::new(&mut fs).unwrap();
 //! let logfile = ntfs.logfile(&mut fs).unwrap();
 //!

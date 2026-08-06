@@ -255,7 +255,7 @@ mod tests {
 
     /// Concrete reader type for resolving the generic `FsDirEntry`/`FsDirectory`
     /// trait methods in tests.
-    type TestReader = std::io::Cursor<Vec<u8>>;
+    type TestReader = fsmnt_testkit::Cursor<Vec<u8>>;
 
     #[test]
     fn test_directory_accessors() {
@@ -276,7 +276,7 @@ mod tests {
         // deleting `!` would make this directory wrongly return NotADirectory.
         let dir = synthetic::directory_record(7, false, "child.txt");
         let image = synthetic::mft_image(&[dir]);
-        let mut cursor = std::io::Cursor::new(image);
+        let mut cursor = fsmnt_testkit::Cursor::new(image);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
 
         let dir_file = ntfs.file(&mut cursor, 1).unwrap();
@@ -293,7 +293,7 @@ mod tests {
         // iterator must yield that entry (guards try_next returning Ok(None)).
         let dir = synthetic::directory_record(7, false, "child.txt");
         let image = synthetic::mft_image(&[dir]);
-        let mut cursor = std::io::Cursor::new(image);
+        let mut cursor = fsmnt_testkit::Cursor::new(image);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
 
         let mut handle = NtfsDirectory::new(&ntfs, 1);

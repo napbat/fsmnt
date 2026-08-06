@@ -199,7 +199,7 @@ fn journal_fails_when_inode_mapping_and_superblock_backup_are_both_corrupt() {
     );
 }
 
-fn corrupt_journal_inode_extent_header(fs: &mut std::io::Cursor<Vec<u8>>) {
+fn corrupt_journal_inode_extent_header(fs: &mut fsmnt_testkit::Cursor<Vec<u8>>) {
     let (block_size, inodes_per_group, inode_size, journal_inum) = {
         let sb = &fs.get_ref()[1024..1024 + 1024];
         (
@@ -233,17 +233,17 @@ fn corrupt_journal_inode_extent_header(fs: &mut std::io::Cursor<Vec<u8>>) {
     fs.get_mut()[i_block_off..i_block_off + 2].copy_from_slice(&0u16.to_le_bytes());
 }
 
-fn zero_superblock_journal_backup(fs: &mut std::io::Cursor<Vec<u8>>) {
+fn zero_superblock_journal_backup(fs: &mut fsmnt_testkit::Cursor<Vec<u8>>) {
     let off = 1024 + 0x10C;
     fs.get_mut()[off..off + (17 * 4)].fill(0);
 }
 
-fn ext_block_size(fs: &std::io::Cursor<Vec<u8>>) -> usize {
+fn ext_block_size(fs: &fsmnt_testkit::Cursor<Vec<u8>>) -> usize {
     let sb = &fs.get_ref()[1024..1024 + 1024];
     1024usize << u32::from_le_bytes(sb[0x18..0x1C].try_into().unwrap())
 }
 
-fn backup_journal_physical_block(fs: &std::io::Cursor<Vec<u8>>, logical: u32) -> u64 {
+fn backup_journal_physical_block(fs: &fsmnt_testkit::Cursor<Vec<u8>>, logical: u32) -> u64 {
     const EXTENT_MAGIC: u16 = 0xF30A;
     let off = 1024 + 0x10C;
     let i_block = &fs.get_ref()[off..off + 60];

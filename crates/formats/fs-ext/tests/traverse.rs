@@ -223,7 +223,7 @@ fn root_directory_id_is_inode_2() {
         fs_ext::Ext::new(&mut fs).unwrap()
     };
     let root = ext.root_directory();
-    let id = <fs_ext::ExtDirectory<'_> as FsDirectory<std::io::Cursor<Vec<u8>>>>::id(&root);
+    let id = <fs_ext::ExtDirectory<'_> as FsDirectory<fsmnt_testkit::Cursor<Vec<u8>>>>::id(&root);
     assert_eq!(id, Some(FsId(2)));
 }
 

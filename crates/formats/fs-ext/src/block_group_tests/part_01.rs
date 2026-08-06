@@ -457,7 +457,7 @@ fn descriptor_block_loc_1k_quirk_first_data_block_zero() {
 #[test]
 fn read_descriptor_block_maps_eof_to_contextual_error() {
     use crate::io::SeekFrom;
-    let mut cursor = std::io::Cursor::new(vec![0u8; 100]);
+    let mut cursor = fsmnt_testkit::Cursor::new(vec![0u8; 100]);
     cursor.seek(SeekFrom::Start(50)).unwrap();
     let mut buf = [0u8; 64];
     let err = read_descriptor_block(&mut cursor, &mut buf).unwrap_err();
@@ -475,8 +475,8 @@ fn read_descriptor_block_maps_eof_to_contextual_error() {
 
 #[test]
 fn read_descriptor_block_succeeds_when_data_available() {
-    use std::io::Seek;
-    let mut cursor = std::io::Cursor::new(vec![0xABu8; 100]);
+    use crate::io::Seek;
+    let mut cursor = fsmnt_testkit::Cursor::new(vec![0xABu8; 100]);
     let mut buf = [0u8; 64];
     read_descriptor_block(&mut cursor, &mut buf).unwrap();
     assert!(buf.iter().all(|&b| b == 0xAB));
@@ -537,7 +537,7 @@ fn read_group_descriptors_returns_vec_in_group_order_under_mixed_mode() {
     // bg_block_bitmap_lo lives at byte offset 0 in RawGroupDesc32.
     write_sentinel_descriptors(&mut image, &layout);
 
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let descs = read_group_descriptors(
         &mut cursor,
         &layout,

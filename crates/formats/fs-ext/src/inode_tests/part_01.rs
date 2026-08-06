@@ -487,7 +487,7 @@ fn set_ea_inode_refcount_bytes_round_trips_through_reader() {
 #[test]
 fn ea_inode_refcount_reads_1_for_fixture_ea_inode_536() {
     let bytes = crate::test_support::load_clean_ext4_image();
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::ext::Ext::new(&mut cursor).expect("open ext4.img");
     // Inode 536 is the EA inode backing ea_inode_file's big_value xattr.
     // It has EA_INODE_FL and is referenced once, so refcount must be 1.

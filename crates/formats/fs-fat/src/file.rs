@@ -108,7 +108,7 @@ mod tests {
     use super::*;
     use crate::fat::Fat;
     use fs_common::boot_sector::BOOT_SIGNATURE;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     /// Minimal in-memory FAT16 image — just enough for `Fat::new` to succeed.
     /// Layout: bps=512, spc=1, reserved=1, fats=1, `root_entries=16`, spf16=1,

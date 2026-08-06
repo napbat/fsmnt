@@ -57,7 +57,7 @@ fn build_fat16_image_with_2entry_lfn(short_name: &[u8; SFN_SIZE]) -> (Vec<u8>, [
 #[test]
 fn fat_dir_entries_assembles_multi_entry_lfn_into_short_name_target() {
     use crate::fat::Fat;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
     use std::string::String;
 
     // Build the short name first so the LFN checksum is correct.
@@ -97,7 +97,7 @@ fn fat_dir_entries_assembles_multi_entry_lfn_into_short_name_target() {
 #[test]
 fn fat_dir_entries_falls_back_to_short_name_on_checksum_mismatch() {
     use crate::fat::Fat;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     // Build a normal 2-entry LFN, then corrupt the checksum byte in
     // both LFN entries so they don't match the short name's actual
@@ -125,7 +125,7 @@ fn fat_dir_entries_falls_back_to_short_name_on_checksum_mismatch() {
 #[test]
 fn fat_dir_entries_skips_lfn_with_out_of_range_sequence_number() {
     use crate::fat::Fat;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     // Build a normal 2-entry LFN, then poison the SEQUENCE byte of
     // slot 0 with an out-of-range value (LFN_MAX_ENTRIES is 20, so
@@ -169,7 +169,7 @@ fn fat_dir_entries_find_returns_matching_entry() {
     // predicate must match a real entry and the iterator must yield
     // it, not silently produce None.
     use crate::fat::Fat;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     let img = build_fat16_image_with_single_file(b"HELLO   TXT");
     let mut cur = Cursor::new(img);
@@ -187,7 +187,7 @@ fn fat_dir_entries_find_by_name_resolves_short_name_case_insensitive() {
     // Catches `find_by_name -> None`: the case-insensitive
     // comparison must find the entry whose short name matches.
     use crate::fat::Fat;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     let img = build_fat16_image_with_single_file(b"README  TXT");
     let mut cur = Cursor::new(img);
@@ -206,7 +206,7 @@ fn fat_dir_entries_try_next_returns_some_for_present_entry() {
     // adapter must surface the same entries as `next`.
     use crate::fat::Fat;
     use fs_common::iter::FsTryIterator;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     let img = build_fat16_image_with_single_file(b"NOTE       ");
     let mut cur = Cursor::new(img);
@@ -267,7 +267,7 @@ fn fat_dir_entries_fill_buffer_advances_across_buffer_boundary() {
     // remaining-byte accumulator would either stall the iterator
     // (never decrementing) or skip ahead.
     use crate::fat::Fat;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     let img = build_fat16_image_spanning_two_buffer_fills();
     let mut cur = Cursor::new(img);

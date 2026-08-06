@@ -15,7 +15,7 @@ fn run_fuzz_ntfs_usn_record_artifact(file_name: &str) {
 
     let data = read_required_fixture(
         env!("CARGO_MANIFEST_DIR"),
-        format!("../../crashes/libfuzzer/fuzz_ntfs_usn_record/{file_name}"),
+        format!("../../../crashes/libfuzzer/fuzz_ntfs_usn_record/{file_name}"),
         "Regenerate the fuzz_ntfs_usn_record corpus with cargo-fuzz.",
     );
 

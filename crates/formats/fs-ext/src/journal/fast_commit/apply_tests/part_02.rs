@@ -460,7 +460,7 @@ mod finalizer {
 
     fn clear_block_bitmap_bit_in_image(
         ext: &crate::Ext,
-        cursor: &mut std::io::Cursor<Vec<u8>>,
+        cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
         pblk: u64,
     ) {
         let group = usize::try_from((pblk - u64::from(ext.first_data_block)) / u64::from(ext.blocks_per_group)
@@ -477,7 +477,7 @@ mod finalizer {
 
     fn write_disk_block(
         ext: &crate::Ext,
-        cursor: &mut std::io::Cursor<Vec<u8>>,
+        cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
         block: u64,
         content: &[u8],
     ) {
@@ -529,7 +529,7 @@ mod finalizer {
 
     fn run_finalizer(
         ext: &crate::Ext,
-        cursor: &mut std::io::Cursor<Vec<u8>>,
+        cursor: &mut fsmnt_testkit::Cursor<Vec<u8>>,
         mut overlay: BlockOverlay,
         modified_inodes: &BTreeSet<u32>,
         plan: &mut FastCommitPlan,

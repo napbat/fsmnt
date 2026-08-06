@@ -1,8 +1,8 @@
 //! Regression tests for malformed root-directory fuzz artifacts.
 
 use fs_common::iter::FsTryIterator;
+use fsmnt_testkit::Cursor;
 use fsmnt_testkit::read_required_fixture;
-use std::io::Cursor;
 
 /// Regression harnesses for libFuzzer crashes found in `fuzz_ntfs_root_dir`.
 ///
@@ -17,7 +17,7 @@ fn run_fuzz_ntfs_root_dir_artifact(file_name: &str) {
 
     let data = read_required_fixture(
         env!("CARGO_MANIFEST_DIR"),
-        format!("../../crashes/libfuzzer/fuzz_ntfs_root_dir/{file_name}"),
+        format!("../../../crashes/libfuzzer/fuzz_ntfs_root_dir/{file_name}"),
         "Regenerate the fuzz_ntfs_root_dir corpus with cargo-fuzz.",
     );
     let mut cursor = Cursor::new(&data[..]);

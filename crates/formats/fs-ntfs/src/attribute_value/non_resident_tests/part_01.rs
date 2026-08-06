@@ -6,7 +6,7 @@ use super::{NtfsDataRun, NtfsDataRuns, NtfsNonResidentAttributeValue, StreamStat
 use crate::indexes::NtfsFileNameIndex;
 use crate::ntfs::Ntfs;
 use crate::types::NtfsPosition;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 /// Builds a synthetic, valid NTFS boot sector with sector size 512 and a
 /// single sector per cluster (cluster size = 512 bytes).

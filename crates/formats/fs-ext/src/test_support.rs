@@ -19,11 +19,11 @@ pub(crate) fn fixture_available(name: &str) -> bool {
         .exists()
 }
 
-pub(crate) fn load_image(name: &str) -> std::io::Cursor<Vec<u8>> {
+pub(crate) fn load_image(name: &str) -> fsmnt_testkit::Cursor<Vec<u8>> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("testdata")
         .join(name);
-    std::io::Cursor::new(std::fs::read(&path).expect("fixture"))
+    fsmnt_testkit::Cursor::new(std::fs::read(&path).expect("fixture"))
 }
 
 /// Resolve a single path component under the root directory and return its

@@ -110,7 +110,7 @@ fn journal_replay_build_runs_fc_phase_when_feature_set() {
     write_minimal_classic_tx(&mut bytes, &source);
 
     let expected_tid = {
-        let mut cursor = std::io::Cursor::new(bytes.clone());
+        let mut cursor = fsmnt_testkit::Cursor::new(bytes.clone());
         let ext = crate::Ext::open_lenient(&mut cursor).expect("open patched ext4 fixture");
         let last_classic_seq = classic_last_sequence(&ext, &mut cursor, &source);
         assert_eq!(last_classic_seq, Some(TEST_CLASSIC_SEQ));
@@ -119,7 +119,7 @@ fn journal_replay_build_runs_fc_phase_when_feature_set() {
     assert_ne!(expected_tid, source.sequence);
 
     let inum = 2;
-    let mut cursor = std::io::Cursor::new(bytes.as_slice());
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes.as_slice());
     let ext = crate::Ext::open_lenient(&mut cursor).expect("open patched ext4 fixture");
     let mut raw_inode = raw_inode_bytes(&ext, &mut cursor, inum);
     let new_mode =
@@ -133,7 +133,7 @@ fn journal_replay_build_runs_fc_phase_when_feature_set() {
     let blocks = fc_region(alloc::vec![tx], 4, source.block_size);
     write_fc_region_blocks(&mut bytes, &source, &blocks);
 
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
     let jr = JournalReplay::build(&ext, &mut cursor).expect("journal replay");
 
@@ -193,7 +193,7 @@ fn raw_inode_bytes<T: Read + Seek>(ext: &crate::Ext, fs: &mut T, inum: u32) -> V
 
 fn patch_journal_sb_for_fast_commit(bytes: &mut Vec<u8>, num_fc_blocks: u32) -> JournalSource {
     let (sb_off, checksum_mode_uses_sb_checksum, patched_maxlen) = {
-        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut cursor = fsmnt_testkit::Cursor::new(bytes.as_slice());
         let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
         let source = crate::journal::source::open_journal_source(&ext, &mut cursor)
             .expect("open journal source")
@@ -231,7 +231,7 @@ fn patch_journal_sb_for_fast_commit(bytes: &mut Vec<u8>, num_fc_blocks: u32) -> 
         sb[checksum_off..checksum_off + 4].copy_from_slice(&checksum.to_be_bytes());
     }
 
-    let mut cursor = std::io::Cursor::new(bytes.as_slice());
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes.as_slice());
     let ext = crate::Ext::open_lenient(&mut cursor).expect("open patched ext4 fixture");
     crate::journal::source::open_journal_source(&ext, &mut cursor)
         .expect("open patched journal source")
@@ -242,7 +242,7 @@ fn patch_journal_sb_for_fast_commit(bytes: &mut Vec<u8>, num_fc_blocks: u32) -> 
 fn write_minimal_classic_tx(bytes: &mut Vec<u8>, source: &JournalSource) {
     let block_size = usize::try_from(source.block_size).expect("block size fits usize");
     let fs_target = {
-        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut cursor = fsmnt_testkit::Cursor::new(bytes.as_slice());
         let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
         journal_block_host_fs_block(&ext, &mut cursor, 10)
     };
@@ -276,7 +276,7 @@ fn write_minimal_classic_tx(bytes: &mut Vec<u8>, source: &JournalSource) {
 
 fn write_journal_block(bytes: &mut Vec<u8>, source: &JournalSource, block: u32, data: &[u8]) {
     let host_off = {
-        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut cursor = fsmnt_testkit::Cursor::new(bytes.as_slice());
         let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
         journal_block_host_offset(&ext, &mut cursor, block)
     };
@@ -293,7 +293,7 @@ fn write_fc_region_blocks(bytes: &mut Vec<u8>, source: &JournalSource, blocks: &
         + 1;
     for (i, block) in blocks.iter().enumerate() {
         let host_off = {
-            let mut cursor = std::io::Cursor::new(bytes.as_slice());
+            let mut cursor = fsmnt_testkit::Cursor::new(bytes.as_slice());
             let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
             journal_block_host_offset(
                 &ext,
@@ -679,7 +679,7 @@ fn apply_restores_escape_and_suppresses_revoked() {
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
     let bytes = std::fs::read(&path).expect("ext4.img fixture");
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut cursor).expect("lenient open");
 
     let mut plan = ReplayPlan {
@@ -729,7 +729,7 @@ fn apply_drops_out_of_range_blocks() {
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
     let bytes = std::fs::read(&path).expect("ext4.img fixture");
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = crate::Ext::open_lenient(&mut cursor).expect("lenient open");
 
     let mut plan = ReplayPlan {
@@ -773,7 +773,7 @@ fn walk_propagates_real_io_errors() {
     struct IoErrorReader;
     impl JournalBlockReader for IoErrorReader {
         fn read_block(&mut self, _b: u32, _buf: &mut [u8]) -> Result<()> {
-            Err(crate::io::Error::new(crate::io::ErrorKind::PermissionDenied, "injected").into())
+            Err(crate::io::Error::from(crate::io::ErrorKind::Other).into())
         }
     }
 

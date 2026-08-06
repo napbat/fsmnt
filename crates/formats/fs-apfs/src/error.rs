@@ -112,11 +112,11 @@ mod tests {
 
     #[test]
     fn from_io_error_wraps_io_variant() {
-        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let io_err: io::Error = io::ErrorKind::InvalidInput.into();
         let apfs_err: ApfsError = io_err.into();
         match apfs_err {
             ApfsError::Io(error) => {
-                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             }
             _ => panic!("expected ApfsError::Io"),
         }
@@ -124,9 +124,9 @@ mod tests {
 
     #[test]
     fn into_io_error_unwraps_io_variant() {
-        let original = io::Error::new(io::ErrorKind::NotFound, "missing");
+        let original: io::Error = io::ErrorKind::InvalidData.into();
         let converted: io::Error = ApfsError::Io(original).into();
-        assert_eq!(converted.kind(), io::ErrorKind::NotFound);
+        assert_eq!(converted.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn io_kind_reports_underlying_kind() {
-        let err = ApfsError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "eof"));
+        let err = ApfsError::Io(io::ErrorKind::UnexpectedEof.into());
         assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof));
     }
 
@@ -154,7 +154,7 @@ mod tests {
         // A mutant that hard-codes `Some(0)` / `Some(1)` is caught here.
         assert_eq!(FsError::byte_offset(&ApfsError::Unsupported("x")), None);
         assert_eq!(
-            FsError::byte_offset(&ApfsError::Io(io::Error::other("x"))),
+            FsError::byte_offset(&ApfsError::Io(io::ErrorKind::Other.into())),
             None
         );
     }

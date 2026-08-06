@@ -27,7 +27,7 @@ fn resolve_kind_with_filetype_maps_each_ext4_ft() {
     // The filetype-byte branch is a pure function of the input byte;
     // child_inode and reader are unused. Use a dummy Ext + empty Cursor.
     let ext = Ext::dummy_for_test();
-    let mut cur = std::io::Cursor::new(alloc::vec::Vec::<u8>::new());
+    let mut cur = fsmnt_testkit::Cursor::new(alloc::vec::Vec::<u8>::new());
     for (ft, expected) in [
         (0u8, EntryKind::Other),
         (1, EntryKind::File),

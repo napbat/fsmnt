@@ -12,7 +12,7 @@ fn opens_meta_bg_image_and_reads_files() {
         eprintln!("skipping: ext4-meta-bg.img fixture not generated");
         return;
     };
-    let mut cursor = std::io::Cursor::new(bytes);
+    let mut cursor = fsmnt_testkit::Cursor::new(bytes);
     let ext = fs_ext::Ext::new(&mut cursor).expect("open ext4-meta-bg.img");
 
     assert!(ext.is_meta_bg(), "fixture must have META_BG enabled");

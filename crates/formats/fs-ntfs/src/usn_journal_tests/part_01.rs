@@ -39,7 +39,7 @@ fn make_v3_record(len: u32) -> Vec<u8> {
 /// Builds a journal whose `$J` stream is a single non-sparse segment at
 /// disk byte `disk_pos`, containing `stream` bytes. Returns the journal
 /// plus a cursor whose backing buffer holds `stream` at `disk_pos`.
-fn journal_with_stream(disk_pos: u64, stream: &[u8]) -> (NtfsUsnJournal, std::io::Cursor<Vec<u8>>) {
+fn journal_with_stream(disk_pos: u64, stream: &[u8]) -> (NtfsUsnJournal, fsmnt_testkit::Cursor<Vec<u8>>) {
     let mut buf =
         vec![0u8; usize::try_from(disk_pos).expect("test value fits usize") + stream.len()];
     buf[usize::try_from(disk_pos).expect("test value fits usize")..].copy_from_slice(stream);
@@ -55,7 +55,7 @@ fn journal_with_stream(disk_pos: u64, stream: &[u8]) -> (NtfsUsnJournal, std::io
         map,
         j_size: stream_length,
     };
-    (journal, std::io::Cursor::new(buf))
+    (journal, fsmnt_testkit::Cursor::new(buf))
 }
 
 #[test]
@@ -246,7 +246,7 @@ fn journal_from_segments(
     data_disk_pos: u64,
     data: &[u8],
     j_size: u64,
-) -> (NtfsUsnJournal, std::io::Cursor<Vec<u8>>) {
+) -> (NtfsUsnJournal, fsmnt_testkit::Cursor<Vec<u8>>) {
     let mut image =
         vec![0u8; usize::try_from(data_disk_pos).expect("test value fits usize") + data.len()];
     image[usize::try_from(data_disk_pos).expect("test value fits usize")..].copy_from_slice(data);
@@ -261,7 +261,7 @@ fn journal_from_segments(
         map,
         j_size,
     };
-    (journal, std::io::Cursor::new(image))
+    (journal, fsmnt_testkit::Cursor::new(image))
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn test_iterator_zero_length_crosses_to_next_segment() {
         map,
         j_size: 96,
     };
-    let mut cursor = std::io::Cursor::new(image);
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let mut iter = journal.records();
     let mut buf = Vec::new();
     let r = iter.next(&mut cursor, &mut buf).unwrap().unwrap();
@@ -395,7 +395,7 @@ fn test_iterator_skips_leading_sparse_hole() {
         map,
         j_size: 576,
     };
-    let mut cursor = std::io::Cursor::new(buf_image);
+    let mut cursor = fsmnt_testkit::Cursor::new(buf_image);
 
     let mut iter = journal.records();
     let mut rec_buf = Vec::new();

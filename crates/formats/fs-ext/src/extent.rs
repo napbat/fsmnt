@@ -638,7 +638,7 @@ mod tests {
         let ext = test_ext();
         // Extent: logical blocks 0-4 -> physical block 100
         let iblock = make_leaf_iblock(&[(0, 5, 0, 100)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         // Block 0 -> hit
         let result = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0).expect("should not error");
@@ -668,7 +668,7 @@ mod tests {
         let ext = test_ext();
         // Two extents: blocks 0-2 -> phys 100, blocks 10-11 -> phys 200
         let iblock = make_leaf_iblock(&[(0, 3, 0, 100), (10, 2, 0, 200)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let result = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 1).expect("should not error");
         let e = result.expect("should find extent");
@@ -691,7 +691,7 @@ mod tests {
         let ext = test_ext();
         // ee_len = 32769 -> uninitialized, actual length = 1
         let iblock = make_leaf_iblock(&[(0, 32769, 0, 500)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let result = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0).expect("should not error");
         let e = result.expect("should find extent");
@@ -706,7 +706,7 @@ mod tests {
         let mut iblock = [0u8; 60];
         // Write wrong magic
         iblock[0..2].copy_from_slice(&0xBEEFu16.to_le_bytes());
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let err = resolve_extent(&ext, &mut cursor, 42, 0, &iblock, 0)
             .expect_err("should fail with bad magic");
@@ -723,7 +723,7 @@ mod tests {
         // Valid magic but depth = 6 (exceeds MAX_DEPTH of 5)
         iblock[0..2].copy_from_slice(&EXTENT_MAGIC.to_le_bytes());
         iblock[6..8].copy_from_slice(&6u16.to_le_bytes()); // eh_depth = 6
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let err = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0)
             .expect_err("should fail with excessive depth");
@@ -739,7 +739,7 @@ mod tests {
         let mut iblock = [0u8; 60];
         iblock[0..2].copy_from_slice(&EXTENT_MAGIC.to_le_bytes());
         // eh_entries = 0, depth = 0
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let result = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0).expect("should not error");
         assert!(result.is_none());
@@ -750,7 +750,7 @@ mod tests {
         let ext = test_ext();
         // ee_start_hi = 1, ee_start_lo = 0 -> physical = 0x1_0000_0000
         let iblock = make_leaf_iblock(&[(0, 1, 1, 0)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let result = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0).expect("should not error");
         let e = result.expect("should find extent");
@@ -774,7 +774,7 @@ mod tests {
         iblock[idx_off..idx_off + 4].copy_from_slice(&0u32.to_le_bytes());
         iblock[idx_off + 4..idx_off + 8].copy_from_slice(&99999u32.to_le_bytes());
 
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let err = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0)
             .expect_err("should fail with block out of range");
@@ -823,7 +823,7 @@ mod tests {
         // ee_start_hi = 0 (zeroed), ee_start_lo = 200
         cb[ext_off + 8..ext_off + 12].copy_from_slice(&200u32.to_le_bytes());
 
-        let mut cursor = std::io::Cursor::new(disk);
+        let mut cursor = fsmnt_testkit::Cursor::new(disk);
 
         let result = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 5).expect("should not error");
         let e = result.expect("should find extent through index");
@@ -864,7 +864,7 @@ mod tests {
         cb[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries
         cb[4..6].copy_from_slice(&341u16.to_le_bytes()); // eh_max -> tail past block end
 
-        let mut cursor = std::io::Cursor::new(disk);
+        let mut cursor = fsmnt_testkit::Cursor::new(disk);
 
         let err = resolve_extent(&ext, &mut cursor, 1, 0, &iblock, 0)
             .expect_err("bad extent tail placement should be rejected");
@@ -883,7 +883,7 @@ mod tests {
         // Extent: logical 0, len=3, physical_block=9999 -> blocks 9999, 10000, 10001
         // Block 10000 == blocks_count, so the second block must be rejected.
         let iblock = make_leaf_iblock(&[(0, 3, 0, 9999)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let mut out = alloc::vec::Vec::new();
         let err = collect_extents_into(&ext, &mut cursor, 1, 0, &iblock, &mut out)
@@ -903,7 +903,7 @@ mod tests {
         // Extent: physical blocks 9999, 10000, 10001. Block 10000 is the
         // first out-of-range block and must be reported.
         let iblock = make_leaf_iblock(&[(0, 3, 0, 9999)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let mut out = alloc::vec::Vec::new();
         let err = collect_tagged_extent_blocks_into(&ext, &mut cursor, 1, 0, &iblock, &mut out)
@@ -922,7 +922,7 @@ mod tests {
         ext.blocks_count = 10000;
         // Extent: logical 0, len=5, physical_block=100 -> blocks 100..104 (all < 10000)
         let iblock = make_leaf_iblock(&[(0, 5, 0, 100)]);
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut cursor = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
         let mut out = alloc::vec::Vec::new();
         collect_extents_into(&ext, &mut cursor, 1, 0, &iblock, &mut out)

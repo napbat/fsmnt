@@ -697,6 +697,9 @@ dependencies = [
 [[package]]
 name = "fsmnt-testkit"
 version = "0.1.0"
+dependencies = [
+ "fs-common",
+]
 
 [[package]]
 name = "fuser"

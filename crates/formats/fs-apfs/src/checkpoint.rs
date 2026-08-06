@@ -481,7 +481,7 @@ fn gather_mappings<R: Read + Seek>(
 mod tests {
     use super::*;
     use crate::object::OBJ_EPHEMERAL;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

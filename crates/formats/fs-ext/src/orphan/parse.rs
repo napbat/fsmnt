@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn legacy_chain_with_zero_head_is_a_no_op() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let mut plan = OrphanPlan::default();
         walk_legacy_chain(&ext, &mut fs, 0, &mut plan).expect("no-op walk");
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn orphan_file_scan_skipped_when_flags_clear() {
-        let mut fs = std::io::Cursor::new(crate::test_support::load_clean_ext4_image());
+        let mut fs = fsmnt_testkit::Cursor::new(crate::test_support::load_clean_ext4_image());
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         // ext4.img has COMPAT_ORPHAN_FILE but NOT RO_COMPAT_ORPHAN_PRESENT
         // (the latter is only set when the kernel has pending orphan entries),

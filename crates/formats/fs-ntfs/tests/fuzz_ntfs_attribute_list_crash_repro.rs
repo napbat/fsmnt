@@ -16,7 +16,7 @@ fn run_fuzz_ntfs_attribute_list_artifact(file_name: &str) {
 
     let data = read_required_fixture(
         env!("CARGO_MANIFEST_DIR"),
-        format!("../../crashes/libfuzzer/fuzz_ntfs_attribute_list/{file_name}"),
+        format!("../../../crashes/libfuzzer/fuzz_ntfs_attribute_list/{file_name}"),
         "Regenerate the fuzz_ntfs_attribute_list corpus with cargo-fuzz.",
     );
 
@@ -24,7 +24,7 @@ fn run_fuzz_ntfs_attribute_list_artifact(file_name: &str) {
 
     let attr_list: NtfsAttributeList<'_, '_> = NtfsAttributeList::Resident(&data, pos);
     let mut entries = attr_list.entries();
-    let mut dummy = std::io::Cursor::new(Vec::<u8>::new());
+    let mut dummy = fsmnt_testkit::Cursor::new(Vec::<u8>::new());
 
     // Limit iterations to detect infinite loops (the timeout had no bound).
     let mut count = 0u32;

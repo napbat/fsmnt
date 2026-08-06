@@ -6,8 +6,8 @@
 //! These tests verify that the parser works on a real filesystem
 //! created by real tools, not just hand-crafted byte arrays.
 
+use fsmnt_testkit::Cursor;
 use std::collections::BTreeSet;
-use std::io::Cursor;
 
 use fs_common::FsReadSeek;
 use fs_common::traverse::{EntryKind, walk_dir};
@@ -278,7 +278,8 @@ fn seek_and_read_file() {
     let mut file = exfat.open_file(&mut cursor, "hello.txt").unwrap();
 
     // Seek to offset 7 ("exFAT!")
-    file.seek(&mut cursor, std::io::SeekFrom::Start(7)).unwrap();
+    file.seek(&mut cursor, fs_common::io::SeekFrom::Start(7))
+        .unwrap();
 
     let mut buf = [0u8; 6];
     let n = file.read(&mut cursor, &mut buf).unwrap();

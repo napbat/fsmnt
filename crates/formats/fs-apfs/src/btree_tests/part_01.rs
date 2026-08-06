@@ -1,6 +1,6 @@
 use super::*;
 use fs_common::iter::FsTryIterator;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 const NODE_SIZE: usize = 4096;
 

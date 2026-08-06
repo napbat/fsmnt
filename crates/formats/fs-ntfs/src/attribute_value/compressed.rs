@@ -281,7 +281,7 @@ mod tests {
     /// run, but returns an I/O error for reads at or beyond the data run.
     /// Used to exercise the I/O-error recovery branch in `ensure_unit_buffered`.
     struct FailingReader {
-        inner: std::io::Cursor<std::vec::Vec<u8>>,
+        inner: fsmnt_testkit::Cursor<std::vec::Vec<u8>>,
     }
 
     impl crate::io::Read for FailingReader {
@@ -309,7 +309,7 @@ mod tests {
     /// the backing image so the single data run at LCN 4 holds `payload`.
     ///
     /// Returns the in-memory reader and a constructed [`Ntfs`].
-    fn build_image(payload: &[u8]) -> std::io::Cursor<std::vec::Vec<u8>> {
+    fn build_image(payload: &[u8]) -> fsmnt_testkit::Cursor<std::vec::Vec<u8>> {
         let image_len = usize::try_from(DATA_RUN_LCN + DATA_RUN_CLUSTERS)
             .expect("test value fits usize")
             * usize::try_from(CLUSTER_SIZE).expect("test value fits usize");
@@ -331,7 +331,7 @@ mod tests {
         // Place the attribute payload at LCN 4.
         let start = usize::try_from(DATA_RUN_LCN * CLUSTER_SIZE).expect("test value fits usize");
         buf[start..start + payload.len()].copy_from_slice(payload);
-        std::io::Cursor::new(buf)
+        fsmnt_testkit::Cursor::new(buf)
     }
 
     /// A single data run: 1-byte cluster count, 1-byte VCN (the LCN).
@@ -405,14 +405,14 @@ mod tests {
         assert_eq!(value.len(), 1500);
         assert!(!value.is_empty());
         assert_eq!(
-            FsReadSeek::<std::io::Cursor<std::vec::Vec<u8>>>::len(&value),
+            FsReadSeek::<fsmnt_testkit::Cursor<std::vec::Vec<u8>>>::len(&value),
             1500
         );
 
         // stream_position starts at 0 and is reported by both accessors.
         assert_eq!(value.stream_position(), 0);
         assert_eq!(
-            FsReadSeek::<std::io::Cursor<std::vec::Vec<u8>>>::stream_position(&value),
+            FsReadSeek::<fsmnt_testkit::Cursor<std::vec::Vec<u8>>>::stream_position(&value),
             0
         );
 
@@ -449,7 +449,7 @@ mod tests {
         // The trait stream_position accessor reports the advanced offset
         // (1500), not the 0 a return-value replacement would yield.
         assert_eq!(
-            FsReadSeek::<std::io::Cursor<std::vec::Vec<u8>>>::stream_position(&value),
+            FsReadSeek::<fsmnt_testkit::Cursor<std::vec::Vec<u8>>>::stream_position(&value),
             1500
         );
     }

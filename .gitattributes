@@ -1,1 +1,3 @@
 * text=auto eol=lf
+/crashes/** binary
+/crates/formats/fs-exfat/testdata/testfs1 binary

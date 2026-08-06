@@ -413,7 +413,7 @@ fn push_free(extents: &mut Vec<FreeExtent>, start: u64, length: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

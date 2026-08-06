@@ -66,8 +66,8 @@ pub fn cluster_heap_offset(cluster: u32) -> usize {
 }
 
 /// Creates an `ExFat` from the given image and returns both.
-pub fn make_exfat(image: Vec<u8>) -> (ExFat, std::io::Cursor<Vec<u8>>) {
-    let mut cursor = std::io::Cursor::new(image);
+pub fn make_exfat(image: Vec<u8>) -> (ExFat, fsmnt_testkit::Cursor<Vec<u8>>) {
+    let mut cursor = fsmnt_testkit::Cursor::new(image);
     let exfat = ExFat::new(&mut cursor).unwrap();
     (exfat, cursor)
 }

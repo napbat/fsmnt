@@ -184,20 +184,20 @@ mod tests {
 
     #[test]
     fn from_io_error() {
-        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
+        let io_err: io::Error = io::ErrorKind::InvalidInput.into();
         let fat_err: FatError = io_err.into();
         match fat_err {
-            FatError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::PermissionDenied),
+            FatError::Io(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
             _ => panic!("Expected FatError::Io variant"),
         }
     }
 
     #[test]
     fn into_io_error_unwraps_io_variant() {
-        let original = io::Error::new(io::ErrorKind::NotFound, "original error");
+        let original: io::Error = io::ErrorKind::InvalidData.into();
         let fat_err = FatError::Io(original);
         let converted: io::Error = fat_err.into();
-        assert_eq!(converted.kind(), io::ErrorKind::NotFound);
+        assert_eq!(converted.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -209,13 +209,13 @@ mod tests {
 
     #[test]
     fn fs_error_io_kind_interrupted() {
-        let err = FatError::Io(io::Error::new(io::ErrorKind::Interrupted, "test"));
+        let err = FatError::Io(io::ErrorKind::Interrupted.into());
         assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::Interrupted),);
     }
 
     #[test]
     fn fs_error_io_kind_unexpected_eof() {
-        let err = FatError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "test"));
+        let err = FatError::Io(io::ErrorKind::UnexpectedEof.into());
         assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof),);
     }
 

@@ -416,7 +416,7 @@ mod tests {
     use crate::object::{OBJ_PHYS_SIZE, OBJ_PHYSICAL};
     use crate::omap::Omap;
     use crate::types::{Oid, Xid};
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const BLK: usize = 4096;
 

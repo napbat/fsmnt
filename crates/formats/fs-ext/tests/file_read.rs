@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 use fs_common::io::{FsReadSeek, SeekFrom};
 use fs_ext::ExtFile;

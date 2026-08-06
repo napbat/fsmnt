@@ -180,7 +180,7 @@ impl NtfsMftEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use fsmnt_testkit::Cursor;
 
     const FRS: u32 = 1024; // file record size
     const FRS_USIZE: usize = 1024;

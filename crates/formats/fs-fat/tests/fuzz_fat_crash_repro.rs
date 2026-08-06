@@ -1,11 +1,11 @@
 //! Regression tests for inputs that previously crashed FAT fuzz targets.
 
 use fs_common::iter::FsTryIterator;
-use std::io::Cursor;
+use fsmnt_testkit::Cursor;
 
 /// Regression harnesses for libFuzzer crashes found in FAT fuzz targets.
 fn load_artifact(target: &str, file_name: &str) -> Option<Vec<u8>> {
-    let relative_path = format!("../../crashes/libfuzzer/{target}/{file_name}");
+    let relative_path = format!("../../../crashes/libfuzzer/{target}/{file_name}");
     let data = fsmnt_testkit::read_optional_fixture(env!("CARGO_MANIFEST_DIR"), &relative_path);
     if data.is_none() {
         eprintln!("SKIPPED: missing recorded libFuzzer artifact {relative_path}");

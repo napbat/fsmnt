@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn synth_data_position_within_and_beyond_range() {
         let mut value = synth_value();
-        let mut fs = std::io::Cursor::new(alloc::vec::Vec::new());
+        let mut fs = fsmnt_testkit::Cursor::new(alloc::vec::Vec::new());
 
         // At stream position 0 the data position equals the anchor.
         assert_eq!(value.data_position().value().unwrap().get(), SYNTH_POSITION);
@@ -180,12 +180,12 @@ mod tests {
     #[test]
     fn synth_stream_position_tracks_reads() {
         let mut value = synth_value();
-        let mut fs = std::io::Cursor::new(alloc::vec::Vec::new());
+        let mut fs = fsmnt_testkit::Cursor::new(alloc::vec::Vec::new());
 
         // Initially zero.
         assert_eq!(value.stream_position(), 0);
         assert_eq!(
-            FsReadSeek::<std::io::Cursor<alloc::vec::Vec<u8>>>::stream_position(&value),
+            FsReadSeek::<fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>>::stream_position(&value),
             0
         );
 
@@ -197,7 +197,7 @@ mod tests {
         assert_eq!(&buf, &[0xAA, 0xBB, 0xCC]);
         assert_eq!(value.stream_position(), 3);
         assert_eq!(
-            FsReadSeek::<std::io::Cursor<alloc::vec::Vec<u8>>>::stream_position(&value),
+            FsReadSeek::<fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>>::stream_position(&value),
             3
         );
     }
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn synth_read_consumes_then_returns_zero_at_end() {
         let mut value = synth_value();
-        let mut fs = std::io::Cursor::new(alloc::vec::Vec::new());
+        let mut fs = fsmnt_testkit::Cursor::new(alloc::vec::Vec::new());
 
         // First read returns the genuine byte count (kills `-> Ok(0)`/`Ok(1)`
         // and the `remaining_len() == 0` -> `!=` swap, which would early-exit
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn synth_seek_returns_new_position_and_trait_len() {
         let mut value = synth_value();
-        let mut fs = std::io::Cursor::new(alloc::vec::Vec::new());
+        let mut fs = fsmnt_testkit::Cursor::new(alloc::vec::Vec::new());
 
         // seek returns the resulting stream position (kills `-> Ok(0)`/`Ok(1)`).
         let pos = value.seek(&mut fs, SeekFrom::Start(4)).unwrap();
@@ -234,7 +234,7 @@ mod tests {
 
         // trait len() reports the data length (kills `-> 0`/`-> 1`).
         assert_eq!(
-            FsReadSeek::<std::io::Cursor<alloc::vec::Vec<u8>>>::len(&value),
+            FsReadSeek::<fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>>::len(&value),
             5
         );
     }

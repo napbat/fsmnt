@@ -14,7 +14,7 @@
 //! 2. Query boot sector fields via typed accessors.
 //! 3. Compute cluster byte offsets with [`ExFat::cluster_offset`].
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![forbid(unsafe_code)]
 

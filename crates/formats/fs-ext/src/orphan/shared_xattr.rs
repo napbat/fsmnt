@@ -243,12 +243,12 @@ mod tests {
         fixture_path(name).exists()
     }
 
-    fn load_dirty(name: &str) -> Option<(Ext, std::io::Cursor<alloc::vec::Vec<u8>>)> {
+    fn load_dirty(name: &str) -> Option<(Ext, fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>)> {
         if !fixture_available(name) {
             return None;
         }
         let bytes = std::fs::read(fixture_path(name)).ok()?;
-        let mut cursor = std::io::Cursor::new(bytes);
+        let mut cursor = fsmnt_testkit::Cursor::new(bytes);
         let ext = Ext::open_lenient(&mut cursor).expect("open_lenient");
         Some((ext, cursor))
     }
@@ -382,7 +382,7 @@ mod tests {
 
     fn read_sb_block_from_overlay(
         ext: &Ext,
-        cursor: &mut std::io::Cursor<alloc::vec::Vec<u8>>,
+        cursor: &mut fsmnt_testkit::Cursor<alloc::vec::Vec<u8>>,
     ) -> alloc::vec::Vec<u8> {
         use crate::io::SeekFrom;
         let sb_block: u64 = u64::from(ext.block_size() <= 1024);
@@ -455,7 +455,7 @@ mod tests {
     fn image_with_xattr_block(
         block_nr: u64,
         h_refcount: u32,
-    ) -> std::io::Cursor<alloc::vec::Vec<u8>> {
+    ) -> fsmnt_testkit::Cursor<alloc::vec::Vec<u8>> {
         let block_size = 4096usize;
         let total = ((usize::try_from(block_nr).expect("the test fixture value fits in usize"))
             + 2)
@@ -466,7 +466,7 @@ mod tests {
         bytes[base..base + 4].copy_from_slice(&crate::xattr::XATTR_MAGIC.to_le_bytes());
         bytes[base + 4..base + 8].copy_from_slice(&h_refcount.to_le_bytes());
         bytes[base + 8..base + 12].copy_from_slice(&1u32.to_le_bytes()); // h_blocks = 1
-        std::io::Cursor::new(bytes)
+        fsmnt_testkit::Cursor::new(bytes)
     }
 
     #[test]

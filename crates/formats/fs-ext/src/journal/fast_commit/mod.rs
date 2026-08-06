@@ -163,10 +163,10 @@ mod build_tests {
     use crate::journal::replay::BlockOverlay;
     use crate::journal::superblock::JournalSource;
 
-    fn fixture_ext() -> (crate::Ext, std::io::Cursor<Vec<u8>>) {
+    fn fixture_ext() -> (crate::Ext, fsmnt_testkit::Cursor<Vec<u8>>) {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
         let bytes = std::fs::read(path).expect("read ext4 fixture");
-        let mut cursor = std::io::Cursor::new(bytes);
+        let mut cursor = fsmnt_testkit::Cursor::new(bytes);
         let ext = crate::Ext::open_lenient(&mut cursor).expect("open ext4 fixture");
         (ext, cursor)
     }
