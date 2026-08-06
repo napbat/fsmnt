@@ -35,6 +35,36 @@ enum Commands {
         fsname: String,
     },
 
+    /// Mount a raw filesystem image file (NTFS, FAT, exFAT, ext, APFS,
+    /// `BitLocker`) as a read-only volume.
+    MountImage {
+        /// Path to the image file. Must start with the filesystem itself,
+        /// not a partition table; use `--offset` for an image of a whole
+        /// partitioned disk.
+        image: PathBuf,
+
+        /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
+        /// empty NTFS directory on Windows.
+        mountpoint: String,
+
+        /// Byte offset of the filesystem within the image.
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+
+        /// Volume label shown in the OS file manager.
+        #[arg(long)]
+        volname: Option<String>,
+
+        /// `BitLocker` recovery password (48 digits, hyphen-separated
+        /// groups of six).
+        #[arg(long)]
+        recovery_password: Option<String>,
+
+        /// Path to a `BitLocker` .BEK startup key file.
+        #[arg(long)]
+        bek_file: Option<PathBuf>,
+    },
+
     /// List physical drives on this machine.
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     Drives,
@@ -46,8 +76,8 @@ enum Commands {
         drive: String,
     },
 
-    /// Mount a partition from a physical drive (requires filesystem
-    /// drivers; see the fsmnt library documentation).
+    /// Mount a partition from a physical drive (NTFS, FAT, exFAT, ext,
+    /// APFS, `BitLocker`).
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     MountDevice {
         /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`).
@@ -65,6 +95,15 @@ enum Commands {
         /// drive model or ID).
         #[arg(long)]
         volname: Option<String>,
+
+        /// `BitLocker` recovery password (48 digits, hyphen-separated
+        /// groups of six).
+        #[arg(long)]
+        recovery_password: Option<String>,
+
+        /// Path to a `BitLocker` .BEK startup key file.
+        #[arg(long)]
+        bek_file: Option<PathBuf>,
     },
 }
 
@@ -78,6 +117,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             volname,
             fsname,
         } => handle_mount(&source, &mountpoint, &volname, &fsname),
+        Commands::MountImage {
+            image,
+            mountpoint,
+            offset,
+            volname,
+            recovery_password,
+            bek_file,
+        } => handle_mount_image(
+            &image,
+            &mountpoint,
+            offset,
+            volname.as_deref(),
+            recovery_password,
+            bek_file.as_deref(),
+        ),
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Commands::Drives => handle_drives(),
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -88,7 +142,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mountpoint,
             partition,
             volname,
-        } => handle_mount_device(&drive, partition, &mountpoint, volname.as_deref()),
+            recovery_password,
+            bek_file,
+        } => handle_mount_device(
+            &drive,
+            partition,
+            &mountpoint,
+            volname.as_deref(),
+            recovery_password,
+            bek_file.as_deref(),
+        ),
     }
 }
 
@@ -157,7 +220,6 @@ fn format_size(bytes: u64) -> String {
 }
 
 /// Filesystem type label for a detected boot sector.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn fs_label(detected: fsmnt::device::DetectedBootSector) -> &'static str {
     use fsmnt::device::DetectedBootSector as D;
     match detected {
@@ -283,6 +345,118 @@ fn handle_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Build the driver registry, attaching any supplied `BitLocker`
+/// credentials.
+///
+/// Credentials ride on the driver because `FilesystemDriver::open` takes no
+/// credentials parameter.  A driver with none still unlocks volumes whose
+/// protection is suspended, via the clear key.
+fn build_registry(
+    recovery_password: Option<String>,
+    bek_file: Option<&std::path::Path>,
+) -> Result<fsmnt::device::DriverRegistry, Box<dyn std::error::Error>> {
+    use fsmnt_drivers::{BitLockerDriver, registry_with_bitlocker};
+
+    let mut bitlocker = BitLockerDriver::new();
+    if let Some(password) = recovery_password {
+        bitlocker = bitlocker.with_recovery_password(password);
+    }
+    if let Some(path) = bek_file {
+        bitlocker = bitlocker.with_bek_file(
+            std::fs::read(path)
+                .map_err(|e| format!("failed to read BEK file '{}': {e}", path.display()))?,
+        );
+    }
+    Ok(registry_with_bitlocker(bitlocker))
+}
+
+/// Mount a raw filesystem image file.
+fn handle_mount_image(
+    image: &std::path::Path,
+    mountpoint: &str,
+    offset: u64,
+    volname: Option<&str>,
+    recovery_password: Option<String>,
+    bek_file: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::device::{DetectedBootSector, FS_DETECT_PROBE_SIZE, PartitionReader};
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(image)
+        .map_err(|e| format!("failed to open image '{}': {e}", image.display()))?;
+    let size = file.metadata()?.len();
+    if offset >= size {
+        return Err(format!(
+            "offset {offset} is past the end of '{}' ({size} bytes)",
+            image.display(),
+        )
+        .into());
+    }
+
+    // Classify the filesystem at `offset`.  A short tail is fine: detection
+    // tolerates a probe smaller than FS_DETECT_PROBE_SIZE.
+    let mut probe = vec![0u8; FS_DETECT_PROBE_SIZE];
+    file.seek(SeekFrom::Start(offset))?;
+    let read = read_up_to(&mut file, &mut probe)?;
+    let detected = DetectedBootSector::from_bytes(&probe[..read]);
+
+    if detected == DetectedBootSector::MbrPartitioned
+        || detected == DetectedBootSector::GptPartitioned
+    {
+        return Err(format!(
+            "'{}' is a partitioned disk image ({detected:?}), not a filesystem. \
+             Re-run with --offset set to the start of a partition.",
+            image.display(),
+        )
+        .into());
+    }
+
+    file.seek(SeekFrom::Start(0))?;
+    let reader = PartitionReader::new(file, offset, size - offset);
+    let drivers = build_registry(recovery_password, bek_file)?;
+    let filesystem = drivers.open(Box::new(reader), detected)?;
+
+    ensure_unix_mountpoint(mountpoint)?;
+
+    let volname = volname.map_or_else(
+        || {
+            image
+                .file_stem()
+                .map_or_else(|| "fsmnt-image".to_string(), |s| s.to_string_lossy().into())
+        },
+        ToString::to_string,
+    );
+
+    println!(
+        "Detected {detected:?} at offset {offset} in {}",
+        image.display()
+    );
+    block_on_mount(
+        filesystem,
+        mountpoint,
+        fs_label(detected),
+        &volname,
+        fs_label(detected),
+        size - offset,
+    )
+}
+
+/// Fill `buf` as far as the reader allows, returning the byte count.
+///
+/// Unlike `read_exact` this tolerates a source shorter than `buf`.
+fn read_up_to<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
 /// Mount a partition from a physical drive.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn handle_mount_device(
@@ -290,24 +464,16 @@ fn handle_mount_device(
     partition: usize,
     mountpoint: &str,
     volname: Option<&str>,
+    recovery_password: Option<String>,
+    bek_file: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
-    use fsmnt::device::{DriverRegistry, HostDriveEnumerator, HostDriveId};
+    use fsmnt::device::{HostDriveEnumerator, HostDriveId};
 
     let id = HostDriveId::new(drive);
+    let drivers = build_registry(recovery_password, bek_file)?;
 
-    // No filesystem drivers are compiled into the standalone CLI; the
-    // registry is the plug-in point for library consumers.
-    let drivers = DriverRegistry::new();
-
-    let opened =
-        fsmnt::open_device_partition::<HostDrives>(&id, partition, &drivers).map_err(|e| {
-            format!(
-                "{e}\nnote: the standalone fsmnt CLI includes no filesystem parsers; \
-                 embed fsmnt as a library and register FilesystemDriver adapters \
-                 in a DriverRegistry to mount raw partitions"
-            )
-        })?;
+    let opened = fsmnt::open_device_partition::<HostDrives>(&id, partition, &drivers)?;
 
     ensure_unix_mountpoint(mountpoint)?;
 

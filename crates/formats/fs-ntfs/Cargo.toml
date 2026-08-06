@@ -1,0 +1,41 @@
+[package]
+name = "fs-ntfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+arbitrary = { workspace = true, optional = true }
+arrayvec = { workspace = true, default-features = false }
+bitflags = { workspace = true }
+chrono = { workspace = true, default-features = false, optional = true }
+derive_more = { workspace = true, default-features = false, features = ["display", "from"] }
+enumn = { workspace = true }
+fs-common = { workspace = true, default-features = false }
+nt-compression = { workspace = true, optional = true, features = ["lznt1", "xpress", "lzx"] }
+memoffset = { workspace = true }
+nt-string = { workspace = true, default-features = false, features = ["alloc"] }
+strum_macros = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true, default-features = false, features = ["formatting", "large-dates", "macros"], optional = true }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+arbitrary = { workspace = true }
+mutants = "0.0.4"
+time = { workspace = true, default-features = false, features = ["formatting", "large-dates", "macros"] }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "3.0"
+
+[features]
+default = ["std"]
+std = ["arrayvec/std", "chrono?/std", "fs-common/std", "nt-string/std", "thiserror/std", "time?/std", "zerocopy/std"]
+arbitrary = ["dep:arbitrary"]
+compression = ["nt-compression"]
+
+[[example]]
+name = "fs-ntfs-shell"
+required-features = ["std", "compression", "chrono", "time"]

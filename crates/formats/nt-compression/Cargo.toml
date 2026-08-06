@@ -1,0 +1,86 @@
+[package]
+name = "nt-compression"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+fs-common = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+cpufeatures = { workspace = true }
+
+[features]
+default = []
+lznt1 = []
+xpress = []
+xpress-huffman = []
+lzx = []
+lzxd = []
+lzx-cab = []
+compress-lznt1 = ["lznt1"]
+compress-xpress = ["xpress"]
+compress-xpress-huffman = ["xpress-huffman"]
+compress-lzx = ["lzx"]
+
+[dev-dependencies]
+divan = "0.1"
+libloading = "0.9"
+proptest = "1"
+
+[[test]]
+name = "fast_path_differential"
+required-features = [
+    "compress-xpress",
+    "compress-xpress-huffman",
+    "xpress",
+    "xpress-huffman",
+]
+
+[[bench]]
+name = "compress"
+harness = false
+required-features = [
+    "compress-lznt1",
+    "compress-xpress",
+    "compress-xpress-huffman",
+    "compress-lzx",
+]
+
+[[bench]]
+name = "decompress"
+harness = false
+required-features = ["lznt1", "xpress", "xpress-huffman", "lzx"]
+
+[[bench]]
+name = "rtl_compare"
+harness = false
+required-features = [
+    "compress-lznt1",
+    "compress-xpress",
+    "compress-xpress-huffman",
+    "lznt1",
+    "xpress",
+    "xpress-huffman",
+]
+
+[[bench]]
+name = "wimlib_compare"
+harness = false
+required-features = [
+    "compress-lzx",
+    "compress-xpress-huffman",
+    "lzx",
+    "xpress-huffman",
+]
+
+[[test]]
+name = "wimlib_cross"
+required-features = [
+    "compress-lzx",
+    "compress-xpress-huffman",
+    "lzx",
+    "xpress-huffman",
+]

@@ -1,0 +1,42 @@
+[package]
+name = "nt-bitlocker"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Transparent BitLocker (FVE) volume decryption"
+
+[dependencies]
+# Pinned to 0.8 — aes 0.9 uses cipher 0.5 / hybrid-array `Array`, but
+# xts-mode 0.5 and ccm 0.5 (the only stable releases) still depend on
+# cipher 0.4 / `GenericArray`. The trait bounds on `Xts128<Aes128>` and
+# `Ccm<Aes128, …>` cannot be satisfied with the mixed crypto-stack majors.
+# Revisit once xts-mode 0.6 and ccm 0.6 stable ship.
+aes = "0.8"
+ccm = "0.5"
+crc32fast = "1.4"
+secrecy = "0.10"
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+xts-mode = "0.5"
+zerocopy = { workspace = true, features = ["derive"] }
+zeroize = { version = "1.8", features = ["derive"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+panic_in_result_fn = "deny"
+unimplemented = "deny"
+allow_attributes = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+await_holding_lock = "deny"
+large_futures = "deny"
+exit = "deny"
+mem_forget = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"

@@ -1,0 +1,33 @@
+[package]
+name = "fs-apfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+fs-common = { workspace = true, default-features = false }
+# Declared directly rather than inherited: fs-apfs is no_std-capable, so
+# sha2's default `std` feature must stay opt-in (enabled by this crate's
+# `std` feature). Version kept in lockstep with the workspace `sha2` pin.
+sha2 = { version = "0.10", default-features = false }
+thiserror = { workspace = true }
+# NFD normalization for APFS directory-entry name hashing; no_std.
+unicode-normalization = { workspace = true }
+zerocopy = { workspace = true, features = ["derive"] }
+
+chrono = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = ["fs-common/std", "sha2/std", "thiserror/std", "zerocopy/std"]
+chrono = ["dep:chrono"]
+time = ["dep:time"]
+
+[dev-dependencies]
+# Placeholder crate so `#[mutants::skip]` annotations compile under
+# cargo-mutants. See crates/fs-ext/docs/mutation-testing.md for how the
+# annotation is interpreted.
+mutants = "0.0.4"

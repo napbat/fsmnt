@@ -1,0 +1,18 @@
+﻿[package]
+name = "fs-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+memoffset = { workspace = true }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+# Placeholder so `#[mutants::skip]` annotations compile under cargo-mutants.
+mutants = "0.0.4"
+
+[features]
+default = ["std"]
+std = ["zerocopy/std"]

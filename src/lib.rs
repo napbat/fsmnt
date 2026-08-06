@@ -32,10 +32,27 @@
 //! Windows/Linux/macOS), GPT/MBR partition-table parsing, partition-scoped
 //! readers, and boot-sector filesystem detection.
 //!
-//! `fsmnt` ships no filesystem parsers.  To mount a raw partition, register
-//! parser adapters in a [`device::DriverRegistry`] and use
-//! [`open_device_partition`]; the resulting [`TargetFilesystem`] can then
-//! be passed to [`mount`].
+//! The [`drivers`] layer supplies the parser adapters: NTFS, FAT12/16/32,
+//! `exFAT`, ext2/3/4, APFS, and `BitLocker` (which unlocks to NTFS).
+//! [`drivers::default_registry`] returns a [`device::DriverRegistry`] with
+//! every driver that needs no configuration; `BitLocker` credentials ride
+//! on [`drivers::BitLockerDriver`], which
+//! [`drivers::registry_with_bitlocker`] adds.
+//!
+//! ```rust,no_run
+//! use fsmnt::device::HostDriveId;
+//! use fsmnt::{HostDrives, drivers, mount, open_device_partition};
+//!
+//! let drive = HostDriveId::new("0");
+//! let opened = open_device_partition::<HostDrives>(&drive, 0, &drivers::default_registry())?;
+//! mount(opened.filesystem, "Z:", "ntfs", "Evidence", opened.size_bytes, || {})?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! [`device::DriverRegistry`] remains the plug-in point: consumers can
+//! register their own [`device::FilesystemDriver`] implementations
+//! alongside (or instead of) the built-in ones, and
+//! [`open_device_partition`] uses whichever registry it is handed.
 
 pub use fsmnt_core::{
     DirFilesystem, FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem,
@@ -43,6 +60,7 @@ pub use fsmnt_core::{
 };
 
 pub use fsmnt_device as device;
+pub use fsmnt_drivers as drivers;
 
 #[cfg(target_os = "linux")]
 pub use fsmnt_device_linux::LinuxHostDrives as HostDrives;

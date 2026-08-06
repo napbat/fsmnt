@@ -1,13 +1,19 @@
 [workspace]
 resolver = "3"
 # crates/formats is a parent directory for filesystem-format parser crates
-# (ntfs, fat, ext, …), not a crate itself — hence the glob + exclude pair.
-members = ["crates/*", "crates/formats/*"]
-exclude = ["crates/formats"]
+# (ntfs, fat, ext, …), not a crate itself. It cannot be handled with
+# `exclude = ["crates/formats"]` — cargo's exclude is recursive and would
+# silently drop every crate underneath it — so the first glob is narrowed
+# to the fsmnt-* crates instead of a bare `crates/*`.
+members = ["crates/fsmnt-*", "crates/formats/*"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# Inherited by the vendored crates under crates/formats/, which declare
+# `authors.workspace = true` / `license.workspace = true`.
+authors = []
+license = "LicenseRef-Proprietary"
 
 [workspace.dependencies]
 # Internal crates
@@ -17,19 +23,83 @@ fsmnt-device-linux = { path = "crates/fsmnt-device-linux" }
 fsmnt-device-macos = { path = "crates/fsmnt-device-macos" }
 fsmnt-device-windows = { path = "crates/fsmnt-device-windows" }
 fsmnt-dokan = { path = "crates/fsmnt-dokan" }
+fsmnt-drivers = { path = "crates/fsmnt-drivers" }
 fsmnt-fuse = { path = "crates/fsmnt-fuse" }
+
+# Vendored filesystem-format crates (crates/formats/). These are copied
+# verbatim from upstream and deliberately not refactored; their manifests
+# reference these entries with `<name> = { workspace = true }`.
+# These parsers are no_std-capable and must stay that way: every entry
+# takes `default-features = false` so nothing pulls `std` in implicitly.
+# Consumers that need std (e.g. the fsmnt-drivers adapters, which bridge
+# to std::io) opt in explicitly with `features = ["std"]`.
+fs-common = { path = "crates/formats/fs-common", default-features = false }
+fs-ntfs = { path = "crates/formats/fs-ntfs", default-features = false }
+fs-fat = { path = "crates/formats/fs-fat", default-features = false }
+fs-apfs = { path = "crates/formats/fs-apfs", default-features = false }
+fs-exfat = { path = "crates/formats/fs-exfat", default-features = false }
+fs-ext = { path = "crates/formats/fs-ext", default-features = false }
+nt-compression = { path = "crates/formats/nt-compression", default-features = false }
+# nt-bitlocker is std-only (crypto stack + secrecy); no no_std variant.
+nt-bitlocker = { path = "crates/formats/nt-bitlocker" }
 
 # All external dependencies are declared here. Member crates import them
 # with `<name> = { workspace = true }` — never with a version of their own.
-bitflags = "2"
-chrono = "0.4"
+bitflags = "2.11"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
+time = { version = "0.3", default-features = false }
 zerocopy = "0.8"
 
 # Windows device access
 windows = "0.62"
+
+# --- Dependencies of the vendored crates/formats/ crates ---
+anyhow = "1.0"
+arbitrary = { version = "1", features = ["derive"] }
+arrayvec = { version = "0.7", default-features = false }
+cpufeatures = "0.3"
+crc32fast = { version = "1.4", default-features = false }
+derive_more = { version = "2.1", default-features = false }
+enumn = "0.1"
+memoffset = "0.9"
+nt-string = { version = "0.1", default-features = false }
+strum_macros = "0.28"
+# NFD normalization for APFS directory-name hashing. no_std via
+# default-features = false; canonical decomposition is frozen by
+# Unicode's stability policy, so it matches Apple's Unicode-10 NFD.
+unicode-normalization = { version = "0.1", default-features = false }
+
+# Crypto stack (ext4 fscrypt, BitLocker). The majors below are pinned and
+# must be bumped in lockstep — see the individual comments.
+aes = { version = "0.8", default-features = false }
+chacha20 = { version = "0.9", default-features = false, features = ["zeroize"] }
+hkdf = { version = "0.12", default-features = false }
+hmac = { version = "0.12", default-features = false }
+poly1305 = { version = "0.8", default-features = false, features = ["zeroize"] }
+# Pinned to 0.6 — polyval 0.7 requires the cipher 0.5 / digest 0.11
+# generation, which conflicts with the project's pinned aes 0.8 / sha2
+# 0.10 (see the sha2 comment below). Bump in lockstep with the sha2 /
+# aes ecosystem.
+polyval = { version = "0.6", default-features = false }
+# Pinned to 0.10 — sha2 0.11 returns `hybrid_array::Array` from
+# `digest`, which doesn't satisfy the `GenericArray`-based traits in
+# the aes 0.8 / cipher 0.4 ecosystem that nt-bitlocker still depends
+# on (xts-mode 0.5, ccm 0.5). Bump in lockstep with aes when xts-mode
+# and ccm release against cipher 0.5.
+sha2 = "0.10"
+siphasher = { version = "1.0", default-features = false }
+# Pinned to 0.5 — sm4 0.6 requires Rust 1.85 and the cipher 0.5 / digest
+# 0.11 generation, same conflict.
+sm4 = { version = "0.5", default-features = false }
+subtle = { version = "2.5", default-features = false }
+xts-mode = { version = "0.5", default-features = false }
+zeroize = { version = "1.7", default-features = false, features = [
+    "alloc",
+    "derive",
+] }
 
 # Unix mount backend (FUSE)
 ctrlc = "3.5"
@@ -61,6 +131,7 @@ edition.workspace = true
 clap = { workspace = true }
 fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
+fsmnt-drivers = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 fsmnt-fuse = { workspace = true }
@@ -77,3 +148,17 @@ fsmnt-device-macos = { workspace = true }
 
 [lints]
 workspace = true
+
+# Optimize crypto-heavy crates in dev/test builds so BitLocker key
+# stretching (1M SHA-256 iterations) and sector decryption (AES-NI)
+# run at near-release speed while application code stays debuggable.
+[profile.dev.package.sha2]
+opt-level = 2
+[profile.dev.package.aes]
+opt-level = 2
+[profile.dev.package.cpufeatures]
+opt-level = 2
+[profile.dev.package.xts-mode]
+opt-level = 2
+[profile.dev.package.nt-bitlocker]
+opt-level = 2

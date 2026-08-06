@@ -1,0 +1,36 @@
+[package]
+name = "fsmnt-drivers"
+version.workspace = true
+edition.workspace = true
+
+# The vendored parsers under crates/formats/ are no_std-capable and their
+# `[workspace.dependencies]` entries all carry `default-features = false`.
+# This crate bridges them to `std::io`, so each one opts back into `std`
+# (plus whatever the individual adapter needs) explicitly here.
+[dependencies]
+chrono = { workspace = true }
+fsmnt-core = { workspace = true }
+fsmnt-device = { workspace = true }
+
+# `FsTryIterator` / `FsReadSeek`, used by the NTFS, FAT, ext and exFAT
+# adapters to drive parser iterators and file readers.
+fs-common = { workspace = true, features = ["std"] }
+# `chrono` supplies `From<NtfsTime> for DateTime<Utc>`; `compression`
+# enables transparent decompression of WOF/LZNT1 compressed files.
+fs-ntfs = { workspace = true, features = ["std", "chrono", "compression"] }
+fs-fat = { workspace = true, features = ["std", "chrono"] }
+# `fscrypt` and `verity` are part of fs-ext's own default feature set and
+# are kept on so encrypted / fs-verity inodes are diagnosed rather than
+# silently misread.
+fs-ext = { workspace = true, features = [
+    "std",
+    "chrono",
+    "fscrypt",
+    "verity",
+] }
+fs-apfs = { workspace = true, features = ["std", "chrono"] }
+fs-exfat = { workspace = true, features = ["std", "chrono"] }
+nt-bitlocker = { workspace = true }
+
+[lints]
+workspace = true

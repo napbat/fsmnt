@@ -1,0 +1,23 @@
+[package]
+name = "fs-exfat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+bitflags = { workspace = true }
+chrono = { workspace = true, optional = true }
+fs-common = { workspace = true, default-features = false }
+thiserror = { workspace = true }
+time = { workspace = true, optional = true }
+zerocopy = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+mutants = "0.0.4"
+
+[features]
+default = ["std"]
+std = ["fs-common/std", "thiserror/std", "zerocopy/std"]
+chrono = ["dep:chrono"]
+time = ["dep:time"]

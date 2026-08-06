@@ -1,0 +1,170 @@
+<!-- Source: Apple File System Reference (Apple Inc., 2020-06-22). Converted from PDF with pymupdf4llm. -->
+
+## Symbol Index
+
+_`APFS_COW_EXEMPT_COUNT_NAME`_ 98 _`APFS_FEATURE_DEFRAG`_ 67 _`APFS_FEATURE_DEFRAG_PRERELEASE`_ 67 _`APFS_FEATURE_HARDLINK_MAP_RECORDS`_ 67 _`APFS_FEATURE_STRICTATIME`_ 67 _`APFS_FEATURE_VOLGRP_SYSTEM_INO_SPACE`_ 68 _`APFS_FILE_INFO_DATA_HASH`_ 157 _`APFS_FS_ALWAYS_CHECK_EXTENTREF`_ 62 _`APFS_FS_CRYPTOFLAGS`_ 63 _`APFS_FS_FLAGS_VALID_MASK`_ 63 _`APFS_FS_ONEKEY`_ 62 _`APFS_FS_RESERVED_100`_ 63 _`APFS_FS_RESERVED_2`_ 62 _`APFS_FS_RESERVED_4`_ 62 _`APFS_FS_RESERVED_80`_ 63 _`APFS_FS_RUN_SPILLOVER_CLEANER`_ 62 _`APFS_FS_SPILLEDOVER`_ 62 _`APFS_FS_UNENCRYPTED`_ 62 _`APFS_FV_PERSONAL_RECOVERY_KEY_UUID`_ 147 _`APFS_GPT_PARTITION_UUID`_ 25 _`APFS_HASH_CCSHA256_SIZE`_ 154 _`APFS_HASH_CCSHA384_SIZE`_ 154 _`APFS_HASH_CCSHA512_256_SIZE`_ 154 _`APFS_HASH_CCSHA512_SIZE`_ 154 _`APFS_HASH_DEFAULT`_ 154 _`APFS_HASH_INVALID`_ 153 _`APFS_HASH_MAX`_ 154 _`APFS_HASH_MAX_SIZE`_ 154 _`APFS_HASH_MIN`_ 153 _`APFS_HASH_SHA256`_ 153 _`APFS_HASH_SHA384`_ 153 _`APFS_HASH_SHA512`_ 153 _`APFS_HASH_SHA512_256`_ 153 _`apfs_hash_type_t`_ 152 _`APFS_INCOMPAT_CASE_INSENSITIVE`_ 69 _`APFS_INCOMPAT_DATALESS_SNAPS`_ 69 _`APFS_INCOMPAT_ENC_ROLLED`_ 69 _`APFS_INCOMPAT_INCOMPLETE_RESTORE`_ 69 _`APFS_INCOMPAT_NORMALIZATION_INSENSITIVE`_ 69 _`APFS_INCOMPAT_RESERVED_40`_ 70 _`APFS_INCOMPAT_SEALED_VOLUME`_ 69 _`APFS_INODE_PINNED_MASK`_ 94 _`APFS_KEYBAG_VERSION`_ 145 _`APFS_KIND_ANY`_ 87
+
+_`APFS_KIND_DEAD`_ 87 _`APFS_KIND_INVALID`_ 88 _`APFS_KIND_NEW`_ 87 _`APFS_KIND_UPDATE`_ 87 _`APFS_KIND_UPDATE_REFCNT`_ 88 _`APFS_MAGIC`_ 60 _`APFS_MAX_HIST`_ 60 _`apfs_modified_by_t`_ 60 _`apfs_reap_state_t`_ 167 _`APFS_SEAL_BROKEN`_ 152 _`apfs_superblock_t`_ 51 _`APFS_SUPPORTED_FEATURES_MASK`_ 68 _`APFS_SUPPORTED_INCOMPAT_MASK`_ 70 _`APFS_SUPPORTED_ROCOMPAT_MASK`_ 68 _`APFS_TYPE_ANY`_ 84 _`APFS_TYPE_CRYPTO_STATE`_ 85 _`APFS_TYPE_DIR_REC`_ 86 _`APFS_TYPE_DIR_STATS`_ 86 _`APFS_TYPE_DSTREAM_ID`_ 85 _`APFS_TYPE_EXTENT`_ 85 _`APFS_TYPE_FILE_EXTENT`_ 85 _`APFS_TYPE_FILE_INFO`_ 86 _`APFS_TYPE_INODE`_ 85 _`APFS_TYPE_INVALID`_ 87 _`APFS_TYPE_MAX`_ 86 _`APFS_TYPE_MAX_VALID`_ 86 _`APFS_TYPE_SIBLING_LINK`_ 85 _`APFS_TYPE_SIBLING_MAP`_ 86 _`APFS_TYPE_SNAP_METADATA`_ 84 _`APFS_TYPE_SNAP_NAME`_ 86 _`APFS_TYPE_XATTR`_ 85 _`APFS_UNASSIGNED_CRYPTO_ID`_ 144 _`APFS_VALID_INTERNAL_INODE_FLAGS`_ 94 _`APFS_VOL_KEYBAG_ENTRY_MAX_SIZE`_ 147 _`APFS_VOL_ROLE_BACKUP`_ 66 _`APFS_VOL_ROLE_BASEBAND`_ 65 _`APFS_VOL_ROLE_DATA`_ 65 _`APFS_VOL_ROLE_ENTERPRISE`_ 66 _`APFS_VOL_ROLE_HARDWARE`_ 65 _`APFS_VOL_ROLE_INSTALLER`_ 65 _`APFS_VOL_ROLE_NONE`_ 64 _`APFS_VOL_ROLE_PREBOOT`_ 65 _`APFS_VOL_ROLE_PRELOGIN`_ 66 _`APFS_VOL_ROLE_RECOVERY`_ 64
+
+
+174
+
+**Symbol Index**
+
+_`APFS_VOL_ROLE_RESERVED_10`_ 66 _`APFS_VOL_ROLE_RESERVED_7`_ 66 _`APFS_VOL_ROLE_RESERVED_8`_ 66 _`APFS_VOL_ROLE_SYSTEM`_ 64 _`APFS_VOL_ROLE_UPDATE`_ 65 _`APFS_VOL_ROLE_USER`_ 64 _`APFS_VOL_ROLE_VM`_ 64 _`APFS_VOL_ROLE_XART`_ 65 _`APFS_VOLNAME_LEN`_ 60 _`APFS_VOLUME_ENUM_SHIFT`_ 66 _`btn_index_node_val_t`_ 127 _`BTNODE_CHECK_KOFF_INVAL`_ 133 _`BTNODE_FIXED_KV_SIZE`_ 132 _`BTNODE_HASHED`_ 132 _`BTNODE_LEAF`_ 132 _`BTNODE_NOHEADER`_ 133 _`BTNODE_ROOT`_ 132 _`BTOFF_INVALID`_ 128 _`BTREE_ALLOW_GHOSTS`_ 130 _`BTREE_EPHEMERAL`_ 130 _`BTREE_HASHED`_ 131 _`btree_info_fixed_t`_ 125 _`btree_info_t`_ 126 _`BTREE_KV_NONALIGNED`_ 131 _`BTREE_NODE_HASH_SIZE_MAX`_ 128 _`BTREE_NODE_MIN_ENTRY_COUNT`_ 133 _`btree_node_phys_t`_ 123 _`BTREE_NODE_SIZE_DEFAULT`_ 133 _`BTREE_NOHEADER`_ 131 _`BTREE_NONPERSISTENT`_ 131 _`BTREE_PHYSICAL`_ 130 _`BTREE_SEQUENTIAL_INSERT`_ 130 _`BTREE_TOC_ENTRY_INCREMENT`_ 131 _`BTREE_TOC_ENTRY_MAX_UNUSED`_ 131 _`BTREE_UINT64_KEYS`_ 130 _`CHECKPOINT_MAP_LAST`_ 42 _`checkpoint_map_phys_t`_ 41 _`checkpoint_mapping_t`_ 40 _`chunk_info_block`_ 159 _`chunk_info_t`_ 159 _`cib_addr_block`_ 159 _`CP_EFFECTIVE_CLASSMASK`_ 143 _`CP_MAX_WRAPPEDKEYSIZE`_ 139 _`CRYPTO_RESERVED_5`_ 144 _`CRYPTO_SW_ID`_ 144 _`dir_rec_flags`_ 95 _`DREC_EXT_TYPE_SIBLING_ID`_ 110 _`DREC_TYPE_MASK`_ 95
+
+_`DT_BLK`_ 101 _`DT_CHR`_ 101 _`DT_DIR`_ 101 _`DT_FIFO`_ 100 _`DT_LNK`_ 101 _`DT_REG`_ 101 _`DT_SOCK`_ 101 _`DT_UNKNOWN`_ 100 _`DT_WHT`_ 101 _`er_phase_t`_ 170 _`er_recovery_block_phys_t`_ 170 _`er_state_phys_t`_ 169 _`evict_mapping_val_t`_ 42 _`fext_tree_key_t`_ 154 _`fext_tree_val_t`_ 155 _`FIRMLINK_EA_NAME`_ 98 _`fusion_mt_key_t`_ 173 _`fusion_mt_val_t`_ 173 _`fusion_wbc_list_entry_t`_ 172 _`fusion_wbc_list_phys_t`_ 172 _`fusion_wbc_phys_t`_ 172 _`gbitmap_block_phys_t`_ 170 _`gbitmap_phys_t`_ 170 _`INO_EXT_TYPE_DELTA_TREE_OID`_ 110 _`INO_EXT_TYPE_DIR_STATS_KEY`_ 111 _`INO_EXT_TYPE_DOCUMENT_ID`_ 110 _`INO_EXT_TYPE_DSTREAM`_ 111 _`INO_EXT_TYPE_FINDER_INFO`_ 111 _`INO_EXT_TYPE_FS_UUID`_ 112 _`INO_EXT_TYPE_NAME`_ 111 _`INO_EXT_TYPE_ORIG_SYNC_ROOT_ID`_ 112 _`INO_EXT_TYPE_PREV_FSIZE`_ 111 _`INO_EXT_TYPE_PURGEABLE_FLAGS`_ 112 _`INO_EXT_TYPE_RDEV`_ 112 _`INO_EXT_TYPE_RESERVED_12`_ 112 _`INO_EXT_TYPE_RESERVED_6`_ 111 _`INO_EXT_TYPE_RESERVED_9`_ 111 _`INO_EXT_TYPE_SNAP_XID`_ 110 _`INO_EXT_TYPE_SPARSE_BYTES`_ 112 _`INODE_ACTIVE_FILE_TRIMMED`_ 91 _`INODE_ALLOCATION_SPILLEDOVER`_ 92 _`INODE_BEING_TRUNCATED`_ 90 _`INODE_CLONED_INTERNAL_FLAGS`_ 93 _`INODE_DIR_STATS_ORIGIN`_ 90 _`INODE_FAST_PROMOTE`_ 92 _`INODE_FLAG_UNUSED`_ 90 _`INODE_HAS_FINDER_INFO`_ 91 _`INODE_HAS_RSRC_FORK`_ 92
+
+
+175
+
+**Symbol Index**
+
+_`INODE_HAS_SECURITY_EA`_ 90 _`INODE_HAS_UNCOMPRESSED_SIZE`_ 92 _`INODE_INHERITED_INTERNAL_FLAGS`_ 93 _`INODE_IS_APFS_PRIVATE`_ 89 _`INODE_IS_PURGEABLE`_ 93 _`INODE_IS_SPARSE`_ 91 _`INODE_IS_SYNC_ROOT`_ 93 _`INODE_MAINTAIN_DIR_STATS`_ 89 _`INODE_NO_RSRC_FORK`_ 92 _`INODE_PINNED_TO_MAIN`_ 91 _`INODE_PINNED_TO_TIER2`_ 92 _`INODE_PROT_CLASS_EXPLICIT`_ 90 _`INODE_SNAPSHOT_COW_EXEMPTION`_ 93 _`INODE_WANTS_TO_BE_PURGEABLE`_ 93 _`INODE_WAS_CLONED`_ 90 _`INODE_WAS_EVER_CLONED`_ 91 _`integrity_meta_phys_t`_ 150 _`INTEGRITY_META_VERSION_1`_ 152 _`INTEGRITY_META_VERSION_1`_ 152 _`INTEGRITY_META_VERSION_HIGHEST`_ 152 _`INTEGRITY_META_VERSION_INVALID`_ 152 _`INVALID_INO_NUM`_ 96 _`j_crypto_key_t`_ 137 _`j_crypto_val_t`_ 137 _`j_dir_stats_key_t`_ 80 _`j_dir_stats_val_t`_ 81 _`J_DREC_HASH_MASK`_ 79 _`J_DREC_HASH_SHIFT`_ 79 _`j_drec_hashed_key_t`_ 78 _`j_drec_key_t`_ 78 _`J_DREC_LEN_MASK`_ 79 _`j_drec_val_t`_ 79 _`j_dstream_id_key_t`_ 105 _`j_dstream_id_val_t`_ 105 _`j_dstream_t`_ 106 _`j_file_data_hash_val_t`_ 157 _`J_FILE_EXTENT_FLAG_MASK`_ 105 _`J_FILE_EXTENT_FLAG_SHIFT`_ 105 _`j_file_extent_key_t`_ 103 _`J_FILE_EXTENT_LEN_MASK`_ 105 _`j_file_extent_val_t`_ 104 _`j_file_info_key_t`_ 155 _`J_FILE_INFO_LBA_MASK`_ 156 _`J_FILE_INFO_TYPE_MASK`_ 156 _`J_FILE_INFO_TYPE_SHIFT`_ 156 _`j_file_info_val_t`_ 156 _`j_inode_flags`_ 88 _`j_inode_key_t`_ 73
+
+_`j_inode_val_t`_ 73 _`j_key_t`_ 72 _`j_obj_file_info_type`_ 157 _`j_obj_kinds`_ 87 _`j_obj_types`_ 84 _`j_phys_ext_key_t`_ 102 _`j_phys_ext_val_t`_ 102 _`j_sibling_key_t`_ 115 _`j_sibling_map_key_t`_ 116 _`j_sibling_map_val_t`_ 116 _`j_sibling_val_t`_ 115 _`j_snap_metadata_key_t`_ 117 _`j_snap_metadata_val_t`_ 117 _`j_snap_name_key_t`_ 119 _`j_snap_name_val_t`_ 119 _`j_xattr_dstream_t`_ 106 _`j_xattr_flags`_ 94 _`j_xattr_key_t`_ 82 _`j_xattr_val_t`_ 82 _`kb_locker_t`_ 144 _`KB_TAG_RESERVED_1`_ 148 _`KB_TAG_RESERVED_F8`_ 149 _`KB_TAG_UNKNOWN`_ 148 _`KB_TAG_VOLUME_KEY`_ 148 _`KB_TAG_VOLUME_M_KEY`_ 149 _`KB_TAG_VOLUME_PASSPHRASE_HINT`_ 148 _`KB_TAG_VOLUME_UNLOCK_RECORDS`_ 148 _`KB_TAG_WRAPPING_M_KEY`_ 149 _`keybag_entry_t`_ 146 _`kvloc_t`_ 128 _`kvoff_t`_ 129 _`MAX_CKSUM_SIZE`_ 11 _`media_keybag_t`_ 147 _`MIN_DOC_ID`_ 98 _`MIN_USER_INO_NUM`_ 97 _`nloc_t`_ 128 _`NR_BHM_FLAG`_ 165 _`NR_CONTINUE`_ 165 _`NX_CNTR_OBJ_CKSUM_FAIL`_ 40 _`NX_CNTR_OBJ_CKSUM_SET`_ 40 _`nx_counter_id_t`_ 39 _`NX_CRYPTO_SW`_ 37 _`NX_DEFAULT_BLOCK_SIZE`_ 39 _`NX_EFI_JUMPSTART_MAGIC`_ 25 _`nx_efi_jumpstart_t`_ 24 _`NX_EFI_JUMPSTART_VERSION`_ 25 _`NX_EPH_INFO_COUNT`_ 35 _`NX_EPH_INFO_VERSION_1`_ 36
+
+
+176
+
+**Symbol Index**
+
+_`NX_EPH_MIN_BLOCK_COUNT`_ 36 _`NX_FEATURE_DEFRAG`_ 37 _`NX_FEATURE_LCFD`_ 37 _`NX_INCOMPAT_FUSION`_ 38 _`NX_INCOMPAT_VERSION1`_ 38 _`NX_INCOMPAT_VERSION2`_ 38 _`NX_MAGIC`_ 35 _`NX_MAX_FILE_SYSTEM_EPH_STRUCTS`_ 36 _`NX_MAX_FILE_SYSTEMS`_ 35 _`NX_MAXIMUM_BLOCK_SIZE`_ 39 _`NX_MINIMUM_BLOCK_SIZE`_ 39 _`NX_MINIMUM_CONTAINER_SIZE`_ 39 _`NX_NUM_COUNTERS`_ 40 _`nx_reap_list_entry_t`_ 164 _`nx_reap_list_phys_t`_ 164 _`nx_reaper_phys_t`_ 164 _`NX_RESERVED_1`_ 36 _`NX_RESERVED_2`_ 37 _`nx_superblock_t`_ 27 _`NX_SUPPORTED_FEATURES_MASK`_ 37 _`NX_SUPPORTED_INCOMPAT_MASK`_ 39 _`NX_SUPPORTED_ROCOMPAT_MASK`_ 38 _`NX_TX_MIN_CHECKPOINT_COUNT`_ 36 _`OBJ_ENCRYPTED`_ 21 _`OBJ_EPHEMERAL`_ 20 _`OBJ_ID_MASK`_ 73 _`OBJ_NOHEADER`_ 20 _`OBJ_NONPERSISTENT`_ 21 _`obj_phys_t`_ 10 _`OBJ_PHYSICAL`_ 20 _`OBJ_STORAGETYPE_MASK`_ 14 _`OBJ_TYPE_MASK`_ 73 _`OBJ_TYPE_SHIFT`_ 73 _`OBJ_VIRTUAL`_ 20 _`OBJECT_TYPE_BLOCKREFTREE`_ 17 _`OBJECT_TYPE_BTREE`_ 15 _`OBJECT_TYPE_BTREE_NODE`_ 15 _`OBJECT_TYPE_CHECKPOINT_MAP`_ 16 _`OBJECT_TYPE_CONTAINER_KEYBAG`_ 19 _`OBJECT_TYPE_EFI_JUMPSTART`_ 17 _`OBJECT_TYPE_ER_RECOVERY_BLOCK`_ 18 _`OBJECT_TYPE_ER_STATE`_ 18 _`OBJECT_TYPE_EXTENT_LIST_TREE`_ 16 _`OBJECT_TYPE_FEXT_TREE`_ 19 _`OBJECT_TYPE_FLAGS_DEFINED_MASK`_ 14 _`OBJECT_TYPE_FLAGS_MASK`_ 13 _`OBJECT_TYPE_FS`_ 16 _`OBJECT_TYPE_FSTREE`_ 16
+
+_`OBJECT_TYPE_FUSION_MIDDLE_TREE`_ 17 _`OBJECT_TYPE_GBITMAP`_ 18 _`OBJECT_TYPE_GBITMAP_BLOCK`_ 18 _`OBJECT_TYPE_GBITMAP_TREE`_ 18 _`OBJECT_TYPE_INTEGRITY_META`_ 19 _`OBJECT_TYPE_INVALID`_ 19 _`OBJECT_TYPE_MASK`_ 13 _`OBJECT_TYPE_MEDIA_KEYBAG`_ 19 _`OBJECT_TYPE_NX_FUSION_WBC`_ 18 _`OBJECT_TYPE_NX_FUSION_WBC_LIST`_ 18 _`OBJECT_TYPE_NX_REAP_LIST`_ 17 _`OBJECT_TYPE_NX_REAPER`_ 17 _`OBJECT_TYPE_NX_SUPERBLOCK`_ 15 _`OBJECT_TYPE_OMAP`_ 16 _`OBJECT_TYPE_OMAP_SNAPSHOT`_ 17 _`OBJECT_TYPE_RESERVED_20`_ 19 _`OBJECT_TYPE_SNAP_META_EXT`_ 18 _`OBJECT_TYPE_SNAPMETATREE`_ 17 _`OBJECT_TYPE_SPACEMAN`_ 15 _`OBJECT_TYPE_SPACEMAN_BITMAP`_ 16 _`OBJECT_TYPE_SPACEMAN_CAB`_ 15 _`OBJECT_TYPE_SPACEMAN_CIB`_ 15 _`OBJECT_TYPE_SPACEMAN_FREE_QUEUE`_ 16 _`OBJECT_TYPE_TEST`_ 19 _`OBJECT_TYPE_VOLUME_KEYBAG`_ 19 _`OID_INVALID`_ 13 _`OID_NX_SUPERBLOCK`_ 13 _`OID_RESERVED_COUNT`_ 13 _`omap_cleanup_state_t`_ 166 _`OMAP_CRYPTO_GENERATION`_ 50 _`OMAP_DECRYPTING`_ 49 _`OMAP_ENCRYPTING`_ 49 _`omap_key_t`_ 46 _`OMAP_KEYROLLING`_ 50 _`OMAP_MANUALLY_MANAGED`_ 49 _`OMAP_MAX_SNAP_COUNT`_ 50 _`omap_phys_t`_ 44 _`OMAP_REAP_PHASE_MAP_TREE`_ 50 _`OMAP_REAP_PHASE_SNAPSHOT_TREE`_ 50 _`omap_reap_state_t`_ 166 _`OMAP_SNAPSHOT_DELETED`_ 49 _`OMAP_SNAPSHOT_REVERTED`_ 49 _`omap_snapshot_t`_ 47 _`OMAP_VAL_CRYPTO_GENERATION`_ 48 _`OMAP_VAL_DELETED`_ 48 _`OMAP_VAL_ENCRYPTED`_ 48 _`OMAP_VAL_NOHEADER`_ 48 _`OMAP_VAL_SAVED`_ 48
+
+
+177
+
+**Symbol Index**
+
+_`omap_val_t`_ 46 _`OMAP_VALID_FLAGS`_ 50 _`paddr_t`_ 9 _`PEXT_KIND_MASK`_ 103 _`PEXT_KIND_SHIFT`_ 103 _`PEXT_LEN_MASK`_ 103 _`prange_t`_ 9 _`PRIV_DIR_INO_NUM`_ 96 _`PROTECTION_CLASS_A`_ 142 _`PROTECTION_CLASS_B`_ 143 _`PROTECTION_CLASS_C`_ 143 _`PROTECTION_CLASS_D`_ 143 _`PROTECTION_CLASS_DIR_NONE`_ 142 _`PROTECTION_CLASS_F`_ 143 _`PROTECTION_CLASS_M`_ 143 _`PURGEABLE_DIR_INO_NUM`_ 97 _`RESERVED_10`_ 95 _`ROOT_DIR_INO_NUM`_ 96 _`ROOT_DIR_PARENT`_ 96 _`S_IFBLK`_ 99 _`S_IFCHR`_ 99 _`S_IFDIR`_ 99 _`S_IFIFO`_ 99 _`S_IFLNK`_ 100 _`S_IFMT`_ 99 _`S_IFREG`_ 100 _`S_IFSOCK`_ 100 _`S_IFWHT`_ 100 _`sfq`_ 162 _`smdev`_ 162 _`SNAP_DIR_INO_NUM`_ 97 _`snap_meta_ext_obj_phys_t`_ 120
+
+_`snap_meta_ext_t`_ 120 _`snap_meta_flags`_ 119 _`spaceman_allocation_zone_boundaries_t`_ 161 _`spaceman_allocation_zone_info_phys_t`_ 161 _`spaceman_datazone_info_phys_t`_ 161 _`spaceman_device_t`_ 160 _`spaceman_free_queue_entry_t`_ 159 _`spaceman_free_queue_key_t`_ 160 _`spaceman_free_queue_t`_ 160 _`spaceman_phys_t`_ 161 _`SYMLINK_EA_NAME`_ 98 _`SYSTEM_OBJ_ID_MARK`_ 73 _`UNIFIED_ID_SPACE_MARK`_ 97 _`uuid_t`_ 9 _`wrapped_crypto_state_t`_ 138 _`wrapped_meta_crypto_state_t`_ 140 _`x_field_t`_ 109 _`XATTR_DATA_EMBEDDED`_ 95 _`XATTR_DATA_STREAM`_ 94 _`XATTR_FILE_SYSTEM_OWNED`_ 95 _`XATTR_MAX_EMBEDDED_SIZE`_ 97 _`XATTR_RESERVED_8`_ 95 _`xf_blob_t`_ 108 _`XF_CHILDREN_INHERIT`_ 113 _`XF_DATA_DEPENDENT`_ 113 _`XF_DO_NOT_COPY`_ 113 _`XF_RESERVED_4`_ 113 _`XF_RESERVED_40`_ 114 _`XF_RESERVED_80`_ 114 _`XF_SYSTEM_FIELD`_ 113 _`XF_USER_FIELD`_ 113
+
+
+178
+
+## Revision History
+
+## **2020-06-22**
+
+Added the Sealed Volumes chapter.
+
+Added the following symbols:
+
+```
+APFS_COW_EXEMPT_COUNT_NAME
+APFS_FS_RESERVED_100
+APFS_FS_RESERVED_80
+APFS_INCOMPAT_SEALED_VOLUME
+apfs_superblock_t.apfs_fext_tree_oid
+apfs_superblock_t.apfs_fext_tree_type
+apfs_superblock_t.apfs_integrity_meta_oid
+apfs_superblock_t.reserved_oid
+apfs_superblock_t.reserved_type
+APFS_TYPE_FILE_INFO
+APFS_UNASSIGNED_CRYPTO_ID
+APFS_VOL_ROLE_PRELOGIN
+BTNODE_HASHED
+```
+
+```
+BTNODE_NOHEADER
+btn_index_node_val_t
+BTREE_HASHED
+BTREE_NOHEADER
+INODE_SNAPSHOT_COW_EXEMPTION
+INO_EXT_TYPE_ORIG_SYNC_ROOT_ID
+nx_superblock_t.nx_mkb_locker
+OBJECT_TYPE_FEXT_TREE
+OBJECT_TYPE_INTEGRITY_META
+OBJECT_TYPE_MEDIA_KEYBAG
+OBJECT_TYPE_RESERVED_20
+spaceman_free_queue_entry_t
+```
+
+## **2020-05-15**
+
+Added the following symbols:
+
+## _`APFS_FEATURE_STRICTATIME`_
+
+```
+APFS_FEATURE_VOLGRP_SYSTEM_INO_SPACE
+APFS_INCOMPAT_INCOMPLETE_RESTORE
+apfs_superblock_t.apfs_cloneinfo_id_epoch
+apfs_superblock_t.apfs_cloneinfo_xid
+apfs_superblock_t.apfs_snap_meta_ext_oid
+apfs_superblock_t.apfs_volume_group_id
+APFS_VOL_ROLE_BACKUP
+APFS_VOL_ROLE_ENTERPRISE
+APFS_VOL_ROLE_HARDWARE
+APFS_VOL_ROLE_RESERVED_10
+APFS_VOL_ROLE_RESERVED_7
+APFS_VOL_ROLE_RESERVED_8
+APFS_VOL_ROLE_UPDATE
+APFS_VOL_ROLE_XART
+FIRMLINK_EA_NAME
+INODE_FAST_PROMOTE
+INODE_HAS_UNCOMPRESSED_SIZE
+```
+
+```
+INODE_IS_PURGEABLE
+INODE_IS_SYNC_ROOT
+INODE_WANTS_TO_BE_PURGEABLE
+INO_EXT_TYPE_PURGEABLE_FLAGS
+j_inode_val.uncompressed_size
+KB_TAG_VOLUME_M_KEY
+KB_TAG_WRAPPING_M_KEY
+nx_superblock_t.nx_newest_mounted_version
+OBJECT_TYPE_ER_RECOVERY_BLOCK
+OBJECT_TYPE_SNAP_META_EXT
+OMAP_VALID_FLAGS
+PROTECTION_CLASS_M
+PURGEABLE_DIR_INO_NUM
+snap_meta_ext_obj_phys_t
+snap_meta_ext_t
+SYSTEM_OBJ_ID_MARK
+UNIFIED_ID_SPACE_MARK
+```
+
+## **2019-02-07**
+
+
+179
+
+Corrected the discussion of object identifiers in _`j_snap_metadata_val_t`_ . The _`extentref_tree_oid`_ and _`sblock_oid`_ fields contain a physical object identifier, not a virtual object identifier.
+
+## **2019-01-24**
+
+Added information about software encryption on macOS in the Encryption chapter.
+
+## **2018-09-17**
+
+New document that describes the data structures used for read-only access to Apple File System on unencrypted, non-Fusion storage.
+
+
+180
+
+## Copyright and Notices
+
+ Apple Inc. Copyright © 2020 Apple Inc. All rights reserved.
+
+No part of this publication may be reproduced, stored in a retrieval system, or transmitted, in any form or by any means, mechanical, electronic, photocopying, recording, or otherwise, without prior written permission of Apple Inc., with the following exceptions: Any person is hereby authorized to store documentation on a single computer or device for personal use only and to print copies of documentation for personal use provided that the documentation contains Appleʼs copyright notice.
+
+No licenses, express or implied, are granted with respect to any of the technology described in this document. Apple retains all intellectual property rights associated with the technology described in this document. This document is intended to assist application developers to develop applications only for Applebranded products.
+
+Apple Inc. One Apple Park Way Cupertino, CA 95014 USA 408-996-1010
+
+Apple is a trademark of Apple Inc., registered in the U.S. and other countries.
+
+**APPLE MAKES NO WARRANTY OR REPRESENTATION, EITHER EXPRESS OR IMPLIED, WITH RESPECT TO THIS DOCUMENT, ITS QUALITY, ACCURACY, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE. AS A RESULT, THIS DOCUMENT IS PROVIDED ”AS IS,” AND YOU, THE READER, ARE ASSUMING THE ENTIRE RISK AS TO ITS QUALITY AND ACCURACY.**
+
+**IN NO EVENT WILL APPLE BE LIABLE FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES RESULTING FROM ANY DEFECT, ERROR OR INACCURACY IN THIS DOCUMENT, even if advised of the possibility of such damages.**
+
+**Some jurisdictions do not allow the exclusion of implied warranties or liability, so the above exclusion may not apply to you.**
+
+
+181

@@ -1,0 +1,3262 @@
+= Apple File System (APFS)
+Analysis of APFS
+
+:toc:
+:toclevels: 4
+
+:numbered!:
+[abstract]
+== Summary
+
+The Apple File System (APFS) is a volume and file system mainly used on
+the Apple platforms such as MacOS and iOS. APFS succeeds the Hierarchical
+File System (HFS) and Core Storage (CS). This specification is based on
+publicly available work on the format and was enhanced by analyzing test data.
+
+This document is intended as a working document of the data format specification
+for the libfsapfs project.
+
+[preface]
+== Document information
+
+[cols="1,5"]
+|===
+| Author(s): | Joachim Metz <joachim.metz@gmail.com>
+| Abstract: | This document contains information about the Apple File System (APFS).
+| Classification: | Public
+| Keywords: | Apple File System, APFS
+|===
+
+[preface]
+== License
+
+....
+Copyright (C) 2018-2023, Joachim Metz <joachim.metz@gmail.com>.
+Permission is granted to copy, distribute and/or modify this document under the
+terms of the GNU Free Documentation License, Version 1.3 or any later version
+published by the Free Software Foundation; with no Invariant Sections, no
+Front-Cover Texts, and no Back-Cover Texts. A copy of the license is included
+in the section entitled "GNU Free Documentation License".
+....
+
+[preface]
+== Revision history
+
+[cols="1,1,1,5",options="header"]
+|===
+| Version | Author | Date | Comments
+| 0.0.1 | J.B. Metz | September 2018 | Initial version.
+| 0.0.2 | J.B. Metz | October 2018 | Additional format information.
+| 0.0.3 | J.B. Metz | November 2018 | Additional format information.
+| 0.0.4 | J.B. Metz | December 2018 | Additional format information.
+| 0.0.5 | J.B. Metz | January 2019 | Additional format information.
+| 0.0.6 | J.B. Metz | May 2019 | Additional format information.
+| 0.0.7 | J.B. Metz | June 2019 | Additional format information.
+| 0.0.8 | J.B. Metz | September 2019 | Additional format information regarding container key bag.
+| 0.0.9 | J.B. Metz | October 2020 | Additional format information regarding extended attributes.
+| 0.0.10 | J.B. Metz | June 2021 | Textual corrections.
+| 0.0.11 | J.B. Metz | July 2021 | Additional format information regarding extended attributes.
+| 0.0.12 | J.B. Metz | April 2022 | Additional format information.
+| 0.0.13 | J.B. Metz | July 2022 | Additional information about device identifier.
+| 0.0.14 | J.B. Metz | June 2023 | Corrected typo.
+| 0.0.15 | J.B. Metz | July 2023 | Additional information about volume flags.
+|===
+
+:numbered:
+== Overview
+
+An APFS volume consists of:
+
+* Container
+** Zero or more volumes
+
+[cols="1,5",options="header"]
+|===
+| Characteristics | Description
+| Byte order | little-endian
+| Date and time values | number of nanoseconds since January 1, 1970 00:00:00 UTC (POSIX epoch), disregarding leap seconds
+| Character strings | Unicode strings are stored in UTF-8
+|===
+
+[NOTE]
+The date and values are signed to represent dates before January 1, 1970.
+Other sources are known to claim the date and time values are unsigned
+including Apple's reference documentation `[APPLE18]`.
+
+[NOTE]
+Although (some) Apple sources claim that APFS uses Unicode version 9.0,
+support for more recent Unicode versions has been observed.
+
+=== Test version
+
+The following version of programs were used to test the information within this document:
+
+* macOS 10.13 (High Sierra)
+* macOS 10.14 (Mojave)
+* macOS 10.15 (Catalina)
+* macOS 11 (Big Sur)
+* macOS 12 (Monterey)
+* macOS 13 (Ventura)
+
+=== Terminology
+
+"Physical" volume, the volume in which the APFS container is stored.
+
+"Logical" volume, the volume in which an APFS file system is stored.
+
+== Keys
+
+To encrypt storage media APFS uses different kind of keys.
+
+=== Volume master key
+
+The Volume Master Key (VMK) is used to encrypt the data of a specific volume.
+
+[yellow-background]*TODO: complete this section.*
+
+=== Volume key
+
+For every volume on an Mac OS system with APFS, APFS provides for a volume
+password to unlock the encrypted data. The volume password is used to determine a
+volume key.
+
+[yellow-background]*TODO: complete this section.*
+
+== Encryption methods
+
+APFS uses the AES-XTS encryption method to encrypt the key bag, file system
+metadata and content data.
+
+=== AES-XTS
+
+The AES-XTS encryption method uses:
+
+* a primary key (key 1) to encrypt/decrypt the data (the whitened
+plaintext/ciphertext).
+* a secondary key (key 2) to encrypt/ decrypt the tweak value, also referred to
+as the tweak key. The encrypted tweak value is used to whiten the
+plaintext/ciphertext.
+* a tweak value
+
+The cipher block size is 128 bytes.
+
+See `[IEEE 1619-2007]` for more information.
+
+The container key bag is encrypted using the "container identifier" of the
+container as both the primary and tweak key. The sector number, relative to
+the start of the container, is used as the tweak value.
+
+[NOTE]
+When a T2 chip is present, it is currently assumed that the T2 is used to
+encrypted the container key bag instead of the "container identifier".
+
+The unit size is the sector size, which is assumed to be 512 bytes also for 4k
+sector media.
+
+The volume key bag is encrypted using the "volume identifier" of the
+corresponding key bag entry, as both the primary and tweak key. The sector
+number, relative to the start of the container, is used as the tweak value.
+
+The file system B-tree is encrypted using the volume master key and the sector
+number, relative to the start of the container, is used as the tweak value.
+
+[yellow-background]*TODO: complete this section.*
+
+=== [[key_bag_entries]]Key bag entries
+
+== Objects
+
+APFS uses the "object" data type to distinguish between different data types.
+
+=== [[object_header]]Object header
+
+The object header (obj_phys_t) is 32 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Checksum (o_cksum) +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier (o_oid)
+| 16 | 8 | | Object transaction identifier (o_xid) +
+Identifier of the most recent transaction that this object was modified in
+| 24 | 4 | | Object type (o_type) +
+See section: <<object_types,Object types>>
+| 28 | 4 | | Object subtype (o_subtype) +
+See section: <<object_subtypes,Object subtypes>>
+|===
+
+=== [[object_checksum]]Object checksum
+
+The checksum algorithm:
+
+* calculate a Fletcher-64 checksum of the block data without the object checkum value and an initial value of 0
+* `checksum_lower_32bit = (fletcher_lower_32bit + fletcher_upper_32bit) mod 0xffffffff`
+* `checksum_upper_32bit = (fletcher_lower_32bit + checksum_lower_32bit) mod 0xffffffff`
+* `checksum = (checksum_upper_32bit << 32) | checksum_lower_32bit`
+
+=== Object identifiers
+
+* For a physical object, its identifier is the logical block address on disk where the object is stored.
+* For an ephemeral object, its identifier is a number.
+* For a virtual object, its identifier is a number.
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0 | OID_INVALID | Invalid
+| 1 | OID_NX_SUPERBLOCK | Container superblock
+| | |
+| 1024 | OID_RESERVED_COUNT | Number of reserved object identifiers
+|===
+
+=== [[object_types]]Object types
+
+The object type (o_type) value consists of a type and flags.
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000000 | OBJECT_TYPE_INVALID | Invalid +
+For a subtype this value represents not set or not specified
+| 0x00000001 | OBJECT_TYPE_NX_SUPERBLOCK | Container superblock +
+See section: <<container_superblock,Container superblock>>
+| 0x00000002 | OBJECT_TYPE_BTREE | B-Tree (root)
+| 0x00000003 | OBJECT_TYPE_BTREE_NODE | B-Tree node
+| 0x00000004 | | [yellow-background]*Unknown (MTree?)*
+| 0x00000005 | OBJECT_TYPE_SPACEMAN | Space manager header
+| 0x00000006 | OBJECT_TYPE_SPACEMAN_CAB | Space manager chunk information address block +
+See section: <<chunk_information_address_block,Chunk information address block>>
+| 0x00000007 | OBJECT_TYPE_SPACEMAN_CIB | Space manager chunk information block +
+See section: <<chunk_information_block,Chunk information block>>
+| 0x00000008 | OBJECT_TYPE_SPACEMAN_BITMAP | Space manager bitmap
+| 0x00000009 | OBJECT_TYPE_SPACEMAN_FREE_QUEUE | Space manager free queue
+| 0x0000000a | OBJECT_TYPE_EXTENT_LIST_TREE | Extent list tree
+| 0x0000000b | OBJECT_TYPE_OMAP | Object map +
+See section: <<object_map,Object map>>
+| 0x0000000c | OBJECT_TYPE_CHECKPOINT_MAP | Checkpoint map
+| 0x0000000d | OBJECT_TYPE_FS | Volume superblock (File system) +
+See section: <<volume_superblock,Volume superblock>>
+| 0x0000000e | OBJECT_TYPE_FS | File system tree +
+See section: <<file_system,File system>>
+| 0x0000000f | OBJECT_TYPE_BLOCKREFTREE | Extent-reference tree +
+See section: <<extent_reference_tree,Extent reference tree>>
+| 0x00000010 | OBJECT_TYPE_SNAPMETATREE | Snapshot metadata tree +
+See section: <<snapshot_metadata_tree,Snapshot metadata tree>>
+| 0x00000011 | OBJECT_TYPE_NX_REAPER | Reaper +
+See section: <<reaper,Reaper>>
+| 0x00000012 | OBJECT_TYPE_NX_REAP_LIST | Reaper list +
+See section: <<reaper_list,Reaper list>>
+| 0x00000013 | OBJECT_TYPE_OMAP_SNAPSHOT | Object map snapshot
+| 0x00000014 | OBJECT_TYPE_EFI_JUMPSTART | EFI jumpstart +
+See section: <<efi_jumpstart,EFI jumpstart>>
+| 0x00000015 | OBJECT_TYPE_FUSION_MIDDLE_TREE | Fusion middle tree +
+See section: <<fusion_middle_tree,Fusion middle tree>>
+| 0x00000016 | OBJECT_TYPE_NX_FUSION_WBC | Fusion write-back cache +
+See section: <<fusion_write_back_cache,Fusion write-back cache>>
+| 0x00000017 | OBJECT_TYPE_NX_FUSION_WBC_LIST | Fusion write-back cache list +
+See section: <<fusion_write_back_cache,Fusion write-back cache>>
+| 0x00000018 | OBJECT_TYPE_ER_STATE | [yellow-background]*Unknown (ER state?)*
+| 0x00000019 | OBJECT_TYPE_GBITMAP | [yellow-background]*Unknown (G Bitmap?)*
+| 0x0000001a | OBJECT_TYPE_GBITMAP_TREE | [yellow-background]*Unknown (G Bitmap tree?)*
+| 0x0000001b | OBJECT_TYPE_GBITMAP_BLOCK | [yellow-background]*Unknown (G Bitmap block?)*
+| | |
+| 0x000000ff | OBJECT_TYPE_TEST | [yellow-background]*Unknown (test?)*
+| | |
+| 0x0000ffff | OBJECT_TYPE_MASK | Object type bitmask
+| | |
+3+| _Flags used in combination with some of the object types_
+| 0x08000000 | OBJ_NONPERSISTENT | [yellow-background]*Unknown (Non-persistent?)*
+| 0x10000000 | OBJ_ENCRYPTED | Is encrypted
+| 0x20000000 | OBJ_NOHEADER | Has no object (obj_phys_t) header
+| | |
+| 0x00000000 | OBJ_VIRTUAL | Is virtual object
+| 0x40000000 | OBJ_PHYSICAL | Is physical object
+| 0x80000000 | OBJ_EPHEMERAL | Is ephemeral object
+| | |
+| 0xffff0000 | OBJECT_TYPE_FLAGS_MASK | Object type flags bitmask
+| 0xc0000000 | OBJ_STORAGETYPE_MASK | Object storage type bitmask
+| 0xf8000000 | OBJECT_TYPE_FLAGS_DEFINED_MASK | [yellow-background]*Unknown*
+| | |
+3+| _Object types without flags_
+| 0x6b657973 | | Container key bag
+| 0x72656373 | | Volume key bag
+|===
+
+=== [[object_subtypes]]Object subtypes
+
+The object subtype is used by specific object types such as:
+
+* B-Tree root
+* B-Tree node
+
+The object subtypes are the same as the <<object_types,Object types>>.
+
+== [[btree]]B-tree
+
+A B-tree consists of:
+
+* B-tree (root or node) object
+* B-tree node header
+* B-tree entries (table of contents)
+* keys data, where the first key is stored after the entries in increasing order
+* Optional key free list
+* unused data
+* Optional value free list
+* values data, where the first value is stored before the footer in descending order
+* Optional B-tree footer, which is only stored in the root node
+
+[NOTE]
+`[APPLE18]` combines the B-Tree object and B-tree node header into a single
+structure referred to as btree_node_phys_t.
+
+=== B-tree object
+
+==== B-tree root object
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header (btn_o)_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x00000002 +
+0x40000002 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | | Object subtype +
+See section: <<object_subtypes,Object subtypes>>
+|===
+
+[NOTE]
+Object type can be 0x00000000 if the B-tree is empty.
+
+==== B-tree node object
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header (btn_o)_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x00000003 +
+0x40000003 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | | Object subtype +
+See section: <<object_subtypes,Object subtypes>>
+|===
+
+=== B-tree node header
+
+The B-tree node header is stored after the B-tree root or node object.
+
+The B-tree node header is 24 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | | Flags (btn_flags) +
+See section: <<btree_node_flags,B-tree node flags>>
+| 2 | 2 | | Level (btn_level)
+| 4 | 4 | | Number of keys in the node (btn_nkeys)
+4+| _Table space (btn_table_space)_
+| 8 | 2 | | Entries data offset +
+Contains an offset relative to the end of the B-tree node header or -1 (0xffff) if not set (invalid)
+| 10 | 2 | | Entries data size
+4+| _Free space (btn_free_space)_
+| 12 | 2 | | Unused data offset +
+Contains an offset relative to the end of the entries data or -1 (0xffff) if not set (invalid)
+| 14 | 2 | | Unused data size
+4+| _Key free list (btn_key_free_list)_
+| 16 | 2 | | Unused key list offset +
+Contains an offset relative to ??? or -1 (0xffff) if not set (invalid)
+| 18 | 2 | | Unused key list size
+4+| _Value free list (btn_val_free_list)_
+| 20 | 2 | | Unused value list offset +
+Contains an offset relative to ??? or -1 (0xffff) if not set (invalid)
+| 22 | 2 | | Unused value list size
+|===
+
+==== [[btree_node_flags]]B-tree node flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0001 | BTNODE_ROOT | Is root
+| 0x0002 | BTNODE_LEAF | Is leaf
+| 0x0004 | BTNODE_FIXED_KV_SIZE | Has a fixed-size entry (key and value)
+| 0x0008 | BTNODE_HASHED | B-tree branch nodes contain a hash of their sub nodes
+| 0x0010 | BTNODE_NOHEADER | The B-tree node are stored without <<object_header,object header>> +
+The object header contains 0-byte values
+| | |
+| 0x8000 | BTNODE_CHECK_KOFF_INVAL | In transient state +
+This flag is used for in-memory purposes only
+|===
+
+=== B-tree entries
+
+The B-tree entries are stored after the B-tree node header.
+
+==== Fixed-size B-tree entry
+
+The fixed-size B-tree entry is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | | Key data offset (key_offs) +
+Contains an offset relative to the end of the entries data
+| 2 | 2 | | Value data offset (value_offs) +
+Contains a reversed offset relative to the start of the B-Tree footer
+|===
+
+==== Variable-size B-tree entry
+
+The variable-size B-tree entry is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | | Key data offset (key_offs) +
+Contains an offset relative to the end of the entries data
+| 2 | 2 | | Key data size (key_len)
+| 4 | 2 | | Value data offset (value_offs) +
+Contains a reversed offset relative to the start of the B-Tree footer
+| 6 | 2 | | Value data size (value_len)
+|===
+
+=== B-tree footer
+
+The B-tree footer is stored at the end of the block that contains the B-tree
+root boject.
+
+The B-tree footer (btree_info_t) is 40 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Static information (btree_info_fixed_t)_
+| 0 | 4 | | Flags (bt_flags) +
+See section: <<btree_flags,B-tree flags>>
+| 4 | 4 | | Node size (bt_node_size)
+| 8 | 4 | | Key size (bt_key_size) +
+Set to 0 if key has a variable size
+| 12 | 4 | | Value size (bt_val_size) +
+Set to 0 if value has a variable size
+4+|
+| 16 | 4 | | Maximum key size (bt_longest_key)
+| 20 | 4 | | Maximum value size (bt_longest_val)
+| 24 | 8 | | Total number of keys (bt_key_count)
+| 32 | 8 | | Total number of nodes (bt_node_count)
+|===
+
+==== [[btree_flags]]B-tree flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | BTREE_UINT64_KEYS | [yellow-background]*Unknown*
+| 0x00000002 | BTREE_SEQUENTIAL_INSERT | [yellow-background]*Unknown*
+| 0x00000004 | BTREE_ALLOW_GHOSTS | [yellow-background]*Unknown*
+| 0x00000008 | BTREE_EPHEMERAL | [yellow-background]*Unknown*
+| 0x00000010 | BTREE_PHYSICAL | [yellow-background]*Unknown*
+| 0x00000020 | BTREE_NONPERSISTENT | [yellow-background]*Unknown*
+| 0x00000040 | BTREE_KV_NONALIGNED | [yellow-background]*Unknown*
+| 0x00000080 | BTREE_HASHED | B-tree branch nodes contain a hash of their sub nodes
+| 0x00000100 | BTREE_NOHEADER | The B-tree node are stored without <<object_header,object header>> +
+The object header contains 0-byte values
+|===
+
+== The container
+
+APFS stores volumes inside a container. The maximum number of volumes is
+dependent on the size of the container. `[HANSEN17]` indicates:
+
+[cols="1,5",options="header"]
+|===
+| Container size | Maximum number of volumes
+| 1 GiB | 2
+| 2 GiB | 4
+| 5 GiB | 10
+| 10 GiB | 20
+| 20 GiB | 40
+| 100 GiB | 100
+| 12 TiB | 100
+| 1.2 PiB | 100
+| 7.5 EiB | 100
+|===
+
+The container consists of:
+
+* current container superblock
+* stored in the container checkpoint descriptor area:
+** current checkpoint map
+** previous checkpoint map(s)
+** previous container superblock(s)
+* stored in the container:
+** space manager
+** container object map
+** reaper
+** crypto key
+** zero or more volumes
+* [yellow-background]*backup of current container superblock?*
+
+=== [[container_superblock]]Container superblock
+
+The container superblock is 1382 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x80000001 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | "NXSB" | Signature (nx_magix)
+| 36 | 4 | | Block size (nx_block_size)
+| 40 | 8 | | Number of blocks (nx_block_count)
+| 48 | 8 | | Compatible feature flags (nx_features) +
+See section: <<container_feature_flags,Container feature flags>>
+| 56 | 8 | | Read-only compatible feature flags (nx_readonly_compatible_features) +
+See section: <<container_read_only_feature_flags,Container read-only feature flags>>
+| 64 | 8 | | Incompatible feature flags (nx_incompatible_features) +
+See section: <<container_incompatible_feature_flags,Container incompatible feature flags>>
+| 72 | 16 | | Container identifier (nx_uuid) +
+Contains a UUID stored in big-endian
+| 88 | 8 | | Next (available) object identifier (nx_next_oid)
+| 96 | 8 | | Next (available) transaction identifier (nx_next_xid)
+| 104 | 4 | | Checkpoint descriptor area number of blocks (nx_xp_desc_blocks) +
+Contains size, in the number of blocks, of the checkpoint descriptor area and the MSB is a flag
+| 108 | 4 | | Checkpoint data area number of blocks (nx_xp_data_blocks) +
+Contains size, in the number of blocks, of the checkpoint data area and the MSB is a flag
+| 112 | 8 | | Checkpoint descriptor area block number (nx_xp_desc_base) +
+Contains the block number relative to the start of the container of the checkpoint descriptor area if the MSB of nx_xp_desc_blocks is not set otherwise the value contains the physical object identifier of a checkpoint descriptor area B-tree
+| 120 | 8 | | Checkpoint data area block number (nx_xp_data_base) +
+Contains the block number relative to the start of the container of the checkpoint data area if the MSB of nx_xp_data_blocks is not set
+| 128 | 4 | | Next available index in the checkpoint descriptor area (nx_xp_desc_next)
+| 132 | 4 | | Next available index in the checkpoint data area (nx_xp_data_next)
+| 136 | 4 | | Start index in the checkpoint descriptor area used by the superblock (nx_xp_desc_index)
+| 140 | 4 | | Number of blocks in the checkpoint descriptor area used by the superblock (nx_xp_desc_len)
+| 144 | 4 | | Start index in the checkpoint data area used by the superblock (nx_xp_data_index)
+| 148 | 4 | | Number of blocks in the checkpoint data area used by the superblock (nx_xp_data_len)
+| 152 | 8 | | Space manager object identifier (nx_spaceman_oid) +
+Contains a object identifier that can be resolved in the <<checkpoint_map,checkpoint map>>
+| 160 | 8 | | Object map block number (nx_omap_oid) +
+Contains a block number relative to the start of the container of the <<object_map,object map>>
+| 168 | 8 | | Reaper object identifier (nx_reaper_oid) +
+Contains a object identifier that can be resolved in the <<checkpoint_map,checkpoint map>>
+| 176 | 4 | | [yellow-background]*Unknown (nx_test_type)*
+| 180 | 4 | | Maxmum number of volumes (nx_max_file_systems) +
+Contains the maximum number of volumes supported by the container
+| 184 | 100 x 8 = 800 | | Array of volume object identifiers (nx_fs_oid) +
+The object identifiers can be resolved in the <<object_map,object map>> to a "physical" location
+| 984 | 32 x 8 = 256 | | Counters (nx_counters) +
+See section: <<container_counters,Container counters>>
+4+| _Unknown (nx_blocked_out_prange)_
+| 1240 | 8 | | [yellow-background]*Unknown (nx_blocked_out_base)*
+| 1248 | 8 | | [yellow-background]*Unknown (nx_blocked_out_blocks)*
+4+|
+| 1254 | 8 | | [yellow-background]*Unknown (nx_evict_mapping_tree_oid)*
+| 1262 | 8 | | Container flags (nx_flags) +
+See section: <<container_flags,Container flags>>
+| 1270 | 8 | | EFI jumpstart (physical) object identifier (nx_efi_jumpstart) +
+Contains a block number relative to the start of the container of the <<efi_jumpstart,EFI jumpstart>>
+| 1278 | 16 | | Fusion set identifier (nx_fusion_uuid) +
+Contains a UUID stored in big-endian
+4+| _Unknown (nx_keylocker)_
+| 1294 | 8 | | Container key bag data block number (nx_keybag_base) +
+Contains a block number relative to the start of the container of the <<key_bag,Key bag>>
+| 1302 | 8 | | Contaner key bag data number of blocks (nx_keybag_blocks)
+4+|
+| 1310 | 4 x 8 = 32 | | [yellow-background]*Unknown (nx_ephemeral_info)*
+| 1342 | 8 | | [yellow-background]*Unknown (Test object identifier) (nx_test_oid)*
+| 1350 | 8 | | Fusion middle tree block number  (nx_fusion_mt_oid) +
+Contains a block number relative to the start of the container of the <<fusion_middle_tree,Fusion middle tree>>
+| 1358 | 8 | | Fusion write-back cache state object identifier (nx_fusion_wbc_oid) +
+Contains a object identifier that can be resolved in the <<checkpoint_map,checkpoint map>>
+4+| _Unknown (nx_fusion_wbc)_
+| 1366 | 8 | | Start block of the Fusion write-back cache area (nx_fusion_wbc_base)
+| 1374 | 8 | | Number of blocks of the Fusion write-back cache area (nx_fusion_wbc_blocks)
+4+|
+|===
+
+[NOTE]
+Presumably NXSB is an abbreviation of NX superblock. At this point it is
+unclear what NX stands for.
+
+==== [[container_flags]]Container flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | NX_RESERVED_1 | [yellow-background]*Unknown (reserved)*
+| 0x00000002 | NX_RESERVED_2 | [yellow-background]*Unknown (reserved)*
+| 0x00000004 | NX_CRYPTO_SW | The encryption is performed in software
+|===
+
+==== [[container_feature_flags]]Container feature flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000000000000001 | NX_FEATURE_DEFRAG | Supports defragmentation
+| 0x0000000000000002 | NX_FEATURE_LCFD | Use low-capacity Fusion Drive mode
+|===
+
+==== [[container_read_only_feature_flags]]Container read-only feature flags
+
+Current no read-only feature flags are defined
+
+==== [[container_incompatible_feature_flags]]Container incompatible feature flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000000000000001 | NX_INCOMPAT_VERSION1 | Pre-release version 1 of APFS
+| 0x0000000000000002 | NX_INCOMPAT_VERSION2 | Release version 2 of APFS
+| | |
+| 0x0000000000000100 | NX_INCOMPAT_FUSION | Supports Fusion Drives
+|===
+
+[NOTE]
+According to `[APPLE18]` the pre-release version 1 and release version 2 are
+incompatble.
+
+==== [[container_counters]]Container counters
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0 | NX_CNTR_OBJ_CKSUM_SET| Number of times a checksum has been calculated when wrting to disk
+| 1 | NX_CNTR_OBJ_CKSUM_FAIL| Number of checksum errors when reading from disk
+|===
+
+[NOTE]
+The other 30 counters are presumed to be unused at this point.
+
+==== Notes
+
+....
+checkpoint descriptor area B-tree
+The treeʼs keys are block offsets into the checkpoint descriptor area, and its
+values are instances of prange_t that contain the fragmentʼs size and location.
+....
+
+....
+checkpoint data area B-tree
+The treeʼs keys are block offsets into the checkpoint data area, and its values are instances of
+prange_t that contain the fragmentʼs size and location.
+....
+
+=== [[checkpoint_map]]Checkpoint map
+
+The checkpoint map contains a mapping between container metadata object
+identifiers and their location in the volume.
+
+==== Checkpoint map object
+
+The checkpoint map object (checkpoint_map_phys_t) is 4080 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x4000000c | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | | Flags (cpm_flags) +
+See section: <<checkpoint_flags,Checkpoint flags>>
+| 36 | 4 | | Number of entries (cpm_count)
+| 40 | 101 x 40 = 4040 | | Array of map entries (cpm_map) +
+See sections: <<checkpoint_map_entry,Checkpoint map entry>>
+|===
+
+==== [[checkpoint_flags]]Checkpoint flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | CHECKPOINT_MAP_LAST | Last checkpoint map object
+|===
+
+==== [[checkpoint_map_entry]]Checkpoint map entry
+
+The checkpoint map (checkpoint_mapping_t) entry entry is 40 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 4 | | (Container) object type (cpm_type) +
+See section: <<object_types,Object types>>
+| 4 | 4 | | (Container) object subtype (cpm_subtype)
+| 8 | 4 | | Size (cpm_size) +
+Contains number of bytes
+| 12 | 4 | | [yellow-background]*Padding (cpm_pad)*
+| 16 | 8 | | File system object identifier (cpm_fs_oid)
+| 24 | 8 | | (Container) object identifier (cpm_oid)
+| 32 | 8 | | Physical address (cpm_paddr) +
+Contains a block number relative to the start of the container
+|===
+
+== [[object_map]]Object map
+
+The object map contains a mapping between object identifiers and their
+"physical" location.
+
+The object map consists of:
+
+* object map (object)
+* object map B-tree
+
+=== Object map object
+
+The object map object (omap_phys_t) is 88 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x4000000b | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | | Flags (om_flags) +
+See section: <<object_map_flags,Object map flags>>
+| 36 | 4 | | Number of snapshots (om_snap_count)
+| 40 | 4 | | Object map B-tree type (om_tree_type)
+| 44 | 4 | | Object map snapshots B-tree type (om_snapshot_tree_type)
+| 48 | 8 | | Object map B-tree object identifier (om_tree_oid)
+| 56 | 8 | | Object map snapshots B-tree object identifier (om_snapshot_tree_oid)
+| 64 | 8 | | Most recent snapshot object identifier (om_most_recent_snap)
+| 72 | 8 | | [yellow-background]*Unknown transaction identifier (om_pending_revert_min)*
+| 80 | 8 | | [yellow-background]*Unknown transaction identifier (om_pending_revert_max)*
+|===
+
+==== [[object_map_flags]]Object map flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | OMAP_MANUALLY_MANAGED | No snapshot support
+| 0x00000002 | OMAP_ENCRYPTING | Encryption in progress
+| 0x00000004 | OMAP_DECRYPTING | Decryption in progress
+| 0x00000008 | OMAP_KEYROLLING | Re-encryption with new key in progress
+| 0x00000010 | OMAP_CRYPTO_GENERATION | Encryption configuation has changed
+|===
+
+=== Object map B-tree
+
+The object map values are stored in <<btree,B-tree>>.
+
+==== Object map B-tree key
+
+The object map B-tree key (omap_key_t) is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Key object identifier (ok_oid)
+| 8 | 8 | | Key object transaction identifier (ok_xid)
+|===
+
+==== Object map B-tree branch node value
+
+An object map B-tree node contains branch node values if BTNODE_LEAF is not set.
+The corresponding object map B-tree key represents the first key in the branch.
+
+An object map B-tree branch node value is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Sub node block number +
+Contains a block number relative to the start of the container
+|===
+
+==== Object map value
+
+An object map B-tree node contains object map values if BTNODE_LEAF is set.
+
+The object map value (omap_val_t) is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Value object flags (ov_flags) +
+See section: <<object_map_value_flags,Object map value flags>>
+| 4 | 4 | | Value object size (ov_size)
+| 8 | 8 | | Value object physical address (ov_paddr) +
+Contains a block number relative to the start of the container
+|===
+
+===== [[object_map_value_flags]]Object map value flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | OMAP_VAL_DELETED | [yellow-background]*Unknown*
+| 0x00000002 | OMAP_VAL_SAVED | [yellow-background]*Unknown*
+| 0x00000004 | OMAP_VAL_ENCRYPTED | [yellow-background]*Unknown*
+| 0x00000008 | OMAP_VAL_NOHEADER | [yellow-background]*Unknown*
+| 0x00000010 | OMAP_VAL_CRYPTO_GENERATION | [yellow-background]*Unknown*
+|===
+
+==== Notes
+
+TODO document omap_snapshot_t
+TODO document Object Map Reaper Phases
+
+=== Space manager
+
+The space manager (spaceman_phys_t) is variable of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header (sm_o)_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x80000005 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | | Block size (sm_block_size)
+| 36 | 4 | | Number of blocks per chunk (sm_blocks_per_chunk)
+| 40 | 4 | | Number of chunks per chunk information block (CIB) (sm_chunks_per_cib)
+| 44 | 4 | | Number of chunk information blocks (CIBs) per chunk information address block (CAB) (sm_cibs_per_cab)
+4+| _Space manager devices (sm_dev)_
+| 48 | 48 | | Main device (SD_MAIN) +
+Contains a <<space_manager_device,Space manager device>>
+| | 96 | 48 | Tier2 device (SD_TIER2) +
+Contains a <<space_manager_device,Space manager device>>
+4+|
+| 144 | 4 | | Flags +
+See section: <<space_manager_flags,Space manager flags>>
+| 148 | 4 | | [yellow-background]*Unknown (sm_ip_bm_tx_multiplier)*
+| 152 | 8 | | [yellow-background]*Unknown (sm_ip_block_count)*
+| 160 | 4 | | [yellow-background]*Unknown (sm_ip_bm_size_in_blocks)*
+| 164 | 4 | | [yellow-background]*Unknown (sm_ip_bm_block_count)*
+| 168 | 8 | | [yellow-background]*Unknown (sm_ip_bm_base)*
+| 176 | 8 | | [yellow-background]*Unknown (sm_ip_base)*
+| 184 | 8 | | [yellow-background]*Unknown (sm_fs_reserve_block_count)*
+| 192 | 8 | | [yellow-background]*Unknown (sm_fs_reserve_alloc_count)*
+4+| _Space manager free queues (sm_fq)_
+| 200 | 40 | | [yellow-background]*Unknown space free queue (SFQ_IP)* +
+Contains a <<space_manager_free_queue,Space manager free queue>>
+| 240 | 40 | | Main space free queue (SFQ_MAIN)* +
+Contains a <<space_manager_free_queue,Space manager free queue>>
+| 280 | 40 | | Tier2 space free queue (SFQ_TIER2)* +
+Contains a <<space_manager_free_queue,Space manager free queue>>
+4+|
+| 320 | 2 | | [yellow-background]*Unknown (sm_ip_bm_free_head)*
+| 322 | 2 | | [yellow-background]*Unknown (sm_ip_bm_free_tail)*
+| 324 | 4 | | [yellow-background]*Unknown (sm_ip_bm_xid_offset)* +
+Contains an offset in bytes relative to the start of the space manager
+| 328 | 4 | | [yellow-background]*Unknown (sm_ip_bitmap_offset)* +
+Contains an offset in bytes relative to the start of the space manager
+| 332 | 4 | | [yellow-background]*Unknown (sm_ip_bm_free_next_offset)* +
+Contains an offset in bytes relative to the start of the space manager
+| 336 | 4 | 1 | [yellow-background]*Unknown (sm_version)*
+| 340 | 4 | | [yellow-background]*Unknown (sm_struct_size)*
+4+| _Space manager data zone (sm_datazone)_
+| 344 | 8 x 72 | | Main allocation zones
+| 920 | 8 x 72 | | Tier2 allocation zones
+4+|
+| 1492 | ... | | [yellow-background]*Unknown (data)*
+|===
+
+==== [[space_manager_flags]]Space manager flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | SM_FLAG_VERSIONED | [yellow-background]*Unknown*
+|===
+
+==== [[space_manager_device]]Space manager device
+
+A space manager device (spaceman_device_t) is 48 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Number of blocks (sm_block_count)
+| 8 | 8 | | Number of chunks (sm_chunk_count)
+| 16 | 4 | | Number of chunk information blocks (CIBs) (sm_cib_count)
+| 20 | 4 | | Number of chunk information address blocks (CABs) (sm_cab_count)
+| 24 | 8 | | Number of unused blocks (sm_free_count)
+| 32 | 4 | | [yellow-background]*Unknown (sm_addr_offset)* +
+Contains an offset in bytes relative to the start of the space manager
+| 36 | 4 | | [yellow-background]*Unknown (sm_reserved)*
+| 40 | 8 | | [yellow-background]*Unknown (sm_reserved2)*
+|===
+
+==== [[space_manager_free_queue]]Space manager free queue
+
+A space manager free queue (spaceman_free_queue_t) is 40 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | [yellow-background]*Unknown (sfq_count)*
+| 8 | 8 | | Space manager free queue tree object identifier (sfq_tree_oid)
+| 16 | 8 | | Space manager free queue oldest transaction identifier (sfq_oldest_xid)
+| 24 | 2 | | [yellow-background]*Unknown (sfq_tree_node_limit)*
+| 26 | 2 | | [yellow-background]*Unknown (sfq_pad16)*
+| 28 | 4 | | [yellow-background]*Unknown (sfq_pad32)*
+| 32 | 8 | | [yellow-background]*Unknown (sfq_reserved)*
+|===
+
+==== [[space_manager_allocation_zone]]Space manager allocation zone
+
+A space manager allocation zone (spaceman_allocation_zone_info_phys_t) is
+72 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Current allocation zone boundaries (saz_current_boundaries) +
+Contains <<space_manager_zone_boundaries,Space manager zone boundaries>>
+| 8 | 7 x 8 | | Previous allocation zone boundaries (saz_previous_boundaries) +
+Contains <<space_manager_zone_boundaries,Space manager zone boundaries>>
+| 64 | 2 | | [yellow-background]*Unknown (saz_zone_id)*
+| 66 | 2 | | [yellow-background]*Unknown (saz_previous_boundary_index)*
+| 68 | 4 | | [yellow-background]*Unknown (saz_reserved)*
+|===
+
+==== [[space_manager_zone_boundaries]]Space manager zone_boundaries
+
+A space manager zone boundaries (spaceman_allocation_zone_boundaries_t) is
+8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | [yellow-background]*Unknown (saz_zone_start)*
+| 8 | 8 | | [yellow-background]*Unknown (saz_zone_end)*
+|===
+
+==== Notes
+
+sm_addr_offset points to block number which points to a OBJECT_TYPE_SPACEMAN_CIB block.
+Probably an OBJECT_TYPE_SPACEMAN_CAB block when necessary.
+
+....
+00052000  0d cd df 3f cb 2a 20 80  4d 00 00 00 00 00 00 00  |...?.* .M.......|
+00052010  04 00 00 00 00 00 00 00  07 00 00 40 00 00 00 00  |...........@....|
+00052020  00 00 00 00 01 00 00 00  04 00 00 00 00 00 00 00  |................|
+00052030  00 00 00 00 00 00 00 00  f6 03 00 00 86 03 00 00  |................|
+00052040  4e 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |N...............|
+00052050  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+*
+00053000  ff ff ff ff ff ff ff ff  ff ff ff ff ff ff 00 00  |................|
+00053010  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+*
+....
+
+=== [[chunk_information_address_block]]Chunk information address block
+
+The chunk information address block (cib_addr_block_t) is variable of size
+and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header (cab_o)_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x40000006 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | | [yellow-background]*Unknown (cab_index)*
+| 36 | 4 | | Number of chunk information blocks (CIBs) (cab_cib_count)
+4+| _Chunk information block physical addresses (cab_cib_addr)_
+| 40 | 8 x Number of CIBs | | Physical address of chunk information blocks (CIB)
+|===
+
+=== [[chunk_information_block]]Chunk information block
+
+The chunk information block (chunk_info_block_t) is variable of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header (cib_o)_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x40000007 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | | [yellow-background]*Unknown (cib_index)*
+| 36 | 4 | | Number of chunk information entries (cib_chunk_info_count)
+4+| _Chunk information entries (cib_chunk_info)_
+| 40 | 8 x Number of entries | | Array of chunk information entries
+|===
+
+==== [[chunk_information_entry]]Chunk information entry
+
+The chunk information entry (chunk_info_t) is 32 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | [yellow-background]*Unknown (ci_xid)*
+| 8 | 8 | | [yellow-background]*Unknown (ci_addr)*
+| 16 | 4 | | [yellow-background]*Unknown (ci_block_count)*
+| 20 | 4 | | [yellow-background]*Unknown (ci_free_count)*
+| 24 | 8 | | [yellow-background]*Unknown (ci_bitmap_addr)*
+|===
+
+=== [[reaper]]Reaper
+
+The reaper is [yellow-background]*unknown* of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x80000011 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 8 | | [yellow-background]*Unknown*
+| | 8 | | [yellow-background]*Unknown*
+| | 8 | | [yellow-background]*Unknown*
+| | 8 | | [yellow-background]*Unknown*
+| | 4 | | [yellow-background]*Unknown*
+| | 4 | | [yellow-background]*Unknown*
+| | 4 | | [yellow-background]*Unknown*
+| | 4 | | [yellow-background]*Unknown*
+| | 8 | | [yellow-background]*Unknown*
+| | 8 | | [yellow-background]*Unknown*
+| | 8 | | [yellow-background]*Unknown*
+| | 4 | | [yellow-background]*Unknown*
+| | 4 | | [yellow-background]*Unknown*
+|===
+
+==== [[reaper_list]]Reaper list
+
+The reaper list entry is [yellow-background]*unknown* of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x80000012 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | | [yellow-background]*Unknown*
+| 36 | 4 | | [yellow-background]*Unknown*
+| 40 | 4 | | [yellow-background]*Unknown*
+| 44 | 4 | | [yellow-background]*Unknown (max_record_count)*
+| 48 | 4 | | [yellow-background]*Unknown (record_count)*
+| 52 | 4 | | [yellow-background]*Unknown (first_index)*
+| 56 | 4 | | [yellow-background]*Unknown (last_index)*
+| 60 | 4 | | [yellow-background]*Unknown (free_index)*
+| 64 | 100 x ... | | Array of reaper list entries (nrle) +
+See section: <<reaper_list_entry,Reaper list entry>>
+|===
+
+==== [[reaper_list_entry]]Reaper list entry
+
+The reaper list entry is 40 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Forward link (fwlink)
+| 4 | 4 | | [yellow-background]*Unknown*
+| 8 | 4 | | Type (type)
+| 12 | 4 | | Block size (blksize)
+| 16 | 8 | | Object identifier (oid)
+| 24 | 8 | | Physical address (paddr) +
+Contains a block number relative to the start of the container
+| 32 | 8 | | Object transaction identifier (xid)
+|===
+
+== [[key_bag]]Key bag
+
+The key bag consists of:
+
+* Container or volume key bag object
+* Key bag header
+* Key bag entries
+
+=== Container key bag object
+
+The container key bag object contains key data of the container.
+
+The container key bag object is 32 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x6b657973 ("syek") | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+|===
+
+=== Volume key bag object
+
+The volume key bag object contains key data of a specific volume.
+
+The volume key bag object is 32 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x72656373 ("scer") | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+|===
+
+=== Key bag header
+
+The key bag header (kb_locker_t) is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | 2 | Format version (kl_version)
+| 2 | 2 | | Number of entries (kl_nkeys)
+| 4 | 4 | | Key bag data size (kl_nbytes) +
+Contains the size of the key bag data, this includes the size of key bag header
+| 8 | 8 | | [yellow-background]*Unknown (padding)*
+|===
+
+=== [[key_bag_entries]]Key bag entries
+
+A key bag entry consists of:
+
+* a key bag entry header
+* a key bag entry data
+* alignment padding
+
+The key bag entry header specifies the type of the key bag entry data.
+
+The key bag entries are 16-byte aligned.
+
+==== Key bag entry header
+
+The key bag entry header (keybag_entry_t) is 24 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 16 | | Volume identifer (ke_uuid) +
+Contains a UUID stored in big-endian
+| 16 | 2 | | Entry type (ke_tag) +
+See section: <<key_bag_entry_types,Key bag entry types>>
+| 18 | 2 | | Entry data size (ke_keylen)
+| 20 | 4 | | [yellow-background]*Unknown (padding)*
+|===
+
+==== [[key_bag_entry_types]]Key bag entry types
+
+===== Container key bag entry types
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00 | KB_TAG_UNKNOWN | Unknown
+| 0x01 | KB_TAG_WRAPPING_KEY | Wrapping key
+| 0x02 | KB_TAG_VOLUME_KEY | Volume master key +
+See section: <<key_bag_kek_packed_object,Key encrypted key (KEK) packed object>>
+| 0x03 | KB_TAG_VOLUME_UNLOCK_RECORDS | Volume key bag extent +
+See section: <<key_bag_data_extent,Key bag data extent>>
+| 0x04 | KB_TAG_VOLUME_PASSPHRASE_HINT | Passphrase hint
+| | |
+| 0xf8 | KB_TAG_USER_PAYLOAD | [yellow-background]*Unknown (user payload)*
+|===
+
+The volume master key is encryped with a volume key.
+
+===== Volume key bag entry types
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 3 | | Volume key +
+See section: <<key_bag_kek_packed_object,Key encrypted key (KEK) packed object>>
+| 4 | | Password Hint +
+Contains a string without end-of-string character
+|===
+
+The volume key is encryped with an user key.
+
+==== [[key_bag_packed_object]]Key bag packed object
+
+The packed object consist of an object packed value that embeds attribute
+packed values.
+
+===== Key bag packed value
+
+The key bag packed value is variable of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 1 | | Value tag (or value type) +
+[yellow-background]*Unknown (Where the most-significant bit represents a user-defined flag?)*
+| 1 | 1 | | Value data size +
+If the most-significant bit is set the value data size is stored in the next ( value & 0x7f ) bytes +
+Seen: 0x81
+| ... | ... | | Value data
+|===
+
+[NOTE]
+The meaning of the value tags differ per packed object type.
+
+[NOTE]
+A packed value with a tag and size of 0 signifies the end of the packed values.
+
+===== [[key_bag_kek_packed_object]]Key encrypted key (KEK) packed object
+
+The packed object value tag of a key encrypted key is 0x30 and contains the
+following attribute value tags:
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x80 | | [yellow-background]*Unknown*
+| 0x81 | | HMAC
+| 0x82 | | [yellow-background]*Unknown (salt?)*
+| | |
+| 0xa3 | | Wrapped Wrapped Key Encrypted Key (KEK) packed object +
+See section: <<key_bag_wrapped_kek_packed_object,Wrapped Key Encrypted Key (KEK) packed object>>
+|===
+
+===== [[key_bag_wrapped_kek_packed_object]]Wrapped Key Encrypted Key (KEK) packed object
+
+The packed object value tag of a wrapped kek encrypted key is 0xa3 and contains
+the following attribute value tags:
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x80 | | [yellow-background]*Unknown*
+| 0x81 | | Volume identifer +
+Contains a UUID stored in big-endian
+| 0x82 | | Wrapped Key Encrypted Key (KEK) metadata +
+See section: <<wrapped_kek_metadata,Wrapped Key Encrypted Key (KEK) metadata>>
+| 0x83 | | Wrapped Key Encrypted Key (KEK) data
+| 0x84 | | Number of iterations
+| 0x85 | | Salt for the PBKDF2 algorithm
+|===
+
+==== [[wrapped_kek_metadata]]Wrapped Key Encrypted Key (KEK) metadata
+
+The Wrapped Key Encrypted Key (KEK) metadata is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Encryption method +
+See section: <<encryption_methods,Encryption methods>>
+| 4 | 2 | | [yellow-background]*Unknown*
+| 6 | 1 | | [yellow-background]*Unknown*
+| 7 | 1 | | [yellow-background]*Unknown*
+|===
+
+===== [[encryption_methods]]Encryption methods
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0 | | [yellow-background]*Unknown (AES-256)*
+| | |
+| 2 | | [yellow-background]*Unknown (AES-128 FVDE (CoreStorage FileVault) compatible)*
+| | |
+| 16 | | [yellow-background]*Unknown (AES-256)* +
+Seen in combination with recovery password protected volume key
+|===
+
+==== [[key_bag_data_extent]]Key bag data extent
+
+The key bag data extent is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Key bag block number
+| 8 | 8 | | Key bag number of blocks
+|===
+
+== Volume
+
+The volume consists of:
+
+* volume superblock
+* volume object map
+* ...
+
+[NOTE]
+Individual APFS volume have a corresponding "synthesized" device file though
+this cannot be directly read.
+
+=== [[volume_superblock]]Volume superblock
+
+The volume superblock (apfs_superblock_t) is 940 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x0000000d +
+0x4000000d (for snapshots) | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | "APSB" | Signature (apfs_magic)
+| 36 | 4 | | [yellow-background]*Unknown (apfs_fs_index)*
+| 40 | 8 | | Compatible feature flags (apfs_features) +
+<<volume_superblock_feature,Volume superblock features>>
+| 48 | 8 | | Read-only compatible feature flags (apfs_readonly_compatible_features) +
+<<volume_read_only_superblock_feature,Volume read-only superblock features>>
+| 56 | 8 | | Incompatible feature flags (apfs_incompatible_features) +
+<<volume_incompatible_superblock_feature,Volume incompatible superblock features>>
+| 64 | 8 | | [yellow-background]*Unknown (apfs_unmount_time)* +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 72 | 8 | | Number of reserved blocks (apfs_reserve_block_count)
+| 80 | 8 | | Number of quota blocks (apfs_quota_block_count)
+| 88 | 8 | | [yellow-background]*Unknown (apfs_fs_alloc_count)*
+| 96 | 20 | | Encryption state (apfs_meta_crypto) +
+See section: <<encryption_state,Encryption state>>
+| 116 | 4 | | File system root tree object type (apfs_root_tree_type) +
+See section: <<object_types,Object types>>
+| 120 | 4 | | Extent-reference tree object type (apfs_extentref_tree_type) +
+See section: <<object_types,Object types>>
+| 124 | 4 | | Snapshot metadata tree object type (apfs_snap_meta_tree_type) +
+See section: <<object_types,Object types>>
+| 132 | 8 | | Object map block number (apfs_omap_oid) +
+Contains a block number relative to the start of the container of the <<object_map,object map>>
+| 140 | 8 | | File system root tree object identifier (apfs_root_tree_oid)
+| 148 | 8 | | Extent-reference tree block number (apfs_extentref_tree_oid) +
+See section: <<extent_reference_tree,Extent reference tree>>
+| 156 | 8 | | Snapshot metadata tree block number (apfs_snap_meta_tree_oid) +
+See section: <<snapshot_metadata_tree,Snapshot metadata tree>>
+| 164 | 8 | | [yellow-background]*Unknown (apfs_revert_to_xid)*
+| 172 | 8 | | [yellow-background]*Unknown (apfs_revert_to_sblock_oid)*
+| 180 | 8 | | Next (available) file system object identifier (apfs_next_obj_id) +
+Seen upper 32-bit contain 0xffffffff
+| 188 | 8 | | [yellow-background]*Unknown (apfs_num_files)*
+| 196 | 8 | | [yellow-background]*Unknown (apfs_num_directories)*
+| 204 | 8 | | [yellow-background]*Unknown (apfs_num_symlinks)*
+| 212 | 8 | | [yellow-background]*Unknown (apfs_num_other_fsobjects)*
+| 220 | 8 | | [yellow-background]*Unknown (apfs_num_snapshots)*
+| 228 | 8 | | [yellow-background]*Unknown (apfs_total_blocks_alloced)*
+| 236 | 8 | | [yellow-background]*Unknown (apfs_total_blocks_freed)*
+| 244 | 16 | | Volume identifier (apfs_vol_uuid) +
+Contains a UUID stored in big-endian
+| 260 | 8 | | Modification date and time (apfs_last_mod_time) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 268 | 8 | | Volume flags (apfs_fs_flags) +
+See section: <<volume_superblock_flags,Volume superblock flags>>
+| 276 | 40 | | Creation change information (apfs_formatted_by) +
+See section: <<change_information,Change information>>
+| 316 | 8 x 40 | | Modification change information (apfs_modified_by) +
+[yellow-background]*Contains the 8 last entries from least recent to most recent?* +
+See section: <<change_information,Change information>>
+| 636 | 256 | | Volume name (apfs_volname)
+| 892 | 4 | | Next (available) document identifier (apfs_next_doc_id)
+| 896 | 2 | | [yellow-background]*Unknown (apfs_role)*
+| 898 | 2 | | [yellow-background]*Unknown (reserved)*
+| 900 | 8 | | [yellow-background]*Unknown (apfs_root_to_xid)*
+| 908 | 32 | | [yellow-background]*Unknown (apfs_er_state_oid)*
+|===
+
+=== [[encryption_state]]Encryption state
+
+The encryption state (wrapped_meta_crypto_state_t) is 20 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | | Major format version (major_version)
+| 2 | 2 | | Minor format version (minor_version)
+| 4 | 4 | | Flags (cpflags) +
+See section: <<encryption_state_flags,Encryption state flags>>
+| 8 | 4 | | [yellow-background]*Unknown (persistent_class)*
+| 12 | 4 | | [yellow-background]*Unknown (key_os_version)*
+| 16 | 2 | | [yellow-background]*Unknown (key_revision)*
+| 18 | 2 | | [yellow-background]*Unknown (unused)*
+|===
+
+==== [[encryption_state_flags]]Encryption state flags
+
+[yellow-background]*TODO: complete this section.*
+
+=== [[change_information]]Change information
+
+The change information (apfs_modified_by_t) is 48 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 32 | | Application (id) +
+String that contains the first 31 characters of the name and version of the application that changed the file system +
+Contains 0 if not set
+| 32 | 8 | | Change date and time (timestamp) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 40 | 8 | | Change object transaction number (last_xid) +
+Contains 0 if not set
+|===
+
+==== [[volume_superblock_flags]]Volume flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000000000000001 | APFS_FS_UNENCRYPTED | Volume is unencrypted
+| 0x0000000000000002 | APFS_FS_EFFACEABLE | [yellow-background]*Unknown (Volume supports effaceable storage?)*
+| 0x0000000000000004 | APFS_FS_RESERVED_4 | [yellow-background]*Unknown (reserved)*
+| 0x0000000000000008 | APFS_FS_ONEKEY | Volume uses software encryption with a single key (volume master key)
+| 0x0000000000000010 | APFS_FS_SPILLEDOVER | Volume has run out of allocated space on the solid-state drive
+| 0x0000000000000020 | APFS_FS_RUN_SPILLOVER_CLEANER | Volume has spilled over and the spillover cleaner must be run
+|===
+
+==== [[volume_superblock_feature]]Volume superblock features
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000000000000001 | APFS_FEATURE_DEFRAG_PRERELEASE | [yellow-background]*Unknown*
+| 0x0000000000000002 | APFS_FEATURE_HARDLINK_MAP_RECORDS | [yellow-background]*Unknown*
+| 0x0000000000000004 | APFS_FEATURE_DEFRAG | [yellow-background]*Unknown*
+| 0x0000000000000008 | APFS_FEATURE_STRICTATIME | [yellow-background]*Unknown*
+| 0x0000000000000010 | APFS_FEATURE_VOLGRP_SYSTEM_INO_SPACE | [yellow-background]*Unknown*
+|===
+
+==== [[volume_read_only_feature_flags]]Volume read-only feature flags
+
+Current no read-only feature flags are defined
+
+==== [[volume_incompatible_feature_flags]]Volume incompatible feature flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000000000000001 | APFS_INCOMPAT_CASE_INSENSITIVE | Filenames are case insensitive
+| 0x0000000000000002 | APFS_INCOMPAT_DATALESS_SNAPS | Volume contains one or more snapshots without data
+| 0x0000000000000004 | APFS_INCOMPAT_ENC_ROLLED | Encryption keys of the volume have been changed
+| 0x0000000000000008 | APFS_INCOMPAT_NORMALIZATION_INSENSITIVE | Filenames are normalization insensitive
+| 0x0000000000000010 | APFS_INCOMPAT_INCOMPLETE_RESTORE | [yellow-background]*Unknown*
+| 0x0000000000000020 | APFS_INCOMPAT_SEALED_VOLUME | [yellow-background]*Unknown*
+|===
+
+== [[file_system]]File system
+
+The file system structures are stored in a <<btree,B-tree>>.
+
+The file system B-tree uses identifiers similar to catalog identifiers (CNIDs)
+on HFS/HFS+/HFSX. In this document these identifiers are referred to as File
+System object identifiers (FSOIDs) to contrast other object identifiers (OIDs).
+
+[cols="1,1,5",options="header"]
+|===
+| FSOID | Identifier | Assignment
+| 0 | | [yellow-background]*Unknown (Reserved)*
+| 1 | | Parent identifier of the root directory (folder), nameless
+| 2 | | Directory identifier of the root directory (folder), named "root"
+| 3 | | [yellow-background]*Unknown*, named "private-dir"
+|===
+
+=== File system B-tree key
+
+The file system B-tree key is variable of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object identifier and type (obj_id_and_type)_
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | | File system data type +
+See section: <<file_system_data_types,File system data types>>
+| 8 | ... | | Optional additional key data dependent on the data type
+|===
+
+=== [[file_system_data_types]]File system data types
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0 | APFS_TYPE_ANY | [yellow-background]*Unknown (Any)*
+| 0x1 | APFS_TYPE_SNAP_METADATA | Snapshot metadata
+See section: <<snapshot_metadata,Snapshot metadata>>
+| 0x2 | APFS_TYPE_EXTENT | Extent +
+See section: <<extent,Extent>>
+| 0x3 | APFS_TYPE_INODE | Inode +
+See section: <<inode,Inode>>
+| 0x4 | APFS_TYPE_XATTR | Extended attribute (xattr) +
+See section: <<extended_attribute,Extended attribute>>
+| 0x5 | APFS_TYPE_SIBLING_LINK | Sibling link +
+See section: <<sibling_link,Sibling link>>
+| 0x6 | APFS_TYPE_DSTREAM_ID | Data stream identifier +
+See section: <<data_stream_identifier,Data stream identifier>>
+| 0x7 | APFS_TYPE_CRYPTO_STATE | Encryption state
+See section: <<encryption_state,Encryption state>>
+| 0x8 | APFS_TYPE_FILE_EXTENT | File extent
+See section: <<file_extent,File extent>>
+| 0x9 | APFS_TYPE_DIR_REC | Directory record +
+See section: <<directory_record,Directory record>>
+| 0xa | APFS_TYPE_DIR_STATS | Directory stats +
+See section: <<directory_stats,Directory stats>>
+| 0xb | APFS_TYPE_SNAP_NAME | Snapshot name +
+See section: <<snapshot_name,Snapshot name>>
+| 0xc | APFS_TYPE_SIBLING_MAP | Sibling map +
+See section: <<sibling_map,Sibling map>>
+| | |
+| 0xf | APFS_TYPE_INVALID | Invalid
+|===
+
+=== File system B-tree branch node value
+
+A file system B-tree node contains branch node values if BTNODE_LEAF is not set.
+The corresponding file system B-tree key represents the first key in the branch.
+
+A file system B-tree branch node value is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | B-tree sub node object identifier +
+The object identifiers can be resolved in the <<object_map,object map>> to a "physical" location
+|===
+
+=== [[snapshot_metadata]]Snapshot metadata
+
+The snapshot metadata value (j_snap_metadata_val_t) is variable of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Extent-reference tree block number +
+Contains a block number relative to the start of the container
+| 8 | 8 | | Volume superblock block number +
+Contains a block number relative to the start of the container
+| 16 | 8 | | Creation time +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 24 | 8 | | Change (or last modification) time +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 32 | 8 | | [yellow-background]*Unknown (inum)*
+| 40 | 4 | | Extent-reference tree object type (extentref_tree_type) +
+See section: <<object_types,Object types>>
+| 44 | 4 | | Flags +
+See section: <<snapshot_metadata_flags,Snapshot metadata flags>>
+| 48 | 2 | | Name string size (name_len) +
+Includes the size of the end-of-string character
+| 50 | ... | | Name string (name) +
+Contains an UTF-8 encoded string with an end-of-string character
+|===
+
+==== [[snapshot_metadata_flags]]Snapshot metadata flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x00000001 | SNAP_META_PENDING_DATALESS | [yellow-background]*Unknown*
+|===
+
+=== [[extent]]Extent
+
+==== Extent key data
+
+The extent key data (j_phys_ext_key_t) is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x2 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+|===
+
+==== Extent value data
+
+The extent value data (j_phys_ext_val_t) is 20 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Extent size and data type (len_and_kind)_
+| 0 | 60 bits | | Extent data size
+| 7.4 | 4 bits | | File system data type +
+See section: <<file_system_data_types,File system data types>>
+4+|
+| 8 | 8 | | File system object identifier of owner (owning_obj_id)
+| 16 | 4 | | Reference count (refcnt)
+|===
+
+=== [[inode]]Inode
+
+==== Inode key data
+
+The inode key data (j_inode_key_t) is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x3 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+|===
+
+==== Inode value data
+
+The inode value data (APFS_TYPE_INVALID) is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Parent file system object identifier (parent_id)
+| 8 | 8 | | Data stream file system object identifier (private_id) +
+Contains the file system object identifier of the file extents that make up the data stream
+| 16 | 8 | | Creation date and time (create_time) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 24 | 8 | | Modification date and time (mod_time) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 32 | 8 | | Inode change date and time (change_time) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 48 | 8 | | Access date and time (access_time) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 56 | 8 | | Inode flags (internal_flags) +
+See section: <<inode_flags,Inode flags>>
+| 64 | 4 | | Number of children (nchildren) or number of (hard) links (nlink)
+| 68 | 4 | | [yellow-background]*Unknown (default_protection_class)*
+| 72 | 4 | | [yellow-background]*Unknown (write_generation_counter)*
+| 76 | 4 | | BSD file entry flags (bsd_flags) +
+See section: <<bsd_file_entry_flags,BSD file entry flags>>
+| 80 | 4 | | Owner user identifier (owner)
+| 84 | 4 | | Group identifier (gid)
+| 86 | 2 | | File mode +
+See section: <<file_modes,File modes>>
+| 88 | 2 | | [yellow-background]*Unknown (pad1)*
+| 90 | 8 | | [yellow-background]*Unknown (pad2)*
+| 98 | ... | | Extended fields (xfields) +
+See section: <<extended_fields,Extended fields>>
+|===
+
+[NOTE]
+The MacOS stat command treats nchildren equivalent to nlink
+
+===== [[inode_flags]]Inode flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000000000000001 | INODE_IS_APFS_PRIVATE | Is private +
+The inode is used internally, typically for a data stream
+| 0x0000000000000002 | INODE_MAINTAIN_DIR_STATS | Maintains directory stats +
+The inode tracks the size of all of its children
+| 0x0000000000000004 | INODE_DIR_STATS_ORIGIN | Maintains directory stats explicitly set, not inherited +
+The inode has the INODE_MAINTAIN_DIR_STATS flag set explicitly, not due to inheritance
+| 0x0000000000000008 | INODE_PROT_CLASS_EXPLICIT | Protection class explicitly set, not inherited +
+The inode data protection class was set explicitly when the inode was created
+| 0x0000000000000010 | INODE_WAS_CLONED | Was cloned +
+The inode was created by cloning another inode
+| 0x0000000000000020 | INODE_FLAG_UNUSED | [yellow-background]*Unknown (Reserved)*
+| 0x0000000000000040 | INODE_HAS_SECURITY_EA | Has security extended attribute +
+The inode has an access control list
+| 0x0000000000000080 | INODE_BEING_TRUNCATED | Is truncated +
+The inode was truncated
+| 0x0000000000000100 | INODE_HAS_FINDER_INFO | Has Finder information +
+The inode has a Finder info extended field
+| 0x0000000000000200 | INODE_IS_SPARSE | Is sparse +
+The inode has a sparse byte count extended field
+| 0x0000000000000400 | INODE_WAS_EVER_CLONED | Was cloned +
+The inode has been cloned at least once
+| 0x0000000000000800 | INODE_ACTIVE_FILE_TRIMMED | [yellow-background]*Unknown (TODO)* +
+The inode is an overprovisioning file that has been trimmed
+| 0x0000000000001000 | INODE_PINNED_TO_MAIN | [yellow-background]*Unknown (TODO)* +
+The inode file content is always on the main storage device +
+This flag is used for Fusion drives where the main storage is a solid-state drive
+| 0x0000000000002000 | INODE_PINNED_TO_TIER2 | [yellow-background]*Unknown (TODO)* +
+The inode file content is always on the secondary storage device +
+This flag is used for Fusion drives where the secondary storage is a (magnetic) hard drive
+| 0x0000000000004000 | INODE_HAS_RSRC_FORK | Has resource fork +
+The inode has a resource fork
+| 0x0000000000008000 | INODE_NO_RSRC_FORK | Has no resource fork +
+The inode does not have a resource fork
+| 0x0000000000010000 | INODE_ALLOCATION_SPILLEDOVER | [yellow-background]*Unknown (TODO)* +
+The inode file content has some space allocated outside of the preferred storage tier for that file
+|===
+
+===== [[file_modes]]File modes
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0xf000 (0170000) | S_IFMT | File type bitmask
+| 0x1000 (0010000) | S_IFIFO | Named pipe
+| 0x2000 (0020000) | S_IFCHR | Character-special file (Character device)
+| 0x4000 (0040000) | S_IFDIR | Directory
+| 0x6000 (0060000) | S_IFBLK | Block-special file (Block device)
+| 0x8000 (0100000) | S_IFREG | Regular file
+| 0xa000 (0120000) | S_IFLNK | Symbolic link
+| 0xc000 (0140000) | S_IFSOCK | Socket
+| 0xe000 (0160000) | S_IFWHT | Whiteout +
+A whiteout is a file entry that covers up all entries of a particular name from lower branches
+|===
+
+===== [[bsd_file_entry_flags]]BSD file entry flags
+
+The BSD file entry flags are defined in the '<sys/stat.h>' header file.
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000ffff | UF_SETTABLE | bitmask of owner changeable flags
+| | |
+| 0x00000001 | UF_NODUMP | do not dump file entry
+| 0x00000002 | UF_IMMUTABLE | file entry is immutable and may not be changed
+| 0x00000004 | UF_APPEND | writes to file entry may only append
+| 0x00000008 | UF_OPAQUE | directory is opaque wrt. union
+| 0x00000010 | UF_NOUNLINK | file entry may not be removed or renamed +
+Not implement in MacOS
+| 0x00000020 | UF_COMPRESSED | file entry is compressed
+| 0x00000040 | UF_TRACKED | notify about file entry changes
+| 0x00000080 | UF_DATAVAULT | entitlement required for reading and writing
+| | |
+| 0x00008000 | UF_HIDDEN | file entry is hidden
+| | |
+| 0xffff0000 | SF_SETTABLE | bitmask of superuser changeable flags
+| | |
+| 0x001f0000 | SF_SUPPORTED | bitmask of superuser supported flags
+| | |
+| 0x00010000 | SF_ARCHIVED | file entry is archived
+| 0x00020000 | SF_IMMUTABLE | file entry is immutable and may not be changed
+| 0x00040000 | SF_APPEND | writes to file entry may only append
+| 0x00080000 | SF_RESTRICTED | entitlement required for writing
+| 0x00100000 | SF_NOUNLINK | file entry may not be removed, renamed or used as mount point
+| 0x00200000 | SF_SNAPSHOT | snapshot inode +
+Not implement in MacOS
+|===
+
+=== [[extended_attribute]]Extended attribute
+
+==== Extended attribute key data
+
+The extended attribute key data (j_xattr_key_t) is variable of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x4 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+| 8 | 2 | | Name string size (name_len) +
+Includes the size of the end-of-string character
+| 10 | ... | | Name string (name) +
+Contains an UTF-8 encoded string with an end-of-string character +
+See section: <<extended_attribute_names,Extended attribute names>>
+|===
+
+[NOTE]
+The name of an extended attribute appears to be case senstive even on
+a case insensitive file system.
+
+==== Extended attribute value data
+
+The extended attribute value data (j_xattr_val_t) is variable of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | | Flags (flags) +
+See section: <<extended_attribute_flags,Extended attribute flags>>
+| 2 | 2 | | Extended attribute data size
+| 4 | ... | | Extended attribute data
+|===
+
+[NOTE]
+Extended attribute data size can contain 0 if extended attribute flags
+XATTR_DATA_EMBEDDED is set.
+
+==== [[extended_attribute_names]]Extended attribute names
+
+[cols="1,5",options="header"]
+|===
+| Name | Description
+| com.apple.assetsd.dbRebuildInProgress |
+| com.apple.assetsd.dbRebuildUuid |
+| com.apple.assetsd.thumbnailCameraPreviewImageAssetID |
+| com.apple.assetsd.UUID |
+| com.apple.decmpfs | Compressed data extended attribute +
+See section: <<compressed_data_extended_attribute,Compressed data extended attribute>>
+| com.apple.FinderInfo |
+| com.apple.fs.symlink | Symbolic link
+| com.apple.genstore.info |
+| com.apple.genstore.origdisplayname |
+| com.apple.genstore.orig_perms_v1 |
+| com.apple.genstore.origposixname |
+| com.apple.GeoServices.SHA1 |
+| com.apple.installd.installType |
+| com.apple.installd.uniqueInstallID |
+| com.apple.lastuseddate#PS |
+| com.apple.metadata:_kMDItemUserTags |
+| com.apple.metadata:com_apple_backup_excludeItem |
+| com.apple.metadata:kMDItemDownloadedDate |
+| com.apple.metadata:kMDItemWhereFroms |
+| com.apple.metadata:kMDLabel_fwlfb7nbt2o7degof3q2o2btjy |
+| com.apple.quarantine |
+| com.apple.ResourceFork | Resource fork
+| com.apple.rootless |
+| com.apple.system.Security |
+| com.apple.TextEncoding |
+| LastUpgradeCheck |
+| lock |
+| org.chromium.crashpad.database.initialized |
+|===
+
+==== [[extended_attribute_flags]]Extended attribute flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0001 | XATTR_DATA_STREAM | Extended attribute data is stored in a data stream +
+The extended attribute data contains an 8-byte file system object identifier of the corresponding data stream +
+See section: <<extended_attribute_data_stream,Extended attribute data stream>>
+| 0x0002 | XATTR_DATA_EMBEDDED | Extended attribute data is stored directly in the record
+| 0x0004 | XATTR_FILE_SYSTEM_OWNED | Extended attribute record is owned by the file system
+| 0x0008 | XATTR_RESERVED_8 | [yellow-background]*Unknown (Reserved)*
+|===
+
+==== [[extended_attribute_data_stream]]Extended attribute data stream
+
+The extended attribute data stream (j_xattr_dstream_t) is 48 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Data stream file system object identifier (xattr_obj_id) +
+Contains the file system object identifier of the file extents that make up the data stream
+| 8 | 48 | | Data stream attribute +
+See section: <<data_stream_attribute,data stream attribute>>
+|===
+
+==== [[compressed_data_extended_attribute]]Compressed data extended attribute
+
+The compressed extended attribute is named "com.apple.decmpfs" and consists of:
+
+* compressed data header
+* optional compressed data
+
+===== [[compressed_data_header]]Compressed data header
+
+The compressed data header is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | "fpmc" | Signature
+| 4 | 4 | | | Compression method +
+See section: <<compression_method,Compression method>>
+| 8 | 8 | | | Uncompressed data size
+|===
+
+[NOTE]
+The signature is likely stored in little-endian and represents "cmpf".
+
+===== [[compression_method]]Compression method
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 1 | CMP_Type1 | [yellow-background]*Unknown (uncompressed extended attribute data)*
+| | |
+| 3 | | ZLIB (DEFLATE) compressed extended attribute data +
+The compressed data is stored in the extended attribute after the compressed data header
+| 4 | | 64k chunked ZLIB (DEFLATE) compressed resource fork +
+The compressed data is stored in the resource fork
+| 5 | | [yellow-background]*Unknown (sparse compressed extended attribute data)* +
+Uncompressed data contains 0-byte values +
+According to `[APPLE04]` specifies de-dup within the generation store.
+| 6 | | [yellow-background]*Unknown (unused)*
+| 7 | | LZVN compressed extended attribute data +
+The compressed data is stored in the extended attribute after the compressed data header
+| 8 | | 64k chunked LZVN compressed resource fork +
+The compressed data is stored in the resource fork
+| 9 | | [yellow-background]*Unknown (uncompressed extended attribute data, different than CMP_Type1)*
+| 10 | | [yellow-background]*Unknown (64k chunked uncompressed data resource fork)* +
+The compressed data is stored in the resource fork
+| 11 | | LZFSE compressed extended attribute data +
+The compressed data is stored in the extended attribute after the compressed data header
+| 12 | | 64k chunked LZFSE compressed resource fork +
+The compressed data is stored in the resource fork
+| | |
+| 0x80000001 | | [yellow-background]*Unknown (faulting file)*
+|===
+
+[NOTE]
+If the ZLIB (DEFLATE) compressed data starts with 0xff the data is stored
+uncompressed after the first compressed data byte. `[GANDER17]` indicates
+that this should be `( byte_value & 0x0f ) == 0x0f`.
+
+[NOTE]
+If the LZVN compressed data starts with 0x06 (end of stream oppcode) the data
+is stored uncompressed after the first compressed data byte.
+
+=== [[sibling_link]]Sibling link
+
+==== Sibling link key data
+
+The sibling link key data (j_sibling_key_t) is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x4 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+| 8 | 8 | | Sibling map identifier (sibling_id) +
+Contains the file system object identifier of the sibling map record
+|===
+
+==== Sibling link value data
+
+The sibling link value data (j_sibling_val_t) is variable of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Parent file system object identifier (parent_id)
+| 8 | 2 | | Name string size (name_len) +
+Includes the size of the end-of-string character
+| 10 | ... | | Name string (name) +
+Contains an UTF-8 encoded string with an end-of-string character
+|===
+
+=== [[data_stream_identifier]]Data stream identifier
+
+==== Data stream identifier key data
+
+The data stream key data (j_dstream_id_key_t) is 8 bytes of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x6 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+|===
+
+==== Data stream identifier value data
+
+The data stream value data (j_dstream_id_val_t) is 4 bytes of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Reference count (refcnt)
+|===
+
+=== [[encryption_state]]Encryption state
+
+[yellow-background]*TODO: complete this section.*
+
+=== [[file_extent]]File extent
+
+==== File extent key data
+
+The file extent key data (j_file_extent_key_t) is 16 bytes of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x8 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+| 8 | 8 | | Logical address (logical_addr) +
+Contains an offset relative to the start of the file entry data
+|===
+
+==== File extent value data
+
+The file extent value data (j_file_extent_val_t) is 24 bytes of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Extent data size and flags (len_and_flags)_
+| 0 | 7 | | Extent data size
+| 7 | 1 | | Flags +
+See section: <<file_extent_flags,File extent flags>>
+| 8 | 8 | | Physical block number (phys_block_num) +
+Contains a block number relative to the start of the container
+| 16 | 8 | | Encryption identifier (crypto_id) +
+Contains the [yellow-background]*unknown* and 0 if not set
+|===
+
+==== [[file_extent_flags]]File extent flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x01 | | [yellow-background]*Unknown (Is encrypted?)*
+|===
+
+[NOTE]
+According to `[APPLE18]` there are currently no flags defined. `[APPLE18]` also
+refers to `len_and_flags` as `len_and_kind` interchangeably.
+
+=== [[directory_record]]Directory record
+
+The directory record can have 2 different types of keys:
+
+* Key with name
+* Key with name and hash
+
+[NOTE]
+It apprears that current APFS file system use a key with name and hash.
+`[APPLE18]` does not indicate how to distinguish between the two, but one
+method is to compare calculated and stored size of the key data.
+
+[NOTE]
+In B-Tree branch nodes are sorted using the case-sensitive name, even when the
+file system is case-insensitive.
+
+==== Directory record key data with name
+
+The directory record key data with name (j_drec_key_t) is variable of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object identifier and type (hdr)_
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x9 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+4+|
+| 8 | 2 | | Name string size (name_len) +
+Includes the size of the end-of-string character
+| 10 | ... | | Name string (name) +
+Contains an UTF-8 encoded string with an end-of-string character
+|===
+
+==== Directory record key data with name and hash
+
+The directory record key data with name and hash (j_drec_hashed_key_t) is
+variable of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object identifier and type (hdr)_
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x9 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+4+| _Name string size and hash (name_len_and_hash)_
+| 8 | 11 bits | | Name string size +
+Includes the size of the end-of-string character
+| 9.3 | 21 bits | | Name hash +
+See section: <<directory_entry_name_hash,Directory entry name hash>>
+4+|
+| 12 | ... | | Name string (name) +
+Contains an UTF-8 encoded string with an end-of-string character
+|===
+
+==== Directory record value data
+
+The directory record value data (j_drec_val_t) is variable of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | File system object identifier of the directory entry (file_id)
+| 8 | 8 | | Date and time the directory entry was added (date_added) +
+Signed integer that contains the number of nanoseconds since January 1, 1970 00:00:00 UTC or 0 if not set
+| 16 | 2 | | Directory entry flags +
+See section: <<directory_entry_flags,Directory entry flags>>
+| 18 | ... | | Extended fields (xfields) +
+See section: <<extended_fields,Extended fields>>
+|===
+
+===== [[directory_entry_flags]]Directory entry flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x0000 | DT_UNKNOWN | Unknown
+| 0x0001 | DT_FIFO | Named pipe
+| 0x0002 | DT_CHR | Character-special file (Character device)
+| | |
+| 0x0004 | DT_DIR | Directory
+| | |
+| 0x0006 | DT_BLK | Block-special file (Block device)
+| | |
+| 0x0008 | DT_REG | Regular file
+| | |
+| 0x000a | DT_LNK | Symbolic link
+| | |
+| 0x000c | DT_SOCK | Socket
+| | |
+| 0x000e | DT_WHT | Whiteout +
+A whiteout is a directory entry that covers up all entries of a particular name from lower branches
+| | |
+| 0x000f | DREC_TYPE_MASK | Directory type bitmask
+| 0x0010 | RESERVED_10 | [yellow-background]*Unknown (reserved)*
+|===
+
+===== [[directory_entry_name_hash]]Directory entry name hash
+
+The name hash of a directory entry is calculated as following:
+
+* If the file system is case-insensitive represent the name in lower-case
+* Represent the name as an Unicode string in Normalization Form Canonical Decomposition (NFD)
+* Format the Unicode string as a little-endian UTF-32 stream without a byte-order-mark or end-of-string character
+* Calculate a CRC-32c checksum of the UTF-32 stream with an initial checkum of 0xffffffff (-1)
+* The lower 22-bits of checksum form the hash
+
+The CRC-32 calculation uses the Castagnoli polynomial (0x1edc6f41), also known
+as CRC-32C (or CRC32-C). The CRC-32 calculation does not use the XOR with
+0xffffffff before and after the calculation, which is also referred to as weak
+CRC-32 calculation.
+
+=== [[directory_stats]]Directory stats
+
+==== Directory stats key data
+
+The directory stats key data (j_dir_stats_key_t) is 8 bytes of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0xa | File system data type +
+See section: <<file_system_data_types,File system data types>>
+|===
+
+==== Directory stats value data
+
+The directory stats value data (j_dir_stats_val_t) is 32 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Number of children (num_children)
+| 8 | 8 | | Total size (total_size)
+| 16 | 8 | | Parent directory file system object identifier (chained_key)
+| 24 | 8 | | Generation count (gen_count)
+|===
+
+=== [[snapshot_name]]Snapshot name
+
+The snapshot name (j_snap_name_val_t) is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | Snapshot metdata object identifier
+| 7.4 | 4 bits | 0x1 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+|===
+
+=== [[sibling_map]]Sibling map
+
+==== Sibling map key data
+
+The sibling map key data (j_sibling_map_key_t) is 8 bytes of size and consists
+of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 60 bits | | File system object identifier (FSOID)
+| 7.4 | 4 bits | 0x4 | File system data type +
+See section: <<file_system_data_types,File system data types>>
+|===
+
+==== Sibling map value data
+
+The sibling map value data (j_sibling_map_val_t) is 8 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | File system object identifier (file_id)
+|===
+
+=== [[extended_fields]]Extended fields
+
+Directory entries and inodes use extended fields to store additional attributes,
+such as the filename.
+
+The extended fields (xf_blob_t) consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | | Number of extended fields (xf_num_exts)
+| 2 | 2 | | Extended field value data size (xf_used_data)
+4+| _Extended field data (xf_data)_
+| 4 | ... | | Array of extended field descriptors +
+See section: <<extended_field_descriptor,Extended field descriptor>>
+| ... | ... | | Extended field value data
+|===
+
+[NOTE]
+The extended field values are stored 8-byte aligned in the extended field
+value data.
+
+==== [[extended_field_descriptor]]Extended field descriptor
+
+An extended field descriptor (x_field_t) is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 1 | | Extended field type (x_type) +
+See section: <<extended_field_types,Extended field types>>
+| 1 | 1 | | Extended field flags (x_flags) +
+See section: <<extended_field_flags,Extended field flags>>
+| 2 | 2 | | Extended field data size (x_size)
+|===
+
+==== [[extended_field_types]]Extended field types
+
+===== Directory record extended field types
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 1 | DREC_EXT_TYPE_SIBLING_ID | Hard link sibling identifier +
+The extended field data contains a 64-bit integer value
+|===
+
+===== [[inode_extended_field_types]]Inode extended field types
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 1 | INO_EXT_TYPE_SNAP_XID | Transaction identifier of a snapshot +
+The extended field data contains a 64-bit integer value
+| 2 | INO_EXT_TYPE_DELTA_TREE_OID | Object identifier of the snapshot extent delta list +
+The extended field data contains a 64-bit integer value
+| 3 | INO_EXT_TYPE_DOCUMENT_ID | Document identifier +
+The extended field data contains a 32-bit integer value
+| 4 | INO_EXT_TYPE_NAME | Filename +
+The extended field data contains an UTF-8 string with end-of-string character
+| 5 | INO_EXT_TYPE_PREV_FSIZE | Previous file size +
+The extended field data contains a 64-bit integer value
+| 6 | INO_EXT_TYPE_RESERVED_6 | [yellow-background]*Unknown (Reserved)*
+| 7 | INO_EXT_TYPE_FINDER_INFO | Finder information +
+The extended field data contains a 32-bit integer value
+| 8 | INO_EXT_TYPE_DSTREAM | Data stream +
+The extended field data contains a <<data_stream_attribute,data stream attribute>>
+| 9 | INO_EXT_TYPE_RESERVED_9 | [yellow-background]*Unknown (Reserved)*
+| 10 | INO_EXT_TYPE_DIR_STATS_KEY | Direcotry statistics +
+[yellow-background]*Unknown if this contains the object identifier of the directory statisticts or a j_dir_stats_val_t structure, seen 8 byte value*
+| 11 | INO_EXT_TYPE_FS_UUID | Mounted file system identifier +
+The extended field data contains a 128-bit UUID value
+| 12 | INO_EXT_TYPE_RESERVED_12 | [yellow-background]*Unknown (Reserved)*
+| 13 | INO_EXT_TYPE_SPARSE_BYTES | Number of sparse bytes in the data stream +
+The extended field data contains a 64-bit integer value
+| 14 | INO_EXT_TYPE_RDEV | Block or character device identifier +
+The extended field data contains a 32-bit integer value with <<device_identifier,Device identifier>>
+| 15 | INO_EXT_TYPE_PURGEABLE_FLAGS | Information about a purgeable file +
+[yellow-background]*Unknown (Reserved), seen 8 byte value*
+| 16 | INO_EXT_TYPE_ORIG_SYNC_ROOT_ID | [yellow-background]*Unknown (Inode number of the sync-root hierarchy)*
+|===
+
+==== [[extended_field_flags]]Extended field flags
+
+[cols="1,1,5",options="header"]
+|===
+| Value | Identifier | Description
+| 0x01 | XF_DATA_DEPENDENT | Contents of the extended field is dependent on the data stream (file contents)
+| 0x02 | XF_DO_NOT_COPY | Do not duplicate the extended field when copied
+| 0x04 | XF_RESERVED_4 | [yellow-background]*Unknown (Reserved)*
+| 0x08 | XF_CHILDREN_INHERIT | Newly created sub directory entries (children) inherit the extended field
+| 0x10 | XF_USER_FIELD | Extended field was added by an user-space program
+| 0x20 | XF_SYSTEM_FIELD | Extended field was added by the system (kernel)
+| 0x40 | XF_RESERVED_40 | [yellow-background]*Unknown (Reserved)*
+| 0x80 | XF_RESERVED_80 | [yellow-background]*Unknown (Reserved)*
+|===
+
+==== [[device_identifier]]Device identifier
+
+The device identifier can be stored in different formats, such as: native,
+386bsd, 4bsd, bsdos, freebsd, hpux, isc, linux, netbsd, osf1, sco, solaris,
+sunos, svr3, svr4 and ultrix.
+
+The "native" and "hpux" device identifier is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 1 | | Major device number
+| 1 | 2 | 0 | [yellow-background]*Unknown*
+| 3 | 1 | | Minor device number
+|===
+
+The "386bsd", "4bsd", "freebsd", "isc", "linux", "netbsd", "sco", "sunos",
+"svr3" and "ultrix" device identifier is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 2 | 0 | [yellow-background]*Unknown*
+| 2 | 1 | | Major device number
+| 3 | 1 | | Minor device number
+|===
+
+The "solaris" and "svr4" device identifier is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0.0 | 18 bits | | Minor device number
+| 2.2 | 14 bits | | Major device number
+|===
+
+The "bsdos" and "osf1" device identifier is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0.0 | 20 bits | | Minor device number
+| 2.4 | 12 bits | | Major device number
+|===
+
+The "bsdos" alternative device identifier is 4 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0.0 | 8 bits | | Sub unit number
+| 1.0 | 12 bits | | Unit number
+| 2.4 | 12 bits | | Major device number
+|===
+
+=== [[data_stream_attribute]]Data stream attribute
+
+The data stream attribute (j_dstream_t) is 40 bytes of size and consist of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Used size (size)
+| 8 | 8 | | Allocated size (alloced_size)
+| 16 | 8 | | (Default) encryption identifier (default_crypto_id)
+| 24 | 8 | | Total number of bytes written to data stream (total_bytes_written)
+| 32 | 8 | | Total number of bytes read from data stream (total_bytes_written)
+|===
+
+== [[file_content]]File content
+
+APFS supports multiple ways to store file content:
+
+* Data fork
+* Compressed data extended attribute
+* Compressed data extended attribute with resource fork
+* Resource fork
+* Extended attribute (named fork)
+
+=== Data fork
+
+The file content size is stored in an INO_EXT_TYPE_DSTREAM
+<<inode_extended_field_types,inode extended field type>>.
+
+The file content data can be located through the <<file_extent,file extents>>
+for the data stream file system object identifier in the
+<<file_system,file system tree>>.
+
+If the volume is encrypted the file content is encrypted with the encryption
+identifier in defined by the <<file_extent,File extent>>.
+
+If the <<inode_flags,inode flag>> INODE_IS_SPARSE is set the file contains
+one or more spare file extents. A sparse file extent has a physical block
+number of 0.
+
+=== Compressed data extended attribute
+
+<<compression_method,Compression method>> should be 3, 5 or 7.
+
+The file content size is stored in the compressed data header of
+a "com.apple.decmpfs" <<extended_attribute,extended attribute>>.
+
+For <<compression_method,compression method>> 3 or 7 the file content data is
+stored in a "com.apple.decmpfs" <<extended_attribute,extended attribute>> after
+the <<compressed_data_header,compressed data header>>.
+
+For <<compression_method,compression method>> 5 the file content data contains
+0-byte values. There are 12 bytes stored after the
+<<compressed_data_header,compressed data header>> that contain:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | [yellow-background]*Unknown* +
+Seen: 1
+| 4 | 4 | | [yellow-background]*Unknown*
+| 8 | 4 | | [yellow-background]*Unknown* +
+Seen: 0
+|===
+
+=== Compressed data extended attribute with resource fork
+
+<<compression_method,Compression method>> should be 4 or 8.
+
+The file content size is stored in the compressed data header of
+a "com.apple.decmpfs" <<extended_attribute,extended attribute>>.
+
+The file content data is stored in a "com.apple.ResourceFork"
+<<extended_attribute,extended attribute>>.
+
+The compressed data starts with metadata that contains the offsets
+of the compressed data blocks.
+
+==== ZLIB (DEFLATE) compressed data
+
+* ZLIB (DEFLATE) compressed header
+* [yellow-background]*Unknown (empty values)*
+* ZLIB (DEFLATE) compressed data block offsets and sizes
+* ZLIB (DEFLATE) compressed data blocks
+* ZLIB (DEFLATE) compressed footer
+
+===== ZLIB (DEFLATE) compressed header
+
+The ZLIB (DEFLATE) compressed header is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Compressed data block descriptors offset +
+The offset is relative from the start of the ZLIB (DEFLATE) compressed data
+| 4 | 4 | | Compressed footer offset +
+The offset is relative from the start of the ZLIB (DEFLATE) compressed data
+| 8 | 4 | | Compressed data block descriptors and data size
+| 12 | 4 | | Compressed footer size
+|===
+
+[NOTE]
+The values in the ZLIB (DEFLATE) compressed header are stored in big-endian.
+
+===== ZLIB (DEFLATE) compressed data block descriptors
+
+The ZLIB (DEFLATE) compressed data block descriptors are variable in size and
+consist of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Compressed data size
+| 4 | 4 | | Number of compressed data block offset and size tuples
+| 8 | 8 x ... | | Array of compressed data block descriptors
+|===
+
+===== ZLIB (DEFLATE) compressed data block descriptor
+
+The ZLIB (DEFLATE) compressed data block descriptor is 8 bytes of size and
+consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 | | Compressed block offset +
+The offset is relative from the start of the ZLIB (DEFLATE) compressed data + 20
+| 4 | 4 | | Compressed block size
+|===
+
+===== ZLIB (DEFLATE) compressed footer
+
+The ZLIB (DEFLATE) compressed footer is 50 bytes size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 24 | | [yellow-background]*Unknown (empty values)*
+| 24 | 2 | | [yellow-background]*Unknown*
+| 26 | 2 | | [yellow-background]*Unknown*
+| 28 | 2 | | [yellow-background]*Unknown*
+| 30 | 2 | | [yellow-background]*Unknown*
+| 32 | 4 | "cmpf" | [yellow-background]*Unknown (signature)*
+| 36 | 4 | | [yellow-background]*Unknown*
+| 40 | 4 | | [yellow-background]*Unknown*
+| 44 | 6 | | [yellow-background]*Unknown (empty values)*
+|===
+
+[NOTE]
+The values in the ZLIB (DEFLATE) compressed footer are stored in big-endian.
+
+==== LZVN compressed data
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 4 x ... | | Array of compressed data block offsets +
+The offset is relative from the start of the LZVN compressed data
+| ... | ... | | LZVN compressed data blocks
+|===
+
+[NOTE]
+The compressed data block contains a maximum of 65536 bytes of data. The
+compressed data block therefore should not exceed 65537 bytes of size.
+
+=== Resource fork
+
+[yellow-background]*TODO: complete this section.*
+
+=== Extended attribute (named fork)
+
+[yellow-background]*TODO: complete this section.*
+
+== [[efi_jumpstart]]EFI jumpstart
+
+The EFI jumpstart (nx_efi_jumpstart_t) is variable of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x00000014 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000000 | Object subtype
+4+| _Object values_
+| 32 | 4 | "RDSJ" | Signature (nej_magic)
+| 36 | 4 | 1 | Format version (nej_version)
+| 40 | 4 | | [yellow-background]*Unknown (nej_efi_file_len?)*
+| 44 | 4 | | Number of extents (nej_num_extents)
+| 48 | 16 x 8 | | [yellow-background]*Unknown (nej_reserved?)*
+| 176 | number of extents x 16 | | Extents (nej_rec_extents) +
+Contains the extents where the EFI driver is stored +
+See section: <<efi_jumpstart_extent,EFI jumpstart extent>>
+|===
+
+== [[efi_jumpstart_extent]]EFI jumpstart extent
+
+The EFI jumpstart extent (prange_t) is 16 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Block number
+| 8 | 8 | | Number of blocks
+|===
+
+== [[extent_reference_tree]]Extent-reference tree
+
+[yellow-background]*TODO: complete this section.*
+
+== Snapshots
+
+[yellow-background]*TODO: complete this section.*
+
+=== [[snapshot_metadata_tree]]Snapshot metadata tree
+
+The snapshot metadata tree consists of:
+
+* snapshot metadata tree (object)
+* snapshot metadata B-tree
+
+=== Snapshot metadata tree object
+
+The snapshot metadata tree object is 32 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x40000002 +
+0x40000003 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000010 | Object subtype
+|===
+
+=== Snapshot metadata B-tree
+
+The object map values are stored in <<btree,B-tree>>.
+
+==== Snapshot metadata B-tree key
+
+The snapshot metadata B-tree key (j_snap_metadata_key_t or j_snap_name_key_t)
+is variable of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Key object identifier (hdr)
+4+| _If key object identifier data type is APFS_TYPE_SNAP_NAME_
+| 8 | ... | | Snapshot name string +
+Contains an UTF-8 encoded string with an end-of-string character
+|===
+
+==== Snapshot metadata B-tree branch node value
+
+An snapshot metadata B-tree node contains branch node values if BTNODE_LEAF is
+not set. The corresponding inapshot metadata B-tree key represents the first
+key in the branch.
+
+An napshot metadata B-tree branch node value is 8 bytes of size and consists of:
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+| 0 | 8 | | Sub node block number +
+Contains a block number relative to the start of the container
+|===
+
+==== Snapshot metadata B-tree leaf node value
+
+The contents of a snapshot metadata B-tree leaf node depends on the
+<<file_system_data_types,File system data type>> of the key object identifier.
+
+[cols="1,5",options="header"]
+|===
+| Value | Description
+| APFS_TYPE_SNAP_METADATA | Snapshot object identifier +
+The value contains <<snapshot_metadata,Snapshot metadata>>
+| APFS_TYPE_SNAP_NAME | Snapshot name +
+The value contains <<snapshot_name,Snapshot name>>
+|===
+
+== Fusion drives
+
+A Fusion drive consists of a main SSD and a tier2 magnetic disk that together
+form one logical APFS container.
+
+=== [[fusion_middle_tree]]Fusion middle tree
+
+[yellow-background]*TODO: complete this section.*
+
+[cols="1,1,1,5",options="header"]
+|===
+| Offset | Size | Value | Description
+4+| _Object header_
+| 0 | 8 | | Object checksum +
+See section: <<object_checksum,Object checkum>>
+| 8 | 8 | | Object identifier
+| 16 | 8 | | Object transaction identifier (xid)
+| 24 | 4 | 0x40000002 | Object type +
+See section: <<object_types,Object types>>
+| 28 | 4 | 0x00000015 | Object subtype
+4+| _Object values_
+| ... | ... | | [yellow-background]*Unknown*
+|===
+
+== Corruption scenarios
+
+=== Container key bag is hardware encrypted but volume is not encrypted
+
+Seen in APFS containers created by certain digital forensics tools. The
+container key bag is either hardware encrypted or contains random data but
+the volume is not encrypted.
+
+== Notes
+
+TODO describe evict_mapping_val_t
+
+....
+fsck_apfs -n apfs_empty.raw
+** Checking volume.
+** Checking the container superblock.
+** Checking the space manager.
+** Checking the object map.
+** Checking the APFS volume superblock.
+** Checking the object map.
+mount_apfs: mount: Operation not supported by device
+error: mount_apfs exit status 73
+** Checking the fsroot tree.
+** Checking the snapshot metadata tree.
+** Checking the extent ref tree.
+** Checking the snapshots.
+warning: unmount: /private/var/folders/7k/s4ykb4095ld38gz50kvkhf_m0000gn/T/fsck_apfs.586: Invalid argument
+** Verifying allocated space.
+** The volume apfs_empty.raw appears to be OK.
+
+diskutil apfs list
+APFS Container (1 found)
+|
++-- Container disk4 B069A33C-65E6-4DAF-BD60-081493F91116
+    ====================================================
+    APFS Container Reference:     disk4
+    Size (Capacity Ceiling):      1007616 B (1.0 MB)
+    Minimum Size:                 1007616 B (1.0 MB)
+    Capacity In Use By Volumes:   376832 B (376.8 KB) (37.4% used)
+    Capacity Not Allocated:       630784 B (630.8 KB) (62.6% free)
+    |
+    +-< Physical Store disk3s1 D05BEA77-81B3-4A8D-A82A-BC5C7D2FB27C
+    |   -----------------------------------------------------------
+    |   APFS Physical Store Disk:   disk3s1
+    |   Size:                       1007616 B (1.0 MB)
+    |
+    +-> Volume disk4s1 9428213B-2E82-49E9-871E-7220B157FC8D
+        ---------------------------------------------------
+        APFS Volume Disk (Role):   disk4s1 (No specific role)
+        Name:                      untitled (Case-insensitive)
+        Mount Point:               /Volumes/untitled
+        Capacity Consumed:         24576 B (24.6 KB)
+        FileVault:                 No
+
+find /Volumes/SingleVolume
+/Volumes/SingleVolume
+/Volumes/SingleVolume/.fseventsd
+/Volumes/SingleVolume/.fseventsd/fseventsd-uuid
+/Volumes/SingleVolume/.fseventsd/0000000000793354
+/Volumes/SingleVolume/.fseventsd/0000000000793353
+....
+
+
+decmpfs is also referred to as AFSC (Apple File System Compression) or HFS/HFS+ compression
+
+:numbered!:
+[appendix]
+== References
+
+`[APPLE04]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | copyfile.c
+| Author(s): | Apple
+| Date: | 2004
+| URL: | https://opensource.apple.com/source/copyfile/copyfile-127/copyfile.c
+|===
+
+`[APPLE18]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | Apple File System Reference
+| Author(s): | Apple
+| Date: | September 2018
+| URL: | https://developer.apple.com/support/apple-file-system/Apple-File-System-Reference.pdf
+|===
+
+`[GANDER17]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | apfs_fuse
+| Author(s): | S. Gander
+| Date: | October 2017
+| URL: | https://github.com/sgan81/apfs-fuse
+|===
+
+`[IEEE 1619-2007]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | The XTS-AES Tweakable Block Cipher (IEEE 1619-2007)
+| Author(s): | IEEE
+| Date: | April 18, 2008
+| URL: | http://axelkenzo.ru/downloads/1619-2007-NIST-Submission.pdf +
+https://bitbucket.org/garethl/xtssharp/src/0e6a81a823e9/docs/1619-2007-NIST-Submission.pdf
+|===
+
+`[HANSEN17]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | Decoding the APFS file system
+| Author(s): | Hansen, Kurt & Toolan, Fergus
+| Date: | September 2017
+| URL: | https://www.researchgate.net/publication/319573636_Decoding_the_APFS_file_system
+|===
+
+`[KODIS92]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | Fletcher's checksum - Error correction at a fraction of the cost
+| Author(s): | John Kodis
+| Date: | May 1992
+| URL: | http://collaboration.cmc.ec.gc.ca/science/rpn/biblio/ddj/Website/articles/DDJ/1992/9205/9205b/9205b.htm
+|===
+
+`[PLUM17]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | APFS filesystem format
+| Author(s): | Jonas Plum
+| Date: | April 2017
+| URL: | https://blog.cugu.eu/post/apfs/
+|===
+
+`[RFC2898]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | PKCS #5: Password-Based Cryptography Specification
+| Version: | 2.0
+| Author(s): | B. Kaliski
+| Date: | September 2000
+| URL: | https://www.ietf.org/rfc/rfc2898.txt
+|===
+
+`[RFC3394]`
+
+[cols="1,5",options="header"]
+|===
+| Title: | Advanced Encryption Standard (AES) Key Wrap Algorithm
+| Author(s): | J. Schaad, R. Housley
+| Date: | September 2002
+| URL: | https://www.ietf.org/rfc/rfc3394.txt
+|===
+
+[appendix]
+== GNU Free Documentation License
+
+Version 1.3, 3 November 2008
+Copyright © 2000, 2001, 2002, 2007, 2008 Free Software Foundation, Inc.
+<http://fsf.org/>
+
+Everyone is permitted to copy and distribute verbatim copies of this license
+document, but changing it is not allowed.
+
+=== 0. PREAMBLE
+
+The purpose of this License is to make a manual, textbook, or other functional
+and useful document "free" in the sense of freedom: to assure everyone the
+effective freedom to copy and redistribute it, with or without modifying it,
+either commercially or noncommercially. Secondarily, this License preserves for
+the author and publisher a way to get credit for their work, while not being
+considered responsible for modifications made by others.
+
+This License is a kind of "copyleft", which means that derivative works of the
+document must themselves be free in the same sense. It complements the GNU
+General Public License, which is a copyleft license designed for free software.
+
+We have designed this License in order to use it for manuals for free software,
+because free software needs free documentation: a free program should come with
+manuals providing the same freedoms that the software does. But this License is
+not limited to software manuals; it can be used for any textual work,
+regardless of subject matter or whether it is published as a printed book. We
+recommend this License principally for works whose purpose is instruction or
+reference.
+
+=== 1. APPLICABILITY AND DEFINITIONS
+
+This License applies to any manual or other work, in any medium, that contains
+a notice placed by the copyright holder saying it can be distributed under the
+terms of this License. Such a notice grants a world-wide, royalty-free license,
+unlimited in duration, to use that work under the conditions stated herein. The
+"Document", below, refers to any such manual or work. Any member of the public
+is a licensee, and is addressed as "you". You accept the license if you copy,
+modify or distribute the work in a way requiring permission under copyright law.
+
+A "Modified Version" of the Document means any work containing the Document or
+a portion of it, either copied verbatim, or with modifications and/or
+translated into another language.
+
+A "Secondary Section" is a named appendix or a front-matter section of the
+Document that deals exclusively with the relationship of the publishers or
+authors of the Document to the Document's overall subject (or to related
+matters) and contains nothing that could fall directly within that overall
+subject. (Thus, if the Document is in part a textbook of mathematics, a
+Secondary Section may not explain any mathematics.) The relationship could be a
+matter of historical connection with the subject or with related matters, or of
+legal, commercial, philosophical, ethical or political position regarding them.
+
+The "Invariant Sections" are certain Secondary Sections whose titles are
+designated, as being those of Invariant Sections, in the notice that says that
+the Document is released under this License. If a section does not fit the
+above definition of Secondary then it is not allowed to be designated as
+Invariant. The Document may contain zero Invariant Sections. If the Document
+does not identify any Invariant Sections then there are none.
+
+The "Cover Texts" are certain short passages of text that are listed, as
+Front-Cover Texts or Back-Cover Texts, in the notice that says that the
+Document is released under this License. A Front-Cover Text may be at most 5
+words, and a Back-Cover Text may be at most 25 words.
+
+A "Transparent" copy of the Document means a machine-readable copy, represented
+in a format whose specification is available to the general public, that is
+suitable for revising the document straightforwardly with generic text editors
+or (for images composed of pixels) generic paint programs or (for drawings)
+some widely available drawing editor, and that is suitable for input to text
+formatters or for automatic translation to a variety of formats suitable for
+input to text formatters. A copy made in an otherwise Transparent file format
+whose markup, or absence of markup, has been arranged to thwart or discourage
+subsequent modification by readers is not Transparent. An image format is not
+Transparent if used for any substantial amount of text. A copy that is not
+"Transparent" is called "Opaque".
+
+Examples of suitable formats for Transparent copies include plain ASCII without
+markup, Texinfo input format, LaTeX input format, SGML or XML using a publicly
+available DTD, and standard-conforming simple HTML, PostScript or PDF designed
+for human modification. Examples of transparent image formats include PNG, XCF
+and JPG. Opaque formats include proprietary formats that can be read and edited
+only by proprietary word processors, SGML or XML for which the DTD and/or
+processing tools are not generally available, and the machine-generated HTML,
+PostScript or PDF produced by some word processors for output purposes only.
+
+The "Title Page" means, for a printed book, the title page itself, plus such
+following pages as are needed to hold, legibly, the material this License
+requires to appear in the title page. For works in formats which do not have
+any title page as such, "Title Page" means the text near the most prominent
+appearance of the work's title, preceding the beginning of the body of the text.
+
+The "publisher" means any person or entity that distributes copies of the
+Document to the public.
+
+A section "Entitled XYZ" means a named subunit of the Document whose title
+either is precisely XYZ or contains XYZ in parentheses following text that
+translates XYZ in another language. (Here XYZ stands for a specific section
+name mentioned below, such as "Acknowledgements", "Dedications",
+"Endorsements", or "History".) To "Preserve the Title" of such a section when
+you modify the Document means that it remains a section "Entitled XYZ"
+according to this definition.
+
+The Document may include Warranty Disclaimers next to the notice which states
+that this License applies to the Document. These Warranty Disclaimers are
+considered to be included by reference in this License, but only as regards
+disclaiming warranties: any other implication that these Warranty Disclaimers
+may have is void and has no effect on the meaning of this License.
+
+=== 2. VERBATIM COPYING
+
+You may copy and distribute the Document in any medium, either commercially or
+noncommercially, provided that this License, the copyright notices, and the
+license notice saying this License applies to the Document are reproduced in
+all copies, and that you add no other conditions whatsoever to those of this
+License. You may not use technical measures to obstruct or control the reading
+or further copying of the copies you make or distribute. However, you may
+accept compensation in exchange for copies. If you distribute a large enough
+number of copies you must also follow the conditions in section 3.
+
+You may also lend copies, under the same conditions stated above, and you may
+publicly display copies.
+
+=== 3. COPYING IN QUANTITY
+
+If you publish printed copies (or copies in media that commonly have printed
+covers) of the Document, numbering more than 100, and the Document's license
+notice requires Cover Texts, you must enclose the copies in covers that carry,
+clearly and legibly, all these Cover Texts: Front-Cover Texts on the front
+cover, and Back-Cover Texts on the back cover. Both covers must also clearly
+and legibly identify you as the publisher of these copies. The front cover must
+present the full title with all words of the title equally prominent and
+visible. You may add other material on the covers in addition. Copying with
+changes limited to the covers, as long as they preserve the title of the
+Document and satisfy these conditions, can be treated as verbatim copying in
+other respects.
+
+If the required texts for either cover are too voluminous to fit legibly, you
+should put the first ones listed (as many as fit reasonably) on the actual
+cover, and continue the rest onto adjacent pages.
+
+If you publish or distribute Opaque copies of the Document numbering more than
+100, you must either include a machine-readable Transparent copy along with
+each Opaque copy, or state in or with each Opaque copy a computer-network
+location from which the general network-using public has access to download
+using public-standard network protocols a complete Transparent copy of the
+Document, free of added material. If you use the latter option, you must take
+reasonably prudent steps, when you begin distribution of Opaque copies in
+quantity, to ensure that this Transparent copy will remain thus accessible at
+the stated location until at least one year after the last time you distribute
+an Opaque copy (directly or through your agents or retailers) of that edition
+to the public.
+
+It is requested, but not required, that you contact the authors of the Document
+well before redistributing any large number of copies, to give them a chance to
+provide you with an updated version of the Document.
+
+=== 4. MODIFICATIONS
+
+You may copy and distribute a Modified Version of the Document under the
+conditions of sections 2 and 3 above, provided that you release the Modified
+Version under precisely this License, with the Modified Version filling the
+role of the Document, thus licensing distribution and modification of the
+Modified Version to whoever possesses a copy of it. In addition, you must do
+these things in the Modified Version:
+
+A. Use in the Title Page (and on the covers, if any) a title distinct from that
+of the Document, and from those of previous versions (which should, if there
+were any, be listed in the History section of the Document). You may use the
+same title as a previous version if the original publisher of that version
+gives permission.
+
+B. List on the Title Page, as authors, one or more persons or entities
+responsible for authorship of the modifications in the Modified Version,
+together with at least five of the principal authors of the Document (all of
+its principal authors, if it has fewer than five), unless they release you from
+this requirement.
+
+C. State on the Title page the name of the publisher of the Modified Version,
+as the publisher.
+
+D. Preserve all the copyright notices of the Document.
+
+E. Add an appropriate copyright notice for your modifications adjacent to the
+other copyright notices.
+
+F. Include, immediately after the copyright notices, a license notice giving
+the public permission to use the Modified Version under the terms of this
+License, in the form shown in the Addendum below.
+
+G. Preserve in that license notice the full lists of Invariant Sections and
+required Cover Texts given in the Document's license notice.
+
+H. Include an unaltered copy of this License.
+
+I. Preserve the section Entitled "History", Preserve its Title, and add to it
+an item stating at least the title, year, new authors, and publisher of the
+Modified Version as given on the Title Page. If there is no section Entitled
+"History" in the Document, create one stating the title, year, authors, and
+publisher of the Document as given on its Title Page, then add an item
+describing the Modified Version as stated in the previous sentence.
+
+J. Preserve the network location, if any, given in the Document for public
+access to a Transparent copy of the Document, and likewise the network
+locations given in the Document for previous versions it was based on. These
+may be placed in the "History" section. You may omit a network location for a
+work that was published at least four years before the Document itself, or if
+the original publisher of the version it refers to gives permission.
+
+K. For any section Entitled "Acknowledgements" or "Dedications", Preserve the
+Title of the section, and preserve in the section all the substance and tone of
+each of the contributor acknowledgements and/or dedications given therein.
+
+L. Preserve all the Invariant Sections of the Document, unaltered in their text
+and in their titles. Section numbers or the equivalent are not considered part
+of the section titles.
+
+M. Delete any section Entitled "Endorsements". Such a section may not be
+included in the Modified Version.
+
+N. Do not retitle any existing section to be Entitled "Endorsements" or to
+conflict in title with any Invariant Section.
+
+O. Preserve any Warranty Disclaimers.
+
+If the Modified Version includes new front-matter sections or appendices that
+qualify as Secondary Sections and contain no material copied from the Document,
+you may at your option designate some or all of these sections as invariant. To
+do this, add their titles to the list of Invariant Sections in the Modified
+Version's license notice. These titles must be distinct from any other section
+titles.
+
+You may add a section Entitled "Endorsements", provided it contains nothing but
+endorsements of your Modified Version by various parties—for example,
+statements of peer review or that the text has been approved by an organization
+as the authoritative definition of a standard.
+
+You may add a passage of up to five words as a Front-Cover Text, and a passage
+of up to 25 words as a Back-Cover Text, to the end of the list of Cover Texts
+in the Modified Version. Only one passage of Front-Cover Text and one of
+Back-Cover Text may be added by (or through arrangements made by) any one
+entity. If the Document already includes a cover text for the same cover,
+previously added by you or by arrangement made by the same entity you are
+acting on behalf of, you may not add another; but you may replace the old one,
+on explicit permission from the previous publisher that added the old one.
+
+The author(s) and publisher(s) of the Document do not by this License give
+permission to use their names for publicity for or to assert or imply
+endorsement of any Modified Version.
+
+=== 5. COMBINING DOCUMENTS
+
+You may combine the Document with other documents released under this License,
+under the terms defined in section 4 above for modified versions, provided that
+you include in the combination all of the Invariant Sections of all of the
+original documents, unmodified, and list them all as Invariant Sections of your
+combined work in its license notice, and that you preserve all their Warranty
+Disclaimers.
+
+The combined work need only contain one copy of this License, and multiple
+identical Invariant Sections may be replaced with a single copy. If there are
+multiple Invariant Sections with the same name but different contents, make the
+title of each such section unique by adding at the end of it, in parentheses,
+the name of the original author or publisher of that section if known, or else
+a unique number. Make the same adjustment to the section titles in the list of
+Invariant Sections in the license notice of the combined work.
+
+In the combination, you must combine any sections Entitled "History" in the
+various original documents, forming one section Entitled "History"; likewise
+combine any sections Entitled "Acknowledgements", and any sections Entitled
+"Dedications". You must delete all sections Entitled "Endorsements".
+
+=== 6. COLLECTIONS OF DOCUMENTS
+
+You may make a collection consisting of the Document and other documents
+released under this License, and replace the individual copies of this License
+in the various documents with a single copy that is included in the collection,
+provided that you follow the rules of this License for verbatim copying of each
+of the documents in all other respects.
+
+You may extract a single document from such a collection, and distribute it
+individually under this License, provided you insert a copy of this License
+into the extracted document, and follow this License in all other respects
+regarding verbatim copying of that document.
+
+=== 7. AGGREGATION WITH INDEPENDENT WORKS
+
+A compilation of the Document or its derivatives with other separate and
+independent documents or works, in or on a volume of a storage or distribution
+medium, is called an "aggregate" if the copyright resulting from the
+compilation is not used to limit the legal rights of the compilation's users
+beyond what the individual works permit. When the Document is included in an
+aggregate, this License does not apply to the other works in the aggregate
+which are not themselves derivative works of the Document.
+
+If the Cover Text requirement of section 3 is applicable to these copies of the
+Document, then if the Document is less than one half of the entire aggregate,
+the Document's Cover Texts may be placed on covers that bracket the Document
+within the aggregate, or the electronic equivalent of covers if the Document is
+in electronic form. Otherwise they must appear on printed covers that bracket
+the whole aggregate.
+
+=== 8. TRANSLATION
+
+Translation is considered a kind of modification, so you may distribute
+translations of the Document under the terms of section 4. Replacing Invariant
+Sections with translations requires special permission from their copyright
+holders, but you may include translations of some or all Invariant Sections in
+addition to the original versions of these Invariant Sections. You may include
+a translation of this License, and all the license notices in the Document, and
+any Warranty Disclaimers, provided that you also include the original English
+version of this License and the original versions of those notices and
+disclaimers. In case of a disagreement between the translation and the original
+version of this License or a notice or disclaimer, the original version will
+prevail.
+
+If a section in the Document is Entitled "Acknowledgements", "Dedications", or
+"History", the requirement (section 4) to Preserve its Title (section 1) will
+typically require changing the actual title.
+
+=== 9. TERMINATION
+
+You may not copy, modify, sublicense, or distribute the Document except as
+expressly provided under this License. Any attempt otherwise to copy, modify,
+sublicense, or distribute it is void, and will automatically terminate your
+rights under this License.
+
+However, if you cease all violation of this License, then your license from a
+particular copyright holder is reinstated (a) provisionally, unless and until
+the copyright holder explicitly and finally terminates your license, and (b)
+permanently, if the copyright holder fails to notify you of the violation by
+some reasonable means prior to 60 days after the cessation.
+
+Moreover, your license from a particular copyright holder is reinstated
+permanently if the copyright holder notifies you of the violation by some
+reasonable means, this is the first time you have received notice of violation
+of this License (for any work) from that copyright holder, and you cure the
+violation prior to 30 days after your receipt of the notice.
+
+Termination of your rights under this section does not terminate the licenses
+of parties who have received copies or rights from you under this License. If
+your rights have been terminated and not permanently reinstated, receipt of a
+copy of some or all of the same material does not give you any rights to use it.
+
+=== 10. FUTURE REVISIONS OF THIS LICENSE
+
+The Free Software Foundation may publish new, revised versions of the GNU Free
+Documentation License from time to time. Such new versions will be similar in
+spirit to the present version, but may differ in detail to address new problems
+or concerns. See http://www.gnu.org/copyleft/.
+
+Each version of the License is given a distinguishing version number. If the
+Document specifies that a particular numbered version of this License "or any
+later version" applies to it, you have the option of following the terms and
+conditions either of that specified version or of any later version that has
+been published (not as a draft) by the Free Software Foundation. If the
+Document does not specify a version number of this License, you may choose any
+version ever published (not as a draft) by the Free Software Foundation. If the
+Document specifies that a proxy can decide which future versions of this
+License can be used, that proxy's public statement of acceptance of a version
+permanently authorizes you to choose that version for the Document.
+
+=== 11. RELICENSING
+
+"Massive Multiauthor Collaboration Site" (or "MMC Site") means any World Wide
+Web server that publishes copyrightable works and also provides prominent
+facilities for anybody to edit those works. A public wiki that anybody can edit
+is an example of such a server. A "Massive Multiauthor Collaboration" (or
+"MMC") contained in the site means any set of copyrightable works thus
+published on the MMC site.
+
+"CC-BY-SA" means the Creative Commons Attribution-Share Alike 3.0 license
+published by Creative Commons Corporation, a not-for-profit corporation with a
+principal place of business in San Francisco, California, as well as future
+copyleft versions of that license published by that same organization.
+
+"Incorporate" means to publish or republish a Document, in whole or in part, as
+part of another Document.
+
+An MMC is "eligible for relicensing" if it is licensed under this License, and
+if all works that were first published under this License somewhere other than
+this MMC, and subsequently incorporated in whole or in part into the MMC, (1)
+had no cover texts or invariant sections, and (2) were thus incorporated prior
+to November 1, 2008.
+
+The operator of an MMC Site may republish an MMC contained in the site under
+CC-BY-SA on the same site at any time before August 1, 2009, provided the MMC
+is eligible for relicensing.
