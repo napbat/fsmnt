@@ -169,7 +169,11 @@ mod tests {
         b[0x10..0x18].copy_from_slice(&xid.to_le_bytes());
         b[0x18..0x1C].copy_from_slice(&(OBJ_EPHEMERAL | 0x01).to_le_bytes());
         b[0x20..0x24].copy_from_slice(&0x4253_584Eu32.to_le_bytes()); // NXSB
-        b[0x24..0x28].copy_from_slice(&(BLK as u32).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         b[0x28..0x30].copy_from_slice(&500u64.to_le_bytes()); // nx_block_count
         b[0x48..0x58].copy_from_slice(uuid); // nx_uuid
         b[0x68..0x6C].copy_from_slice(&1u32.to_le_bytes()); // nx_xp_desc_blocks
@@ -206,7 +210,11 @@ mod tests {
         b[key_area..key_area + 8].copy_from_slice(&vol_oid.to_le_bytes());
         b[key_area + 8..key_area + 16].copy_from_slice(&xid.to_le_bytes());
         let value_end = BLK - BTREE_INFO_SIZE;
-        b[value_end - 16 + 4..value_end - 16 + 8].copy_from_slice(&(BLK as u32).to_le_bytes());
+        b[value_end - 16 + 4..value_end - 16 + 8].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         b[value_end - 16 + 8..value_end - 16 + 16].copy_from_slice(&vol_paddr.to_le_bytes());
         let info = BLK - BTREE_INFO_SIZE;
         b[info + 8..info + 12].copy_from_slice(&16u32.to_le_bytes()); // bt_key_size

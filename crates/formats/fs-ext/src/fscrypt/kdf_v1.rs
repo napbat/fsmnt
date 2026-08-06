@@ -14,7 +14,7 @@ use crate::fscrypt::types::FscryptMasterKey;
 
 /// Derive `out_len` bytes per the kernel v1 KDF.
 ///
-/// `out_len` must be a positive multiple of 16, ≤ master_key length.
+/// `out_len` must be a positive multiple of 16, ≤ `master_key` length.
 pub fn derive(
     master_key: &FscryptMasterKey,
     nonce: &[u8; 16],
@@ -59,11 +59,11 @@ mod tests {
 
     #[test]
     fn derive_matches_pycryptodome_reference() {
-        let nonce: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let nonce: [u8; 16] = core::array::from_fn(|i| (i).to_le_bytes()[0]);
         let mut mk_bytes = [0u8; 64];
         for b in 0..4 {
             for i in 0..16 {
-                mk_bytes[b * 16 + i] = b as u8;
+                mk_bytes[b * 16 + i] = (b).to_le_bytes()[0];
             }
         }
         let mk = FscryptMasterKey::from_array(mk_bytes);

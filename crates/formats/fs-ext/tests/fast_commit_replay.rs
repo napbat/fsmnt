@@ -1,3 +1,5 @@
+//! Integration tests for ext4 fast-commit and classic-journal replay composition.
+
 use std::io::Cursor;
 
 use fs_ext::io::{Read, Seek, SeekFrom};
@@ -21,10 +23,15 @@ const CLASSIC_START: u32 = 1;
 const CLASSIC_FIRST_SEQ: u32 = 100;
 
 fn fixture_available(name: &str) -> bool {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata")
-        .join(name)
-        .exists()
+    fsmnt_testkit::fixture_path(env!("CARGO_MANIFEST_DIR"), format!("testdata/{name}")).exists()
+}
+
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    fsmnt_testkit::read_required_fixture(
+        env!("CARGO_MANIFEST_DIR"),
+        format!("testdata/{name}"),
+        "regenerate fixtures with `sudo bash crates/formats/fs-ext/testdata/gen-fixtures.sh`",
+    )
 }
 
 #[test]
@@ -34,9 +41,7 @@ fn vm_generated_fc_fixture_replays_to_consistent_state() -> Result<(), Box<dyn s
         return Ok(());
     }
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata/ext4-dirty-fast-commit.img");
-    let bytes = std::fs::read(&path)?;
+    let bytes = fixture_bytes("ext4-dirty-fast-commit.img");
     let mut cursor = Cursor::new(bytes);
     let jr = JournalReplay::build(&Ext::open_lenient(&mut cursor)?, &mut cursor)?;
     let fc_plan = jr.fast_commit_plan();
@@ -54,8 +59,7 @@ fn vm_generated_fc_fixture_replays_to_consistent_state() -> Result<(), Box<dyn s
 
 #[test]
 fn clean_state_with_fast_commit_replays_inode_overlay() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
-    let mut bytes = std::fs::read(path)?;
+    let mut bytes = fixture_bytes("ext4.img");
     let layout = FixtureLayout::read(&bytes)?;
 
     let journal_block_count = layout.journal_block_count(&bytes)?;
@@ -67,7 +71,7 @@ fn clean_state_with_fast_commit_replays_inode_overlay() -> Result<(), Box<dyn st
     patch_journal_superblock_for_clean_fast_commit(&mut bytes, &layout, journal_block_count)?;
 
     let inode_offset = layout.inode_offset(&bytes, ROOT_INO)?;
-    let inode_size = layout.inode_size as usize;
+    let inode_size = usize::from(layout.inode_size);
     let mut raw_inode = bytes[inode_offset..inode_offset + inode_size].to_vec();
     let old_mode = u16::from_le_bytes(raw_inode[0x00..0x02].try_into()?);
     let new_mode = old_mode ^ 0o001;
@@ -122,8 +126,7 @@ fn clean_state_with_fast_commit_replays_inode_overlay() -> Result<(), Box<dyn st
 
 #[test]
 fn dirty_classic_plus_dirty_fc_composes_full_state() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
-    let mut bytes = std::fs::read(path)?;
+    let mut bytes = fixture_bytes("ext4.img");
     let layout = FixtureLayout::read(&bytes)?;
 
     let journal_block_count = layout.journal_block_count(&bytes)?;
@@ -148,7 +151,7 @@ fn dirty_classic_plus_dirty_fc_composes_full_state() -> Result<(), Box<dyn std::
     let expected_fc_tid = classic_replay.last_sequence.wrapping_add(1);
 
     let inode_offset = layout.inode_offset(&bytes, ROOT_INO)?;
-    let inode_size = layout.inode_size as usize;
+    let inode_size = usize::from(layout.inode_size);
     let raw_inode = bytes[inode_offset..inode_offset + inode_size].to_vec();
     let old_mode = u16::from_le_bytes(raw_inode[0x00..0x02].try_into()?);
     let mut mode = old_mode;
@@ -184,7 +187,7 @@ fn dirty_classic_plus_dirty_fc_composes_full_state() -> Result<(), Box<dyn std::
     let ext = Ext::open_lenient(&mut cursor)?;
     let mut overlay = OverlayReader::new(&mut cursor, &jr);
     for expected in &classic_replay.writes {
-        let mut block = vec![0u8; layout.block_size as usize];
+        let mut block = vec![0u8; usize::try_from(layout.block_size)?];
         overlay.seek(SeekFrom::Start(
             expected.fs_block * u64::from(layout.block_size),
         ))?;
@@ -217,8 +220,7 @@ fn dirty_classic_plus_dirty_fc_composes_full_state() -> Result<(), Box<dyn std::
 
 #[test]
 fn bad_tail_mid_fc_stops_after_two_valid_transactions() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4.img");
-    let mut bytes = std::fs::read(path)?;
+    let mut bytes = fixture_bytes("ext4.img");
     let layout = FixtureLayout::read(&bytes)?;
 
     let journal_block_count = layout.journal_block_count(&bytes)?;
@@ -230,7 +232,7 @@ fn bad_tail_mid_fc_stops_after_two_valid_transactions() -> Result<(), Box<dyn st
     patch_journal_superblock_for_clean_fast_commit(&mut bytes, &layout, journal_block_count)?;
 
     let inode_offset = layout.inode_offset(&bytes, ROOT_INO)?;
-    let inode_size = layout.inode_size as usize;
+    let inode_size = usize::from(layout.inode_size);
     let raw_inode = bytes[inode_offset..inode_offset + inode_size].to_vec();
     let old_mode = u16::from_le_bytes(raw_inode[0x00..0x02].try_into()?);
     let first_mode = old_mode ^ 0o001;
@@ -310,10 +312,11 @@ impl FixtureLayout {
         } else {
             32
         };
+        let block_size_usize = usize::try_from(block_size)?;
         let group_desc_table_offset = if block_size == 1024 {
-            2 * block_size as usize
+            2 * block_size_usize
         } else {
-            block_size as usize
+            block_size_usize
         };
 
         assert_eq!(block_size, 4096, "fixture layout assumption changed");
@@ -460,7 +463,7 @@ fn inject_classic_transactions(
     first_sequence: u32,
 ) -> Result<ClassicReplayFixture, Box<dyn std::error::Error>> {
     assert!(count > 0);
-    let block_size = layout.block_size as usize;
+    let block_size = usize::try_from(layout.block_size)?;
     let stop_block = CLASSIC_START + count * 3;
     let mut writes = Vec::new();
 
@@ -518,12 +521,13 @@ fn journal_block_host_fs_block(
     journal_block: u32,
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let offset = layout.journal_block_offset(bytes, journal_block)?;
+    let block_size = usize::try_from(layout.block_size)?;
     assert_eq!(
-        offset % layout.block_size as usize,
+        offset % block_size,
         0,
         "journal block host offset must be block aligned"
     );
-    Ok((offset / layout.block_size as usize) as u64)
+    Ok(u64::try_from(offset / block_size)?)
 }
 
 fn write_journal_block(
@@ -532,7 +536,7 @@ fn write_journal_block(
     journal_block: u32,
     block: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(block.len(), layout.block_size as usize);
+    assert_eq!(block.len(), usize::try_from(layout.block_size)?);
     let off = layout.journal_block_offset(bytes, journal_block)?;
     bytes[off..off + block.len()].copy_from_slice(block);
     Ok(())
@@ -552,7 +556,7 @@ fn write_fc_region_blocks(
         "test must write the full FC region to avoid stale fixture bytes"
     );
     for (i, block) in blocks.iter().enumerate() {
-        assert_eq!(block.len(), layout.block_size as usize);
+        assert_eq!(block.len(), usize::try_from(layout.block_size)?);
         let off = layout.journal_block_offset(bytes, fc_first + u32::try_from(i)?)?;
         bytes[off..off + block.len()].copy_from_slice(block);
     }
@@ -583,7 +587,8 @@ fn extent_physical_block(
             }
             let leaf = leaf.ok_or("logical journal block precedes first extent index")?;
             let leaf_off = usize::try_from(leaf * u64::from(block_size))?;
-            extent_leaf_lookup(&bytes[leaf_off..leaf_off + block_size as usize], logical)
+            let block_size = usize::try_from(block_size)?;
+            extent_leaf_lookup(&bytes[leaf_off..leaf_off + block_size], logical)
         }
         _ => Err("fixture journal extent tree depth > 1 is unsupported by this test".into()),
     }
@@ -633,7 +638,7 @@ impl FcTxBuilder {
         let mut payload = [0u8; 8];
         payload[0..4].copy_from_slice(&features.to_le_bytes());
         payload[4..8].copy_from_slice(&self.tid.to_le_bytes());
-        self.push_crc_tlv(fc_tlv(FC_TAG_HEAD, &payload));
+        self.push_crc_tlv(&fc_tlv(FC_TAG_HEAD, &payload));
         self
     }
 
@@ -642,7 +647,7 @@ impl FcTxBuilder {
         let mut payload = Vec::with_capacity(4 + raw_inode.len());
         payload.extend_from_slice(&inum.to_le_bytes());
         payload.extend_from_slice(raw_inode);
-        self.push_crc_tlv(fc_tlv(FC_TAG_INODE, &payload));
+        self.push_crc_tlv(&fc_tlv(FC_TAG_INODE, &payload));
         self
     }
 
@@ -669,9 +674,9 @@ impl FcTxBuilder {
         bytes
     }
 
-    fn push_crc_tlv(&mut self, tlv: Vec<u8>) {
-        self.running_crc = ext4_crc32c(self.running_crc, &tlv);
-        self.bytes.extend_from_slice(&tlv);
+    fn push_crc_tlv(&mut self, tlv: &[u8]) {
+        self.running_crc = ext4_crc32c(self.running_crc, tlv);
+        self.bytes.extend_from_slice(tlv);
     }
 }
 
@@ -688,8 +693,9 @@ fn fc_tlv(tag: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 fn fc_region(transactions: Vec<Vec<u8>>, num_blocks: u32, block_size: u32) -> Vec<Vec<u8>> {
-    let block_size = block_size as usize;
-    let mut blocks = vec![vec![0u8; block_size]; num_blocks as usize];
+    let block_size = usize::try_from(block_size).expect("fixture block size fits usize");
+    let num_blocks = usize::try_from(num_blocks).expect("fixture block count fits usize");
+    let mut blocks = vec![vec![0u8; block_size]; num_blocks];
     let mut block_idx = 0usize;
     let mut block_off = 0usize;
     for tx in transactions {

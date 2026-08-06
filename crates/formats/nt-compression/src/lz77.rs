@@ -41,7 +41,7 @@ pub(crate) struct MatchFinder {
     /// head[hash] = most recent position with this hash + 1
     /// (0 means no entry).
     head: Vec<u32>,
-    /// prev[pos % window_size] = previous position with same hash + 1.
+    /// prev[pos % `window_size`] = previous position with same hash + 1.
     prev: Vec<u32>,
 }
 
@@ -50,9 +50,9 @@ const HASH_SIZE: usize = 1 << HASH_BITS;
 
 /// 3-byte multiply-shift hash.
 fn hash3(data: &[u8], pos: usize) -> usize {
-    let b0 = data[pos] as u32;
-    let b1 = data[pos + 1] as u32;
-    let b2 = data[pos + 2] as u32;
+    let b0 = u32::from(data[pos]);
+    let b1 = u32::from(data[pos + 1]);
+    let b2 = u32::from(data[pos + 2]);
     let h = (b0 | (b1 << 8) | (b2 << 16)).wrapping_mul(0x9E37_79B1);
     (h >> (32 - HASH_BITS)) as usize
 }
@@ -118,7 +118,8 @@ impl MatchFinder {
             }
 
             // Quick check: compare the byte just past current best
-            let max_len = self.config.max_match_len.min((data.len() - pos) as u32);
+            let remaining = u32::try_from(data.len() - pos).unwrap_or(self.config.max_match_len);
+            let max_len = self.config.max_match_len.min(remaining);
             if best_len < max_len
                 && data[candidate + best_len as usize] == data[pos + best_len as usize]
             {
@@ -130,7 +131,8 @@ impl MatchFinder {
                 };
                 if len > best_len {
                     best_len = len;
-                    best_offset = dist as u32;
+                    best_offset = u32::try_from(dist)
+                        .expect("match distances are capped by the u32 window size");
                     if best_len == max_len {
                         break;
                     }
@@ -161,7 +163,8 @@ impl MatchFinder {
         let h = hash3(data, pos);
         let window = self.config.window_size as usize;
         self.prev[pos % window] = self.head[h];
-        self.head[h] = (pos + 1) as u32;
+        self.head[h] = u32::try_from(pos + 1)
+            .expect("input positions are capped by the configured u32 window size");
     }
 
     /// Tokenize `data` into a sequence of literals and matches.

@@ -34,9 +34,17 @@ pub struct NtfsMftEntries {
 impl NtfsMftEntries {
     /// Creates a new MFT iterator. Opens MFT record #0, extracts data run
     /// layout, then releases all borrows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn new<T: Read + Seek>(ntfs: &Ntfs, fs: &mut T) -> Result<Self> {
         // Open MFT file record #0.
-        let mft = NtfsFile::new(ntfs, fs, ntfs.mft_position().value().unwrap(), 0)?;
+        let mft_position = ntfs
+            .mft_position()
+            .value()
+            .ok_or(NtfsError::InvalidMftLcn)?;
+        let mft = NtfsFile::new(ntfs, fs, mft_position, 0)?;
 
         // Find the MFT's $DATA attribute (always present in the base record #0).
         let mft_data_attribute =
@@ -49,7 +57,7 @@ impl NtfsMftEntries {
         let map = DataRunMap::from_data_runs(non_resident_value.data_runs())?;
 
         let file_record_size = ntfs.file_record_size();
-        let total_records = mft_data_size / file_record_size as u64;
+        let total_records = mft_data_size / u64::from(file_record_size);
 
         Ok(Self {
             map,
@@ -80,11 +88,13 @@ impl NtfsMftEntries {
     }
 
     /// Total number of MFT records.
+    #[must_use]
     pub fn total_records(&self) -> u64 {
         self.total_records
     }
 
     /// Current record number (the one that will be returned by the next `next()` call).
+    #[must_use]
     pub fn current_record(&self) -> u64 {
         self.current_record
     }
@@ -103,14 +113,11 @@ impl NtfsMftEntries {
         }
 
         // Get the current segment (should always be valid if total_records is correct).
-        let (seg_position, seg_size) = match self.map.segment(self.segment_index) {
-            Some(s) => s,
-            None => {
-                // We've run off the end of segments before exhausting records.
-                // This shouldn't happen with a well-formed MFT, but handle gracefully.
-                self.current_record = self.total_records;
-                return None;
-            }
+        let Some((seg_position, seg_size)) = self.map.segment(self.segment_index) else {
+            // We've run off the end of segments before exhausting records.
+            // This shouldn't happen with a well-formed MFT, but handle gracefully.
+            self.current_record = self.total_records;
+            return None;
         };
 
         // Compute the physical position for this record.
@@ -118,7 +125,7 @@ impl NtfsMftEntries {
         let record_number = self.current_record;
 
         // Advance state before the read so we make progress even on error.
-        self.offset_in_segment += self.file_record_size as u64;
+        self.offset_in_segment += u64::from(self.file_record_size);
         if self.offset_in_segment >= seg_size {
             self.segment_index += 1;
             self.offset_in_segment = 0;
@@ -126,13 +133,10 @@ impl NtfsMftEntries {
         self.current_record += 1;
 
         // Check for sparse segment (MFT shouldn't be sparse, but be safe).
-        let disk_position = match position.value() {
-            Some(p) => p,
-            None => {
-                return Some(Err(NtfsError::InvalidFileRecordNumber {
-                    file_record_number: record_number,
-                }));
-            }
+        let Some(disk_position) = position.value() else {
+            return Some(Err(NtfsError::InvalidFileRecordNumber {
+                file_record_number: record_number,
+            }));
         };
 
         Some(
@@ -158,20 +162,17 @@ impl NtfsMftEntries {
             return;
         }
 
-        let byte_offset = record_number * self.file_record_size as u64;
-        match self.map.resolve_index(byte_offset) {
-            Some((idx, offset)) => {
-                self.segment_index = idx;
-                self.offset_in_segment = offset;
-                self.current_record = record_number;
-            }
-            None => {
-                // Shouldn't reach here if total_records is consistent with segments,
-                // but handle gracefully.
-                self.current_record = self.total_records;
-                self.segment_index = self.map.segment_count();
-                self.offset_in_segment = 0;
-            }
+        let byte_offset = record_number * u64::from(self.file_record_size);
+        if let Some((idx, offset)) = self.map.resolve_index(byte_offset) {
+            self.segment_index = idx;
+            self.offset_in_segment = offset;
+            self.current_record = record_number;
+        } else {
+            // Shouldn't reach here if total_records is consistent with segments,
+            // but handle gracefully.
+            self.current_record = self.total_records;
+            self.segment_index = self.map.segment_count();
+            self.offset_in_segment = 0;
         }
     }
 }
@@ -182,6 +183,7 @@ mod tests {
     use std::io::Cursor;
 
     const FRS: u32 = 1024; // file record size
+    const FRS_USIZE: usize = 1024;
     const REGION_START: u64 = 4096; // physical byte offset of record 0
 
     /// Builds a minimal valid 512-byte NTFS boot sector for `Ntfs::new`.
@@ -204,7 +206,7 @@ mod tests {
     /// different physical positions apart). No attributes are required for
     /// the iterator tests.
     fn make_file_record(flags: u16, seq: u16) -> Vec<u8> {
-        let mut rec = vec![0u8; FRS as usize];
+        let mut rec = vec![0u8; FRS_USIZE];
         rec[0..4].copy_from_slice(b"FILE");
         rec[4..6].copy_from_slice(&0x30u16.to_le_bytes()); // update_sequence_offset
         rec[6..8].copy_from_slice(&3u16.to_le_bytes()); // update_sequence_count
@@ -227,15 +229,20 @@ mod tests {
 
     /// Builds an image with `count` consecutive valid FILE records starting
     /// at `REGION_START`, plus the boot sector. Each record N carries
-    /// sequence_number `N + 10`, so reads from the wrong physical position
+    /// `sequence_number` `N + 10`, so reads from the wrong physical position
     /// are observable. Returns the cursor and a single-segment `DataRunMap`.
     fn make_image(count: u64) -> (Cursor<Vec<u8>>, DataRunMap) {
-        let region_len = count * FRS as u64;
-        let mut data = vec![0u8; (REGION_START + region_len) as usize];
+        let region_len = count * u64::from(FRS);
+        let mut data =
+            vec![0u8; usize::try_from(REGION_START + region_len).expect("test value fits usize")];
         data[0..512].copy_from_slice(&make_boot_sector());
         for i in 0..count {
-            let off = (REGION_START + i * FRS as u64) as usize;
-            data[off..off + FRS as usize].copy_from_slice(&make_file_record(1, (i + 10) as u16));
+            let off =
+                usize::try_from(REGION_START + i * u64::from(FRS)).expect("test value fits usize");
+            data[off..off + FRS_USIZE].copy_from_slice(&make_file_record(
+                1,
+                u16::try_from(i + 10).expect("test value fits u16"),
+            ));
         }
         let map = DataRunMap::from_segments_for_test(&[(Some(REGION_START), region_len)]);
         (Cursor::new(data), map)
@@ -273,7 +280,10 @@ mod tests {
             assert_eq!(iter.current_record(), expected);
             let file = iter.next(&ntfs, &mut fs).unwrap().unwrap();
             assert_eq!(file.file_record_number(), expected);
-            assert_eq!(file.sequence_number(), (expected + 10) as u16);
+            assert_eq!(
+                file.sequence_number(),
+                u16::try_from(expected + 10).expect("test value fits u16")
+            );
         }
         // After three records the iterator is exhausted (line 83 boundary).
         assert!(iter.next(&ntfs, &mut fs).is_none());
@@ -286,15 +296,23 @@ mod tests {
         // offset reaches the segment size, so segment_index advances and
         // offset resets (lines 103/104/105). The second record lives in the
         // second segment at a different physical position.
-        let region_len = FRS as u64;
-        let mut data = vec![0u8; (REGION_START + 4 * FRS as u64) as usize];
+        let region_len = u64::from(FRS);
+        let mut data = vec![
+            0u8;
+            usize::try_from(REGION_START + 4 * u64::from(FRS))
+                .expect("test value fits usize")
+        ];
         data[0..512].copy_from_slice(&make_boot_sector());
         // Record 0 (seq 10) at REGION_START, record 1 (seq 20) at
         // REGION_START + 2*FRS — a different physical position.
         let pos0 = REGION_START;
-        let pos1 = REGION_START + 2 * FRS as u64;
-        data[pos0 as usize..pos0 as usize + FRS as usize].copy_from_slice(&make_file_record(1, 10));
-        data[pos1 as usize..pos1 as usize + FRS as usize].copy_from_slice(&make_file_record(1, 20));
+        let pos1 = REGION_START + 2 * u64::from(FRS);
+        data[usize::try_from(pos0).expect("test value fits usize")
+            ..usize::try_from(pos0).expect("test value fits usize") + FRS_USIZE]
+            .copy_from_slice(&make_file_record(1, 10));
+        data[usize::try_from(pos1).expect("test value fits usize")
+            ..usize::try_from(pos1).expect("test value fits usize") + FRS_USIZE]
+            .copy_from_slice(&make_file_record(1, 20));
         let mut fs = Cursor::new(data);
         let ntfs = make_ntfs(&mut fs);
 
@@ -328,7 +346,7 @@ mod tests {
             d
         });
         let ntfs = make_ntfs(&mut fs);
-        let map = DataRunMap::from_segments_for_test(&[(None, 2 * FRS as u64)]);
+        let map = DataRunMap::from_segments_for_test(&[(None, 2 * u64::from(FRS))]);
         let mut iter = NtfsMftEntries::from_parts_for_test(map, 2, FRS);
 
         match iter.next(&ntfs, &mut fs) {
@@ -537,7 +555,8 @@ mod tests {
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
         // Read the MFT position and record size so we can corrupt a record.
-        let file_record_size = ntfs.file_record_size() as usize;
+        let file_record_size =
+            usize::try_from(ntfs.file_record_size()).expect("test record size fits in usize");
 
         // Corrupt record #2's FILE signature (overwrite first 4 bytes with zeros).
         // Record #2 starts at the MFT data position + 2 * record_size.
@@ -552,11 +571,13 @@ mod tests {
 
         // Resolve physical offset via DataRunMap (handles fragmented MFTs).
         let map = DataRunMap::from_data_runs(nrv.data_runs()).unwrap();
-        let logical_offset = 2 * file_record_size as u64;
+        let logical_offset =
+            2 * u64::try_from(file_record_size).expect("test record size fits in u64");
         let (pos, _) = map.resolve_position(logical_offset).unwrap();
         let record2_offset = pos.value().unwrap().get();
         let buf = testfs1.get_mut();
-        buf[record2_offset as usize..record2_offset as usize + 4]
+        buf[usize::try_from(record2_offset).expect("test value fits usize")
+            ..usize::try_from(record2_offset).expect("test value fits usize") + 4]
             .copy_from_slice(&[0x00, 0x00, 0x00, 0x00]);
 
         // Re-parse and iterate — record #2 should yield MftRecordParseFailed.

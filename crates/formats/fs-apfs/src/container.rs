@@ -79,6 +79,10 @@ const fn nx_supported_incompat_mask() -> u64 {
 }
 
 /// On-disk `nx_superblock_t` (1408 bytes).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the nx_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawNxSuperblock {
@@ -333,7 +337,11 @@ mod tests {
         block[0xA0..0xA8].copy_from_slice(&4u64.to_le_bytes());
         block[0xA8..0xB0].copy_from_slice(&5u64.to_le_bytes());
         // nx_max_file_systems at 0xB4.
-        block[0xB4..0xB8].copy_from_slice(&(NX_MAX_FILE_SYSTEMS as u32).to_le_bytes());
+        block[0xB4..0xB8].copy_from_slice(
+            &u32::try_from(NX_MAX_FILE_SYSTEMS)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         block
     }
 
@@ -438,7 +446,10 @@ mod tests {
     #[test]
     fn rejects_nx_max_file_systems_above_the_limit() {
         let mut block = build();
-        block[0xB4..0xB8].copy_from_slice(&(NX_MAX_FILE_SYSTEMS as u32 + 1).to_le_bytes());
+        block[0xB4..0xB8].copy_from_slice(
+            &(u32::try_from(NX_MAX_FILE_SYSTEMS).expect("the test fixture value fits in u32") + 1)
+                .to_le_bytes(),
+        );
         assert!(matches!(
             NxSuperblock::parse(&block),
             Err(ApfsError::Malformed { .. })

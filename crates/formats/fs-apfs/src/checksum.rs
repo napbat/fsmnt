@@ -106,6 +106,11 @@ pub fn verify_block(block: &[u8]) -> bool {
 ///
 /// `block_addr` is the physical block address, recorded in the error so a
 /// torn or tampered object can be pinpointed.
+///
+/// # Errors
+///
+/// Returns [`ApfsError::ChecksumMismatch`] when the checksum stored in the
+/// block does not match the Fletcher-64 checksum of its contents.
 pub fn require_valid_block(block: &[u8], block_addr: u64) -> Result<()> {
     if verify_block(block) {
         Ok(())
@@ -176,7 +181,10 @@ mod tests {
     fn verify_block_accepts_a_self_consistent_block() {
         let mut block = vec![0u8; 64];
         for (i, byte) in block[MAX_CKSUM_SIZE..].iter_mut().enumerate() {
-            *byte = (i as u8).wrapping_mul(7).wrapping_add(3);
+            *byte = u8::try_from(i)
+                .expect("the test fixture value fits in u8")
+                .wrapping_mul(7)
+                .wrapping_add(3);
         }
         let csum = fletcher64(&block[MAX_CKSUM_SIZE..]);
         block[..MAX_CKSUM_SIZE].copy_from_slice(&csum.to_le_bytes());

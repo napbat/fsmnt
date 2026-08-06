@@ -456,18 +456,42 @@ mod tests {
     fn catalog_leaf(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0003u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -476,10 +500,10 @@ mod tests {
     }
 
     fn drec(dir_id: u64, name: &str, child: u64, file_type: u16) -> (Vec<u8>, Vec<u8>) {
-        let mut key = (((JObjType::DirRec.as_value() as u64) << OBJ_TYPE_SHIFT) | dir_id)
+        let mut key = ((u64::from(JObjType::DirRec.as_value()) << OBJ_TYPE_SHIFT) | dir_id)
             .to_le_bytes()
             .to_vec();
-        let len = name.len() as u32 + 1;
+        let len = u32::try_from(name.len()).expect("the test fixture value fits in u32") + 1;
         key.extend_from_slice(&(len & J_DREC_LEN_MASK).to_le_bytes());
         key.extend_from_slice(name.as_bytes());
         key.push(0);
@@ -501,10 +525,15 @@ mod tests {
         image.extend(omap_tree(200, 2)); // catalog root virtual oid 200 -> block 2
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(200), omap.clone(), BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(200),
+            omap.clone(),
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let volume = Volume {
             catalog,
-            block_size: BLK as u32,
+            block_size: u32::try_from(BLK).expect("the test fixture value fits in u32"),
             cmp: NameComparison {
                 hashed: true,
                 case_insensitive: true,
@@ -586,12 +615,15 @@ mod tests {
 
     /// A `SNAP_METADATA` catalog record keyed by the snapshot's xid.
     fn snap_metadata_record(xid: u64, name: &str, sblock_oid: u64) -> (Vec<u8>, Vec<u8>) {
-        let key = (((JObjType::SnapMetadata.as_value() as u64) << OBJ_TYPE_SHIFT) | xid)
+        let key = ((u64::from(JObjType::SnapMetadata.as_value()) << OBJ_TYPE_SHIFT) | xid)
             .to_le_bytes()
             .to_vec();
         let mut value = vec![0u8; 50];
         value[8..16].copy_from_slice(&sblock_oid.to_le_bytes()); // sblock_oid
-        value[48..50].copy_from_slice(&(name.len() as u16 + 1).to_le_bytes());
+        value[48..50].copy_from_slice(
+            &(u16::try_from(name.len()).expect("the test fixture value fits in u16") + 1)
+                .to_le_bytes(),
+        );
         value.extend_from_slice(name.as_bytes());
         value.push(0);
         (key, value)
@@ -622,10 +654,15 @@ mod tests {
             image.extend(catalog_leaf(&[drec(2, "deleted.txt", 11, 8)]));
         }
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(300), omap.clone(), BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(300),
+            omap.clone(),
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let volume = Volume {
             catalog,
-            block_size: BLK as u32,
+            block_size: u32::try_from(BLK).expect("the test fixture value fits in u32"),
             cmp: NameComparison {
                 hashed: true,
                 case_insensitive: true,
@@ -707,7 +744,7 @@ mod tests {
     }
 
     fn inode_record(obj_id: u64, mode: u16) -> (Vec<u8>, Vec<u8>) {
-        let key = (((JObjType::Inode.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let key = ((u64::from(JObjType::Inode.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         (key, inode_value(mode))
@@ -716,17 +753,24 @@ mod tests {
     /// An `XATTR` record keyed by `(obj_id, name)` carrying an
     /// `XF_DATA_EMBEDDED` (0x0002) value of `data`.
     fn xattr_record(obj_id: u64, name: &str, data: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let mut key = (((JObjType::Xattr.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let mut key = ((u64::from(JObjType::Xattr.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         let bytes = name.as_bytes();
-        key.extend_from_slice(&(bytes.len() as u16 + 1).to_le_bytes());
+        key.extend_from_slice(
+            &(u16::try_from(bytes.len()).expect("the test fixture value fits in u16") + 1)
+                .to_le_bytes(),
+        );
         key.extend_from_slice(bytes);
         key.push(0);
         // value: flags(u16) = 0x0002 (XF_DATA_EMBEDDED), xdata_len(u16), data.
         let mut value = Vec::new();
         value.extend_from_slice(&0x0002u16.to_le_bytes());
-        value.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        value.extend_from_slice(
+            &u16::try_from(data.len())
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         value.extend_from_slice(data);
         (key, value)
     }
@@ -759,10 +803,15 @@ mod tests {
         image.extend(omap_tree(200, 2));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(200), omap.clone(), BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(200),
+            omap.clone(),
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let volume = Volume {
             catalog,
-            block_size: BLK as u32,
+            block_size: u32::try_from(BLK).expect("the test fixture value fits in u32"),
             cmp: NameComparison {
                 hashed: false,
                 case_insensitive: false,

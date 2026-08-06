@@ -23,11 +23,11 @@ const MAX_LOGGED_UTILITY_STREAM_SIZE: u64 = 256 * 1024;
 /// This attribute is a generic container used by multiple NTFS subsystems:
 /// - **EFS** stores encryption metadata (DDF/DRF headers, certificate hashes)
 ///   in a stream named `$EFS`.
-/// - **TxF** stores transaction log data in `$Extend\$RmMetadata` and
+/// - **`TxF`** stores transaction log data in `$Extend\$RmMetadata` and
 ///   related system files.
 ///
 /// This parser stores the raw bytes for forensic access without
-/// interpreting EFS or TxF internal formats.
+/// interpreting EFS or `TxF` internal formats.
 ///
 /// Reference: MS-FSCC Section 5 (NTFS Attribute Types)
 #[derive(Clone, Debug)]
@@ -50,7 +50,8 @@ impl NtfsLoggedUtilityStream {
             });
         }
 
-        let len = value_length as usize;
+        let len = usize::try_from(value_length)
+            .expect("validated logged utility stream size fits in usize");
         let mut data = vec![0u8; len];
         r.read_exact(&mut data)?;
 
@@ -59,6 +60,7 @@ impl NtfsLoggedUtilityStream {
 
     /// Returns the absolute byte position of this attribute in the NTFS
     /// image, or `NtfsPosition::none()` if the position is unknown.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         self.position
     }
@@ -66,13 +68,15 @@ impl NtfsLoggedUtilityStream {
     /// Returns the raw stream data as a byte slice.
     ///
     /// The internal format depends on the stream name: `$EFS` streams
-    /// contain EFS encryption metadata, while TxF streams contain
+    /// contain EFS encryption metadata, while `TxF` streams contain
     /// transaction log data.
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
     /// Returns the length of the stream data in bytes.
+    #[must_use]
     pub fn data_length(&self) -> usize {
         self.data.len()
     }
@@ -81,19 +85,28 @@ impl NtfsLoggedUtilityStream {
     ///
     /// This is only meaningful when the `$LOGGED_UTILITY_STREAM` attribute
     /// is named `$EFS`; callers should check the attribute name first.
-    /// TxF (`$TXF_DATA`) and other named streams use unrelated formats.
+    /// `TxF` (`$TXF_DATA`) and other named streams use unrelated formats.
     ///
     /// Reference: MS-EFSR Section 2.2.2.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream is not valid EFS metadata.
     pub fn parse_efs(&self) -> Result<crate::structured_values::NtfsEfsMetadata> {
         crate::structured_values::NtfsEfsMetadata::parse(&self.data, self.position)
     }
 
-    /// Interprets this stream as TxF (`$TXF_DATA`) per-file metadata.
+    /// Interprets this stream as `TxF` (`$TXF_DATA`) per-file metadata.
     ///
     /// This is only meaningful when the `$LOGGED_UTILITY_STREAM`
     /// attribute is named `$TXF_DATA`; callers should check the
     /// attribute name first. EFS (`$EFS`) streams use an unrelated
     /// format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream is truncated or is not valid `$TXF_DATA`
+    /// metadata.
     pub fn parse_txf(&self) -> Result<crate::structured_values::NtfsTxfData> {
         crate::structured_values::NtfsTxfData::parse(&self.data, self.position)
     }
@@ -104,7 +117,7 @@ impl_structured_value_via_new!(
     NtfsAttributeType::LoggedUtilityStream
 );
 
-impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsLoggedUtilityStream {
+impl<'f> NtfsStructuredValueFromResidentAttributeValue<'_, 'f> for NtfsLoggedUtilityStream {
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self> {
         let position = value.data_position();
         let value_length = value.len();
@@ -134,9 +147,12 @@ mod tests {
     fn parse_valid_data() {
         let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let mut cursor = ReadOnlyCursor::new(&data);
-        let lus =
-            NtfsLoggedUtilityStream::new(&mut cursor, NtfsPosition::new(0x400), data.len() as u64)
-                .expect("should parse valid data");
+        let lus = NtfsLoggedUtilityStream::new(
+            &mut cursor,
+            NtfsPosition::new(0x400),
+            u64::try_from(data.len()).expect("test stream length fits u64"),
+        )
+        .expect("should parse valid data");
 
         assert_eq!(lus.data(), &data);
         assert_eq!(lus.data_length(), 8);
@@ -168,7 +184,11 @@ mod tests {
 
     #[test]
     fn accept_max_size() {
-        let data = vec![0xCDu8; MAX_LOGGED_UTILITY_STREAM_SIZE as usize];
+        let data = vec![
+            0xCDu8;
+            usize::try_from(MAX_LOGGED_UTILITY_STREAM_SIZE)
+                .expect("test value fits usize")
+        ];
         let mut cursor = ReadOnlyCursor::new(&data);
         let lus = NtfsLoggedUtilityStream::new(
             &mut cursor,
@@ -177,7 +197,10 @@ mod tests {
         )
         .expect("should parse max-size stream");
 
-        assert_eq!(lus.data_length(), MAX_LOGGED_UTILITY_STREAM_SIZE as usize);
+        assert_eq!(
+            lus.data_length(),
+            usize::try_from(MAX_LOGGED_UTILITY_STREAM_SIZE).expect("test value fits usize")
+        );
     }
 
     #[test]
@@ -192,7 +215,7 @@ mod tests {
         // value the `* -> +` mutant would compute (256 + 1024 = 1280), so a
         // mutated limit would wrongly reject this otherwise-valid stream.
         let len = 2000u64;
-        let data = vec![0x42u8; len as usize];
+        let data = vec![0x42u8; usize::try_from(len).expect("test value fits usize")];
         let mut cursor = ReadOnlyCursor::new(&data);
         let lus = NtfsLoggedUtilityStream::new(&mut cursor, NtfsPosition::none(), len)
             .expect("2000-byte stream is within the 256 KiB limit");
@@ -208,9 +231,12 @@ mod tests {
         data[0x40..0x44].copy_from_slice(&0x54u32.to_le_bytes());
 
         let mut cursor = ReadOnlyCursor::new(&data);
-        let lus =
-            NtfsLoggedUtilityStream::new(&mut cursor, NtfsPosition::new(0x400), data.len() as u64)
-                .expect("should parse logged utility stream");
+        let lus = NtfsLoggedUtilityStream::new(
+            &mut cursor,
+            NtfsPosition::new(0x400),
+            u64::try_from(data.len()).expect("test stream length fits u64"),
+        )
+        .expect("should parse logged utility stream");
 
         let efs = lus.parse_efs().expect("should interpret $EFS metadata");
         assert_eq!(efs.efs_version(), 2);
@@ -230,9 +256,12 @@ mod tests {
         // Simulate plausible EFS header bytes
         let data: Vec<u8> = (0..64).collect();
         let mut cursor = ReadOnlyCursor::new(&data);
-        let lus =
-            NtfsLoggedUtilityStream::new(&mut cursor, NtfsPosition::new(0x800), data.len() as u64)
-                .expect("should preserve all bytes");
+        let lus = NtfsLoggedUtilityStream::new(
+            &mut cursor,
+            NtfsPosition::new(0x800),
+            u64::try_from(data.len()).expect("test stream length fits u64"),
+        )
+        .expect("should preserve all bytes");
 
         assert_eq!(lus.data(), data.as_slice());
     }
@@ -244,9 +273,12 @@ mod tests {
         data[22..30].copy_from_slice(&0x1234_5678u64.to_le_bytes());
 
         let mut cursor = ReadOnlyCursor::new(&data);
-        let lus =
-            NtfsLoggedUtilityStream::new(&mut cursor, NtfsPosition::new(0x600), data.len() as u64)
-                .expect("should parse logged utility stream");
+        let lus = NtfsLoggedUtilityStream::new(
+            &mut cursor,
+            NtfsPosition::new(0x600),
+            u64::try_from(data.len()).expect("test stream length fits u64"),
+        )
+        .expect("should parse logged utility stream");
 
         let txf = lus.parse_txf().expect("should interpret $TXF_DATA");
         assert_eq!(txf.txf_id(), 0x1234_5678);

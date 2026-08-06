@@ -18,15 +18,18 @@ mod benches {
     use alloc::vec::Vec;
     use divan::counter::BytesCount;
 
-    use crate::rtl_ffi::*;
+    use crate::rtl_ffi::{
+        COMPRESSION_FORMAT_LZNT1, COMPRESSION_FORMAT_XPRESS, COMPRESSION_FORMAT_XPRESS_HUFF,
+        RtlDecompressBufferEx, STATUS_SUCCESS, rtl_compress, rtl_workspace,
+    };
 
     fn mixed(n: usize) -> Vec<u8> {
         let mut buf = alloc::vec![0u8; n];
         for (i, byte) in buf.iter_mut().enumerate() {
             *byte = if i < n / 2 {
-                (i % 64) as u8
+                u8::try_from(i % 64).expect("the modulus limits values below 64")
             } else {
-                ((i * 7 + 13) % 251) as u8
+                u8::try_from((i * 7 + 13) % 251).expect("the modulus limits values below 251")
             };
         }
         buf
@@ -40,7 +43,9 @@ mod benches {
 
     #[divan::bench_group]
     mod lznt1_compress {
-        use super::*;
+        use super::{
+            BytesCount, COMPRESSION_FORMAT_LZNT1, SIZES, alloc, mixed, rtl_compress, rtl_workspace,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -73,7 +78,10 @@ mod benches {
 
     #[divan::bench_group]
     mod lznt1_decompress {
-        use super::*;
+        use super::{
+            BytesCount, COMPRESSION_FORMAT_LZNT1, RtlDecompressBufferEx, SIZES, STATUS_SUCCESS,
+            alloc, mixed, rtl_compress, rtl_workspace,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -104,10 +112,12 @@ mod benches {
                         RtlDecompressBufferEx(
                             COMPRESSION_FORMAT_LZNT1,
                             out.as_mut_ptr(),
-                            out.len() as u32,
+                            u32::try_from(out.len())
+                                .expect("benchmark buffers are smaller than 4 GiB"),
                             compressed.as_ptr(),
-                            compressed.len() as u32,
-                            &mut final_size,
+                            u32::try_from(compressed.len())
+                                .expect("benchmark buffers are smaller than 4 GiB"),
+                            &raw mut final_size,
                             d_ws.as_mut_ptr(),
                         )
                     };
@@ -123,7 +133,9 @@ mod benches {
 
     #[divan::bench_group]
     mod xpress_compress {
-        use super::*;
+        use super::{
+            BytesCount, COMPRESSION_FORMAT_XPRESS, SIZES, alloc, mixed, rtl_compress, rtl_workspace,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -156,7 +168,10 @@ mod benches {
 
     #[divan::bench_group]
     mod xpress_decompress {
-        use super::*;
+        use super::{
+            BytesCount, COMPRESSION_FORMAT_XPRESS, RtlDecompressBufferEx, SIZES, STATUS_SUCCESS,
+            alloc, mixed, rtl_compress, rtl_workspace,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -187,10 +202,12 @@ mod benches {
                         RtlDecompressBufferEx(
                             COMPRESSION_FORMAT_XPRESS,
                             out.as_mut_ptr(),
-                            out.len() as u32,
+                            u32::try_from(out.len())
+                                .expect("benchmark buffers are smaller than 4 GiB"),
                             compressed.as_ptr(),
-                            compressed.len() as u32,
-                            &mut final_size,
+                            u32::try_from(compressed.len())
+                                .expect("benchmark buffers are smaller than 4 GiB"),
+                            &raw mut final_size,
                             d_ws.as_mut_ptr(),
                         )
                     };
@@ -206,7 +223,10 @@ mod benches {
 
     #[divan::bench_group]
     mod xpress_huffman_compress {
-        use super::*;
+        use super::{
+            BytesCount, COMPRESSION_FORMAT_XPRESS_HUFF, SIZES, alloc, mixed, rtl_compress,
+            rtl_workspace,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -243,7 +263,10 @@ mod benches {
 
     #[divan::bench_group]
     mod xpress_huffman_decompress {
-        use super::*;
+        use super::{
+            BytesCount, COMPRESSION_FORMAT_XPRESS_HUFF, RtlDecompressBufferEx, SIZES,
+            STATUS_SUCCESS, alloc, mixed, rtl_compress, rtl_workspace,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -277,10 +300,12 @@ mod benches {
                         RtlDecompressBufferEx(
                             COMPRESSION_FORMAT_XPRESS_HUFF,
                             out.as_mut_ptr(),
-                            out.len() as u32,
+                            u32::try_from(out.len())
+                                .expect("benchmark buffers are smaller than 4 GiB"),
                             compressed.as_ptr(),
-                            compressed.len() as u32,
-                            &mut final_size,
+                            u32::try_from(compressed.len())
+                                .expect("benchmark buffers are smaller than 4 GiB"),
+                            &raw mut final_size,
                             d_ws.as_mut_ptr(),
                         )
                     };

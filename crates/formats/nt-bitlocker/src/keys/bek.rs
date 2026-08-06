@@ -34,9 +34,21 @@ impl<'a> BekFile<'a> {
             }
         })?;
 
-        let size = hdr.size.get() as usize;
-        let header_size = hdr.header_size.get() as usize;
-        let copy_size = hdr.size_copy.get() as usize;
+        let size = usize::try_from(hdr.size.get()).map_err(|_| {
+            BitLockerError::InvalidCredentialFormat {
+                detail: "BEK size exceeds the host address space",
+            }
+        })?;
+        let header_size = usize::try_from(hdr.header_size.get()).map_err(|_| {
+            BitLockerError::InvalidCredentialFormat {
+                detail: "BEK header size exceeds the host address space",
+            }
+        })?;
+        let copy_size = usize::try_from(hdr.size_copy.get()).map_err(|_| {
+            BitLockerError::InvalidCredentialFormat {
+                detail: "BEK copy size exceeds the host address space",
+            }
+        })?;
 
         if header_size != BEK_HEADER_SIZE {
             return Err(BitLockerError::InvalidCredentialFormat {
@@ -125,16 +137,15 @@ fn extract_key_bytes(nested: &[u8]) -> Result<&[u8]> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
     /// Build a minimal BEK file with a known key.
     fn make_bek_file(guid: &[u8; 16], key: &[u8]) -> Vec<u8> {
         // Key datum (value_type 1): header(8) + algorithm(4) + key
-        #[expect(clippy::cast_possible_truncation, reason = "test data is always small")]
-        let key_datum_size: u16 = 8 + 4 + key.len() as u16;
-        let mut key_datum = vec![0u8; key_datum_size as usize];
+        let key_datum_size = 12
+            + u16::try_from(key.len()).expect("the test key length fits in the 16-bit datum size");
+        let mut key_datum = vec![0u8; usize::from(key_datum_size)];
         key_datum[0..2].copy_from_slice(&key_datum_size.to_le_bytes());
         key_datum[2..4].copy_from_slice(&0u16.to_le_bytes()); // entry_type: 0
         key_datum[4..6].copy_from_slice(&1u16.to_le_bytes()); // value_type: KEY
@@ -144,7 +155,7 @@ mod tests {
         // External key datum (value_type 9):
         //   header(8) + ext_guid(16) + timestamp(8) + key_datum
         let ext_datum_size: u16 = 8 + 16 + 8 + key_datum_size;
-        let mut ext_datum = vec![0u8; ext_datum_size as usize];
+        let mut ext_datum = vec![0u8; usize::from(ext_datum_size)];
         ext_datum[0..2].copy_from_slice(&ext_datum_size.to_le_bytes());
         ext_datum[2..4].copy_from_slice(&0u16.to_le_bytes()); // entry_type
         ext_datum[4..6].copy_from_slice(&VALUE_TYPE_EXTERNAL_KEY.to_le_bytes());
@@ -155,9 +166,14 @@ mod tests {
         ext_datum[32..].copy_from_slice(&key_datum);
 
         // BEK header (48 bytes) + ext_datum
-        #[expect(clippy::cast_possible_truncation, reason = "test data is always small")]
-        let total_size: u32 = BEK_HEADER_SIZE as u32 + u32::from(ext_datum_size);
-        let mut bek = vec![0u8; total_size as usize];
+        let total_size = u32::try_from(BEK_HEADER_SIZE)
+            .expect("the fixed BEK header size fits in u32")
+            + u32::from(ext_datum_size);
+        let mut bek = vec![
+            0u8;
+            usize::try_from(total_size)
+                .expect("the test BEK size fits in the host address space")
+        ];
         bek[0..4].copy_from_slice(&total_size.to_le_bytes()); // size
         bek[4..8].copy_from_slice(&1u32.to_le_bytes()); // version
         bek[8..12].copy_from_slice(&0x30u32.to_le_bytes()); // header_size
@@ -239,8 +255,8 @@ mod tests {
     fn reject_declared_size_exceeds_file() {
         let guid = [0; 16];
         let mut bek = make_bek_file(&guid, &[0; 32]);
-        #[expect(clippy::cast_possible_truncation, reason = "test data is always small")]
-        let huge = (bek.len() as u32 + 100).to_le_bytes();
+        let huge = (u32::try_from(bek.len()).expect("the test BEK length fits in u32") + 100)
+            .to_le_bytes();
         bek[0..4].copy_from_slice(&huge);
         bek[12..16].copy_from_slice(&huge);
         let err = BekFile::from_bytes(&bek).unwrap_err();

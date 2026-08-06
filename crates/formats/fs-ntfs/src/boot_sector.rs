@@ -5,6 +5,10 @@ use memoffset::offset_of;
 use crate::error::{NtfsError, Result};
 use crate::types::{Lcn, NtfsPosition};
 
+fn field_offset(offset: usize) -> u64 {
+    u64::try_from(offset).expect("boot-sector field offsets fit in u64")
+}
+
 // Re-use the boot sector structure from fs-common
 pub use fs_common::boot_sector::BOOT_SIGNATURE;
 pub(crate) type BootSector = fs_common::boot_sector::NtfsBootSector;
@@ -26,7 +30,7 @@ pub(crate) trait BootSectorExt {
     /// Returns the Logical Cluster Number (LCN) to the beginning of the Master File Table (MFT).
     fn mft_lcn(&self) -> Result<Lcn>;
 
-    /// Returns the Logical Cluster Number (LCN) to the beginning of the MFT Mirror ($MFTMirr).
+    /// Returns the Logical Cluster Number (LCN) to the beginning of the MFT Mirror ($`MFTMirr`).
     fn mft_mirr_lcn(&self) -> Result<Lcn>;
 
     /// Returns the volume serial number.
@@ -39,7 +43,7 @@ pub(crate) trait BootSectorExt {
 /// Expected NTFS OEM ID at offset 3 in the boot sector.
 const NTFS_OEM_ID: &[u8; 8] = b"NTFS    ";
 
-/// BitLocker FVE OEM ID at offset 3 in the boot sector.
+/// `BitLocker` FVE OEM ID at offset 3 in the boot sector.
 const BITLOCKER_OEM_ID: &[u8; 8] = b"-FVE-FS-";
 
 impl BootSectorExt for BootSector {
@@ -48,7 +52,7 @@ impl BootSectorExt for BootSector {
         let signature = self.boot_signature.get();
         if signature != BOOT_SIGNATURE {
             return Err(NtfsError::InvalidTwoByteSignature {
-                position: NtfsPosition::new(offset_of!(BootSector, boot_signature) as u64),
+                position: NtfsPosition::new(field_offset(offset_of!(BootSector, boot_signature))),
                 expected: &[0x55, 0xAA],
                 actual: signature.to_le_bytes(),
             });
@@ -59,7 +63,7 @@ impl BootSectorExt for BootSector {
         // the rest of the boot sector layout.
         if &self.header.oem_id == BITLOCKER_OEM_ID {
             return Err(NtfsError::BitLockerEncrypted {
-                position: NtfsPosition::new(offset_of!(BootSector, header) as u64 + 3),
+                position: NtfsPosition::new(field_offset(offset_of!(BootSector, header)) + 3),
                 oem_id: self.header.oem_id,
             });
         }
@@ -67,7 +71,7 @@ impl BootSectorExt for BootSector {
         // Validate the NTFS OEM ID ("NTFS    ") at offset 3.
         if &self.header.oem_id != NTFS_OEM_ID {
             return Err(NtfsError::InvalidOemId {
-                position: NtfsPosition::new(offset_of!(BootSector, header) as u64 + 3),
+                position: NtfsPosition::new(field_offset(offset_of!(BootSector, header)) + 3),
                 expected: NTFS_OEM_ID,
                 actual: self.header.oem_id,
             });
@@ -81,14 +85,14 @@ impl BootSectorExt for BootSector {
         const MIN_CLUSTER_SIZE: u32 = 512;
 
         /// The maximum cluster size supported by Windows is 2 MiB.
-        /// Source: https://en.wikipedia.org/wiki/NTFS
-        const MAX_CLUSTER_SIZE: u32 = 2097152;
+        /// Source: <https://en.wikipedia.org/wiki/NTFS>
+        const MAX_CLUSTER_SIZE: u32 = 2_097_152;
 
         const CLUSTER_SIZE_RANGE: RangeInclusive<u32> = MIN_CLUSTER_SIZE..=MAX_CLUSTER_SIZE;
 
         // `sectors_per_cluster` and `sector_size` both check for powers of two.
         // Don't need to do that a third time here.
-        let cluster_size = sectors_per_cluster(self)? as u32 * self.sector_size()? as u32;
+        let cluster_size = u32::from(sectors_per_cluster(self)?) * u32::from(self.sector_size()?);
         if !CLUSTER_SIZE_RANGE.contains(&cluster_size) {
             return Err(NtfsError::UnsupportedClusterSize {
                 min: MIN_CLUSTER_SIZE,
@@ -106,7 +110,7 @@ impl BootSectorExt for BootSector {
         const MIN_SECTOR_SIZE: u16 = 512;
 
         /// This is the maximum currently supported by Windows.
-        /// Tested with Arsenal Image Mounter (https://github.com/ColinFinck/ntfs/issues/14).
+        /// Tested with Arsenal Image Mounter (<https://github.com/ColinFinck/ntfs/issues/14>).
         const MAX_SECTOR_SIZE: u16 = 4096;
 
         const SECTOR_SIZE_RANGE: RangeInclusive<u16> = MIN_SECTOR_SIZE..=MAX_SECTOR_SIZE;
@@ -172,7 +176,7 @@ fn sectors_per_cluster(boot_sector: &BootSector) -> Result<u16> {
     //
     // See https://dfir.ru/2019/04/23/ntfs-large-clusters/
     if sectors_per_cluster > 128 {
-        let exponent = -(sectors_per_cluster as i8);
+        let exponent = -sectors_per_cluster.cast_signed();
 
         if exponent > MAX_EXPONENT {
             return Err(NtfsError::InvalidSectorsPerCluster {
@@ -180,7 +184,8 @@ fn sectors_per_cluster(boot_sector: &BootSector) -> Result<u16> {
             });
         }
 
-        Ok(1 << (exponent as u16))
+        let exponent = u16::try_from(exponent).expect("validated exponent is nonnegative");
+        Ok(1 << exponent)
     } else {
         if sectors_per_cluster < MIN_SECTORS_PER_CLUSTER || !sectors_per_cluster.is_power_of_two() {
             return Err(NtfsError::InvalidSectorsPerCluster {
@@ -188,12 +193,12 @@ fn sectors_per_cluster(boot_sector: &BootSector) -> Result<u16> {
             });
         }
 
-        Ok(sectors_per_cluster as u16)
+        Ok(u16::from(sectors_per_cluster))
     }
 }
 
 /// Helper function to decode record size with NTFS-specific encoding.
-/// Source: https://en.wikipedia.org/wiki/NTFS#Partition_Boot_Sector_(VBR)
+/// Source: <https://en.wikipedia.org/wiki/NTFS#Partition_Boot_Sector>_(VBR)
 fn record_size(boot_sector: &BootSector, size_info: i8) -> Result<u32> {
     // The usual exponent of `clusters_per_mft_record` is 10 (2^10 = 1024 bytes).
     // For index records, it's usually 12 (2^12 = 4096 bytes).
@@ -212,7 +217,7 @@ fn record_size(boot_sector: &BootSector, size_info: i8) -> Result<u32> {
     if size_info > 0 {
         // The size field denotes a cluster count.
         cluster_size
-            .checked_mul(size_info as u32)
+            .checked_mul(u32::try_from(size_info).expect("positive record size fits in u32"))
             .ok_or(NtfsError::InvalidRecordSizeInfo {
                 size_info,
                 cluster_size,
@@ -237,7 +242,7 @@ mod tests {
     use super::*;
     use zerocopy::FromBytes;
 
-    /// Build a 512-byte buffer representing a BitLocker boot sector.
+    /// Build a 512-byte buffer representing a `BitLocker` boot sector.
     /// Valid 0x55AA signature, `-FVE-FS-` OEM ID, NTFS-like BPB.
     fn make_bitlocker_sector() -> [u8; 512] {
         let mut buf = [0u8; 512];
@@ -247,7 +252,7 @@ mod tests {
         buf[3..11].copy_from_slice(b"-FVE-FS-");
         buf[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
         buf[0x0D] = 8;
-        buf[0x28..0x30].copy_from_slice(&2097152u64.to_le_bytes());
+        buf[0x28..0x30].copy_from_slice(&2_097_152_u64.to_le_bytes());
         buf[510] = 0x55;
         buf[511] = 0xAA;
         buf
@@ -260,7 +265,7 @@ mod tests {
         let err = bs.validate().unwrap_err();
         match err {
             NtfsError::BitLockerEncrypted { position, oem_id } => {
-                assert_eq!(position.value().map(|v| v.get()), Some(3));
+                assert_eq!(position.value().map(std::num::NonZero::get), Some(3));
                 assert_eq!(&oem_id, b"-FVE-FS-");
             }
             other => panic!("Expected BitLockerEncrypted, got {other}"),
@@ -292,7 +297,7 @@ mod tests {
         assert_eq!(expected, b"NTFS    ");
         assert_eq!(&actual, b"GARBAGE!");
         // OEM ID lives at offset 3 (header offset 0 + 3); pins the `+ 3`.
-        assert_eq!(position.value().map(|v| v.get()), Some(3));
+        assert_eq!(position.value().map(std::num::NonZero::get), Some(3));
     }
 
     /// Build a 512-byte buffer representing a valid NTFS boot sector.
@@ -312,7 +317,7 @@ mod tests {
         buf[0x28..0x30].copy_from_slice(&0x0010_0000u64.to_le_bytes()); // total_sectors
         buf[0x30..0x38].copy_from_slice(&4u64.to_le_bytes()); // mft_lcn
         buf[0x38..0x40].copy_from_slice(&2u64.to_le_bytes()); // mft_mirror_lcn
-        buf[0x40] = (-10i8) as u8; // clusters_per_mft_record = -10 -> 1024-byte records
+        buf[0x40] = (-10i8).cast_unsigned(); // clusters_per_mft_record = -10 -> 1024-byte records
         buf[0x48..0x50].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes()); // serial
         buf[510] = 0x55;
         buf[511] = 0xAA;
@@ -355,7 +360,7 @@ mod tests {
         buf[0x0B..0x0D].copy_from_slice(&4096u16.to_le_bytes());
         buf[0x0D] = 128;
         let bs = BootSector::ref_from_bytes(&buf).unwrap();
-        assert_eq!(bs.cluster_size().unwrap(), 524288);
+        assert_eq!(bs.cluster_size().unwrap(), 524_288);
     }
 
     #[test]
@@ -489,7 +494,7 @@ mod tests {
     fn test_record_size_exponent_boundaries() {
         // clusters_per_mft_record = -9 -> exponent 9 < MIN(10) -> error.
         let mut buf = make_ntfs_sector();
-        buf[0x40] = (-9i8) as u8;
+        buf[0x40] = (-9i8).cast_unsigned();
         let bs = BootSector::ref_from_bytes(&buf).unwrap();
         assert!(record_size(bs, -9).is_err());
 

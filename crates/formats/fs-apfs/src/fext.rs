@@ -188,14 +188,30 @@ mod tests {
     fn fext_leaf(records: &[(u64, u64, u64, u64)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0007u16.to_le_bytes()); // ROOT|LEAF|FIXED
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 4) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 4)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 4;
         let value_end = BLK - BTREE_INFO_SIZE;
         for (i, &(private_id, logical, length, phys)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 4;
-            b[toc..toc + 2].copy_from_slice(&((i * 16) as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(((i + 1) * 16) as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(i * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from((i + 1) * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             let ks = key_area + i * 16;
             b[ks..ks + 8].copy_from_slice(&private_id.to_le_bytes());
             b[ks + 8..ks + 16].copy_from_slice(&logical.to_le_bytes());
@@ -222,7 +238,12 @@ mod tests {
         ]));
         let mut reader = Cursor::new(image);
 
-        let extents = FextTree::new(1).collect(&mut reader, BLK as u32).unwrap();
+        let extents = FextTree::new(1)
+            .collect(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            )
+            .unwrap();
         let file7 = &extents[&7];
         // Extents are returned sorted by logical offset.
         assert_eq!(file7.len(), 2);
@@ -241,7 +262,10 @@ mod tests {
         image.extend(leaf);
         let mut reader = Cursor::new(image);
         assert!(matches!(
-            FextTree::new(1).collect(&mut reader, BLK as u32),
+            FextTree::new(1).collect(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32")
+            ),
             Err(ApfsError::ChecksumMismatch { .. })
         ));
     }
@@ -253,7 +277,10 @@ mod tests {
         let mut reader = Cursor::new(image);
         assert!(
             FextTree::new(1)
-                .collect(&mut reader, BLK as u32)
+                .collect(
+                    &mut reader,
+                    u32::try_from(BLK).expect("the test fixture value fits in u32")
+                )
                 .unwrap()
                 .is_empty()
         );

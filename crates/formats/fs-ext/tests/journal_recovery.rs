@@ -1,4 +1,6 @@
-mod common;
+//! Integration tests for ext3/ext4 journal discovery and recovery behavior.
+
+mod support;
 
 use fs_common::iter::FsTryIterator;
 use fs_common::traverse::FsDirectory;
@@ -7,21 +9,21 @@ use fs_ext::{Ext, ExtError, JournalReplay, OverlayReader};
 
 #[test]
 fn clean_image_reports_journal_via_public_accessors() {
-    let (ext, _fs) = common::open_ext("ext4.img");
+    let (ext, _fs) = support::open_ext("ext4.img");
     assert!(ext.has_journal());
     assert!(!ext.needs_journal_recovery());
 }
 
 #[test]
 fn dirty_image_with_no_journal_would_fail_later() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     {
         let buf = fs.get_mut();
         let current = u32::from_le_bytes(buf[1024 + 0x5C..1024 + 0x60].try_into().unwrap());
         let new = current & !0x4;
         buf[1024 + 0x5C..1024 + 0x60].copy_from_slice(&new.to_le_bytes());
     }
-    common::patch_superblock_incompat(&mut fs, 0x4);
+    support::patch_superblock_incompat(&mut fs, 0x4);
     let ext = Ext::open_lenient(&mut fs).expect("lenient open");
     assert!(!ext.has_journal());
     assert!(ext.needs_journal_recovery());
@@ -30,14 +32,14 @@ fn dirty_image_with_no_journal_would_fail_later() {
 
 #[test]
 fn build_fails_when_journal_absent() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     {
         let buf = fs.get_mut();
         let current = u32::from_le_bytes(buf[1024 + 0x5C..1024 + 0x60].try_into().unwrap());
         let new = current & !0x4;
         buf[1024 + 0x5C..1024 + 0x60].copy_from_slice(&new.to_le_bytes());
     }
-    common::patch_superblock_incompat(&mut fs, 0x4);
+    support::patch_superblock_incompat(&mut fs, 0x4);
 
     let ext = fs_ext::Ext::open_lenient(&mut fs).expect("lenient");
     let err = JournalReplay::build(&ext, &mut fs).unwrap_err();
@@ -49,7 +51,7 @@ fn build_fails_when_journal_absent() {
 
 #[test]
 fn canonical_flow_on_clean_image_round_trips_root_directory() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     let pre_replay = Ext::open_lenient(&mut fs).expect("lenient");
     let replay = JournalReplay::build(&pre_replay, &mut fs).expect("build");
 
@@ -69,10 +71,7 @@ fn canonical_flow_on_clean_image_round_trips_root_directory() {
 }
 
 fn fixture_available(name: &str) -> bool {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata")
-        .join(name)
-        .exists()
+    fsmnt_testkit::fixture_path(env!("CARGO_MANIFEST_DIR"), format!("testdata/{name}")).exists()
 }
 
 #[test]
@@ -81,7 +80,7 @@ fn dirty_empty_journal_recovers_to_clean_view() {
         eprintln!("skipping: ext4-dirty-empty.img not generated in this environment");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-empty.img");
+    let mut fs = support::load_image("ext4-dirty-empty.img");
     let pre_replay = Ext::open_lenient(&mut fs).expect("lenient");
     assert!(pre_replay.needs_journal_recovery());
     let replay = JournalReplay::build(&pre_replay, &mut fs).expect("build");
@@ -98,7 +97,7 @@ fn dirty_orphan_fails_strict_reopen_with_orphan_error() {
         eprintln!("skipping: ext4-dirty-orphan.img not generated in this environment");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan.img");
+    let mut fs = support::load_image("ext4-dirty-orphan.img");
     let pre_replay = Ext::open_lenient(&mut fs).expect("lenient");
     let replay = JournalReplay::build(&pre_replay, &mut fs).expect("build");
     let mut overlay = OverlayReader::new(&mut fs, &replay);
@@ -115,7 +114,7 @@ fn dirty_v3_image_recovers_and_reports_committed_transactions() {
         eprintln!("skipping: ext4-dirty-v3.img not generated in this environment");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-v3.img");
+    let mut fs = support::load_image("ext4-dirty-v3.img");
     let pre_replay = Ext::open_lenient(&mut fs).expect("lenient");
     assert!(pre_replay.needs_journal_recovery());
 
@@ -140,7 +139,7 @@ fn dirty_v3_image_recovers_and_reports_committed_transactions() {
 
 #[test]
 fn journal_uses_superblock_backup_when_journal_inode_mapping_is_corrupt() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     corrupt_journal_inode_extent_header(&mut fs);
 
     let pre_replay = Ext::open_lenient(&mut fs).expect("lenient");
@@ -154,17 +153,20 @@ fn journal_uses_superblock_backup_when_journal_inode_mapping_is_corrupt() {
 
 #[test]
 fn superblock_backup_truncated_journal_stops_replay_without_setup_error() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     corrupt_journal_inode_extent_header(&mut fs);
 
     let block_size = ext_block_size(&fs);
     let journal_block_zero = backup_journal_physical_block(&fs, 0);
-    let sb_start = journal_block_zero as usize * block_size;
+    let sb_start =
+        usize::try_from(journal_block_zero).expect("fixture journal block fits usize") * block_size;
     fs.get_mut()[sb_start + 0x1C..sb_start + 0x20].copy_from_slice(&1u32.to_be_bytes());
 
     let journal_block_one = backup_journal_physical_block(&fs, 1);
-    fs.get_mut()
-        .truncate(journal_block_one as usize * block_size + block_size / 2);
+    fs.get_mut().truncate(
+        usize::try_from(journal_block_one).expect("fixture journal block fits usize") * block_size
+            + block_size / 2,
+    );
 
     let pre_replay = Ext::open_lenient(&mut fs).expect("lenient");
     let replay = JournalReplay::build(&pre_replay, &mut fs)
@@ -180,7 +182,7 @@ fn superblock_backup_truncated_journal_stops_replay_without_setup_error() {
 
 #[test]
 fn journal_fails_when_inode_mapping_and_superblock_backup_are_both_corrupt() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     corrupt_journal_inode_extent_header(&mut fs);
     zero_superblock_journal_backup(&mut fs);
 
@@ -214,17 +216,19 @@ fn corrupt_journal_inode_extent_header(fs: &mut std::io::Cursor<Vec<u8>>) {
     let gdt_off = if block_size == 1024 {
         2048usize
     } else {
-        block_size as usize
+        usize::try_from(block_size).expect("fixture block size fits usize")
     };
     let desc_size = 64usize;
-    let desc_off = gdt_off + group as usize * desc_size;
+    let desc_off = gdt_off + usize::try_from(group).expect("fixture group fits usize") * desc_size;
     let inode_table_block = u32::from_le_bytes(
         fs.get_ref()[desc_off + 8..desc_off + 12]
             .try_into()
             .unwrap(),
     );
-    let inode_off =
-        inode_table_block as usize * block_size as usize + index as usize * inode_size as usize;
+    let inode_off = usize::try_from(inode_table_block)
+        .expect("fixture inode-table block fits usize")
+        * usize::try_from(block_size).expect("fixture block size fits usize")
+        + usize::try_from(index).expect("fixture inode index fits usize") * usize::from(inode_size);
     let i_block_off = inode_off + 40;
     fs.get_mut()[i_block_off..i_block_off + 2].copy_from_slice(&0u16.to_le_bytes());
 }
@@ -245,7 +249,7 @@ fn backup_journal_physical_block(fs: &std::io::Cursor<Vec<u8>>, logical: u32) ->
     let i_block = &fs.get_ref()[off..off + 60];
     let magic = u16::from_le_bytes(i_block[0..2].try_into().unwrap());
     if magic == EXTENT_MAGIC {
-        let entries = u16::from_le_bytes(i_block[2..4].try_into().unwrap()) as usize;
+        let entries = usize::from(u16::from_le_bytes(i_block[2..4].try_into().unwrap()));
         let depth = u16::from_le_bytes(i_block[6..8].try_into().unwrap());
         assert_eq!(depth, 0, "fixture journal backup should use inline extents");
         for idx in 0..entries {
@@ -268,9 +272,8 @@ fn backup_journal_physical_block(fs: &std::io::Cursor<Vec<u8>>, logical: u32) ->
     }
 
     assert!(logical < 12, "fixture direct backup block expected");
+    let logical = usize::try_from(logical).expect("fixture logical block fits usize");
     u64::from(u32::from_le_bytes(
-        i_block[logical as usize * 4..logical as usize * 4 + 4]
-            .try_into()
-            .unwrap(),
+        i_block[logical * 4..logical * 4 + 4].try_into().unwrap(),
     ))
 }

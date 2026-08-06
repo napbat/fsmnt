@@ -21,7 +21,7 @@ const ATTRIBUTE_LIST_ENTRY_HEADER_SIZE: usize = 26;
 
 /// [`AttributeListEntryHeader::name_length`] is an `u8` length field specifying the number of UTF-16 code points.
 /// Hence, the name occupies up to 510 bytes.
-const NAME_MAX_SIZE: usize = (u8::MAX as usize) * mem::size_of::<u16>();
+const NAME_MAX_SIZE: usize = 255 * mem::size_of::<u16>();
 
 #[derive(Clone, Debug, FromBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C, packed)]
@@ -44,34 +44,36 @@ struct AttributeListEntryHeader {
     instance: U16<LittleEndian>,
 }
 
-/// Structure of an $ATTRIBUTE_LIST attribute.
+/// Structure of an $`ATTRIBUTE_LIST` attribute.
 ///
 /// When a File Record lacks space to incorporate further attributes, NTFS creates an additional File Record,
-/// moves all or some of the existing attributes there, and references them via a resident $ATTRIBUTE_LIST attribute
+/// moves all or some of the existing attributes there, and references them via a resident $`ATTRIBUTE_LIST` attribute
 /// in the original File Record.
-/// When you add even more attributes, NTFS may turn the resident $ATTRIBUTE_LIST into a non-resident one to
+/// When you add even more attributes, NTFS may turn the resident $`ATTRIBUTE_LIST` into a non-resident one to
 /// make up the required space.
 ///
-/// An $ATTRIBUTE_LIST attribute can hence be resident or non-resident.
+/// An $`ATTRIBUTE_LIST` attribute can hence be resident or non-resident.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/attributes/attribute_list.html>
 ///
-/// Spec reference: MS-FSCC Section 2.3.2 (ATTRIBUTE_LIST_ENTRY) via NTFS attribute types.
+/// Spec reference: MS-FSCC Section 2.3.2 (`ATTRIBUTE_LIST_ENTRY`) via NTFS attribute types.
 #[derive(Clone, Debug)]
 pub enum NtfsAttributeList<'n, 'f> {
-    /// A resident $ATTRIBUTE_LIST attribute.
+    /// A resident $`ATTRIBUTE_LIST` attribute.
     Resident(&'f [u8], NtfsPosition),
-    /// A non-resident $ATTRIBUTE_LIST attribute.
+    /// A non-resident $`ATTRIBUTE_LIST` attribute.
     NonResident(NtfsNonResidentAttributeValue<'n, 'f>),
 }
 
 impl<'n, 'f> NtfsAttributeList<'n, 'f> {
-    /// Returns an iterator over all entries of this $ATTRIBUTE_LIST attribute (cf. [`NtfsAttributeListEntry`]).
+    /// Returns an iterator over all entries of this $`ATTRIBUTE_LIST` attribute (cf. [`NtfsAttributeListEntry`]).
+    #[must_use]
     pub fn entries(&self) -> NtfsAttributeListEntries<'n, 'f> {
         NtfsAttributeListEntries::new(self.clone())
     }
 
-    /// Returns the absolute position of this $ATTRIBUTE_LIST attribute value within the filesystem, in bytes.
+    /// Returns the absolute position of this $`ATTRIBUTE_LIST` attribute value within the filesystem, in bytes.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         match self {
             Self::Resident(_slice, position) => *position,
@@ -152,7 +154,7 @@ impl<'n, 'f> NtfsAttributeListEntries<'n, 'f> {
         let entry = iter_try!(NtfsAttributeListEntry::new(&mut value_attached, position));
 
         // Advance our iterator to the next entry.
-        iter_try!(value.seek(fs, SeekFrom::Current(entry.list_entry_length() as i64)));
+        iter_try!(value.seek(fs, SeekFrom::Current(i64::from(entry.list_entry_length()))));
 
         Some(Ok(entry))
     }
@@ -172,21 +174,19 @@ impl<'n, 'f> NtfsAttributeListEntries<'n, 'f> {
         // Advance our iterator to the next entry.
         // Guard against zero list_entry_length which would cause an infinite loop.
         let bytes_to_advance =
-            (entry.list_entry_length() as usize).max(ATTRIBUTE_LIST_ENTRY_HEADER_SIZE);
+            usize::from(entry.list_entry_length()).max(ATTRIBUTE_LIST_ENTRY_HEADER_SIZE);
         *slice = slice.get(bytes_to_advance..)?;
         *position += bytes_to_advance;
         Some(Ok(entry))
     }
 }
 
-impl<'n, 'f> fs_common::iter::FsTryIteratorType for NtfsAttributeListEntries<'n, 'f> {
+impl fs_common::iter::FsTryIteratorType for NtfsAttributeListEntries<'_, '_> {
     type Error = NtfsError;
     type Item<'a> = NtfsAttributeListEntry;
 }
 
-impl<'n, 'f, R: Read + Seek> fs_common::iter::FsTryIterator<R>
-    for NtfsAttributeListEntries<'n, 'f>
-{
+impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for NtfsAttributeListEntries<'_, '_> {
     fn try_next(&mut self, r: &mut R) -> Result<Option<NtfsAttributeListEntry>> {
         self.next(r).transpose()
     }
@@ -219,6 +219,7 @@ impl NtfsAttributeListEntry {
     }
 
     /// Returns a reference to the File Record where the attribute is stored.
+    #[must_use]
     pub fn base_file_reference(&self) -> NtfsFileReference {
         self.header.base_file_reference
     }
@@ -229,11 +230,13 @@ impl NtfsAttributeListEntry {
     ///
     /// Multiple entries of the same type and instance number form a connected attribute,
     /// meaning an attribute whose value is stretched over multiple attributes.
+    #[must_use]
     pub fn instance(&self) -> u16 {
         self.header.instance.get()
     }
 
     /// Returns the length of this attribute list entry, in bytes.
+    #[must_use]
     pub fn list_entry_length(&self) -> u16 {
         self.header.list_entry_length.get()
     }
@@ -243,24 +246,28 @@ impl NtfsAttributeListEntry {
     /// This is zero for all unconnected attributes and for the first attribute of a connected attribute.
     /// For subsequent attributes of a connected attribute, this value is nonzero.
     ///
-    /// The lowest_vcn + data length of one attribute equal the lowest_vcn of its following connected attribute.
+    /// The `lowest_vcn` + data length of one attribute equal the `lowest_vcn` of its following connected attribute.
+    #[must_use]
     pub fn lowest_vcn(&self) -> Vcn {
         self.header.lowest_vcn
     }
 
     /// Gets the attribute name and returns it wrapped in a [`U16StrLe`].
-    pub fn name<'a>(&'a self) -> U16StrLe<'a> {
+    #[must_use]
+    pub fn name(&self) -> U16StrLe<'_> {
         U16StrLe(&self.name)
     }
 
     /// Returns the file name length, in bytes.
     ///
     /// A file name has a maximum length of 255 UTF-16 code points (510 bytes).
+    #[must_use]
     pub fn name_length(&self) -> usize {
-        self.header.name_length as usize * mem::size_of::<u16>()
+        usize::from(self.header.name_length) * mem::size_of::<u16>()
     }
 
     /// Returns the absolute position of this attribute list entry within the filesystem, in bytes.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         self.position
     }
@@ -280,6 +287,11 @@ impl NtfsAttributeListEntry {
     /// # Panics
     ///
     /// Panics if a wrong File Record has been passed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the entry has an unsupported attribute type or the
+    /// matching resident attribute cannot be found in `file`.
     pub fn to_attribute<'n, 'f>(&self, file: &'f NtfsFile<'n>) -> Result<NtfsAttribute<'n, 'f>> {
         let file_record_number = self.base_file_reference().file_record_number();
         assert_eq!(
@@ -296,6 +308,11 @@ impl NtfsAttributeListEntry {
     }
 
     /// Reads the entire File Record referenced by this attribute and returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the referenced file record cannot be read or fails
+    /// NTFS record validation.
     pub fn to_file<'n, T>(&self, ntfs: &'n Ntfs, fs: &mut T) -> Result<NtfsFile<'n>>
     where
         T: Read + Seek,
@@ -306,6 +323,11 @@ impl NtfsAttributeListEntry {
 
     /// Returns the type of this NTFS Attribute, or [`NtfsError::UnsupportedAttributeType`]
     /// if it's an unknown type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NtfsError::UnsupportedAttributeType`] when the on-disk type
+    /// identifier is not recognized.
     pub fn ty(&self) -> Result<NtfsAttributeType> {
         NtfsAttributeType::n(self.header.ty.get()).ok_or(NtfsError::UnsupportedAttributeType {
             position: self.position(),
@@ -316,12 +338,12 @@ impl NtfsAttributeListEntry {
     fn validate_entry_and_name_length(&self) -> Result<()> {
         let total_size = ATTRIBUTE_LIST_ENTRY_HEADER_SIZE + self.name_length();
 
-        if total_size > self.list_entry_length() as usize {
+        if total_size > usize::from(self.list_entry_length()) {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position: self.position(),
                 ty: NtfsAttributeType::AttributeList,
-                expected: self.list_entry_length() as u64,
-                actual: total_size as u64,
+                expected: u64::from(self.list_entry_length()),
+                actual: u64::try_from(total_size).unwrap_or(u64::MAX),
             });
         }
 
@@ -336,7 +358,7 @@ mod tests {
     use std::io::Cursor;
 
     /// Build a minimal valid resident attribute list containing one entry.
-    /// The entry describes a $STANDARD_INFORMATION (type 0x10) attribute with no name.
+    /// The entry describes a $`STANDARD_INFORMATION` (type 0x10) attribute with no name.
     fn make_attribute_list_entry() -> Vec<u8> {
         let mut data = Vec::new();
 
@@ -423,7 +445,11 @@ mod tests {
         // ty: Data (0x80)
         data.extend_from_slice(&0x80u32.to_le_bytes());
         // list_entry_length
-        data.extend_from_slice(&(entry_length as u16).to_le_bytes());
+        data.extend_from_slice(
+            &u16::try_from(entry_length)
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
         // name_length: 4 chars
         data.push(4);
         // name_offset: 26 (right after header)
@@ -517,8 +543,12 @@ mod tests {
 
         let mut data = Vec::new();
         data.extend_from_slice(&0x80u32.to_le_bytes()); // ty: Data
-        data.extend_from_slice(&(entry_length as u16).to_le_bytes());
-        data.push(name_chars as u8); // name_length = 255
+        data.extend_from_slice(
+            &u16::try_from(entry_length)
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
+        data.push(u8::try_from(name_chars).expect("test value fits u8")); // name_length = 255
         data.push(26); // name_offset
         data.extend_from_slice(&0i64.to_le_bytes()); // lowest_vcn
         data.extend_from_slice(&9u64.to_le_bytes()); // base_file_reference

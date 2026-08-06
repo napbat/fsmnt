@@ -8,8 +8,6 @@
 //! pre-processing applied before compression.
 #![allow(unsafe_code)]
 
-use alloc::format;
-
 use crate::bitstream::BitReader;
 use crate::e8::undo_e8_preprocessing;
 use crate::huffman::{
@@ -30,6 +28,13 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// Per-tree table bit widths (matched to wimlib).
+mod table;
+
+use table::{
+    LzxDecodeTable, err_input_truncated, err_invalid_data, err_match_offset_exceeds,
+    err_offset_below_minimum, err_output_too_small, err_position_slot_exceeds,
+};
+
 const MAIN_TABLE_BITS: u32 = 11;
 const LENGTH_TABLE_BITS: u32 = 9;
 const ALIGNED_TABLE_BITS: u32 = 7;
@@ -47,7 +52,7 @@ const MAX_CODE_BITS: u32 = 16;
 const MAX_ROOT_SIZE: usize = 1 << MAIN_TABLE_BITS; // 2048
 
 /// Maximum overflow entries. Upper bound: each root overflow slot
-/// spawns a subtable of at most 2^MAX_SUBTABLE_BITS entries.
+/// spawns a subtable of at most `2^MAX_SUBTABLE_BITS` entries.
 /// In practice far fewer are needed. 2048 is generous.
 const MAX_OVERFLOW: usize = 2048;
 
@@ -62,253 +67,16 @@ const MAX_OVERFLOW: usize = 2048;
 ///   `subtable_bits` is stored separately in `subtable_bits_map`.
 type PackedEntry = u16;
 
-/// Decode table with flat subtables for overflow codes.
-///
-/// Root table: `2^table_bits` entries (direct lookup).
-/// Overflow: flat subtables indexed by remaining bits after root lookup.
-/// Worst-case decode = exactly 2 array lookups (no loops, no tree walk).
-struct LzxDecodeTable {
-    /// Root direct-lookup table.
-    direct: [PackedEntry; MAX_ROOT_SIZE],
-    /// Flat subtables for codes longer than `table_bits`.
-    overflow: [PackedEntry; MAX_OVERFLOW],
-    /// Number of overflow entries allocated.
-    overflow_len: u16,
-    /// Root table bits for this instance.
-    table_bits: u32,
-    /// Per-root-slot subtable bit width. Only entries where
-    /// `direct[i] & 0xF == 0` are meaningful. Stored separately
-    /// to keep PackedEntry at 16 bits.
-    subtable_bits_map: [u8; MAX_ROOT_SIZE],
-}
-
-impl LzxDecodeTable {
-    /// Build a decode table from code lengths with the given root table width.
-    fn build(lengths: &[u8], table_bits: u32) -> Result<Self> {
-        debug_assert!((1..=11).contains(&table_bits));
-        validate_lengths(lengths)?;
-        let counts = count_per_length(lengths);
-        validate_code_space(&counts)?;
-        let codes = assign_canonical_codes(lengths, &counts);
-
-        let root_size = 1usize << table_bits;
-
-        let mut tbl = Self {
-            direct: [0u16; MAX_ROOT_SIZE],
-            overflow: [0u16; MAX_OVERFLOW],
-            overflow_len: 0,
-            table_bits,
-            subtable_bits_map: [0u8; MAX_ROOT_SIZE],
-        };
-
-        // First pass: determine which root prefixes need subtables
-        // and how many extra bits each needs.
-        let mut max_extra_per_prefix = [0u8; MAX_ROOT_SIZE];
-        for &(code, len) in &codes {
-            if len == 0 {
-                continue;
-            }
-            let len_u32 = u32::from(len);
-            if len_u32 > table_bits {
-                let prefix = (code >> (len_u32 - table_bits)) as usize;
-                let extra = (len_u32 - table_bits) as u8;
-                if extra > max_extra_per_prefix[prefix] {
-                    max_extra_per_prefix[prefix] = extra;
-                }
-            }
-        }
-
-        // Allocate subtables for each prefix that needs one.
-        // subtable_offset[prefix] = starting index in overflow[].
-        let mut subtable_offset = [0u16; MAX_ROOT_SIZE];
-        for prefix in 0..root_size {
-            let extra = max_extra_per_prefix[prefix];
-            if extra > 0 {
-                let sub_size = 1usize << extra;
-                let offset = tbl.overflow_len as usize;
-                if offset + sub_size > MAX_OVERFLOW {
-                    return Err(Error::InvalidHuffmanTable {
-                        reason: "LZX overflow table exceeds capacity",
-                    });
-                }
-                subtable_offset[prefix] = offset as u16;
-                tbl.direct[prefix] = (offset as u16) << 4; // code_len=0 → subtable
-                tbl.subtable_bits_map[prefix] = extra;
-                tbl.overflow_len += sub_size as u16;
-            }
-        }
-
-        // Second pass: populate direct table and subtables.
-        // Track first valid direct entry for filling unused slots.
-        let mut first_direct_entry: Option<PackedEntry> = None;
-
-        for (sym, &(code, len)) in codes.iter().enumerate() {
-            if len == 0 {
-                continue;
-            }
-            let sym = sym as u16;
-            let len_u32 = u32::from(len);
-
-            if len_u32 <= table_bits {
-                // Short code: fill all suffix positions in root table.
-                let pad = table_bits - len_u32;
-                let base = (code << pad) as usize;
-                let count = 1usize << pad;
-                let entry = (sym << 4) | (len as u16);
-                if first_direct_entry.is_none() {
-                    first_direct_entry = Some(entry);
-                }
-                // Fill entries. For short codes (large pad), this is
-                // the hot path during table build.
-                let dest = &mut tbl.direct[base..base + count];
-                dest.fill(entry);
-            } else {
-                // Long code: insert into the flat subtable.
-                let prefix = (code >> (len_u32 - table_bits)) as usize;
-                let sub_bits = max_extra_per_prefix[prefix] as u32;
-                let offset = subtable_offset[prefix] as usize;
-
-                // Suffix within the subtable, padded to subtable width.
-                let suffix_bits = len_u32 - table_bits;
-                let suffix = code & ((1 << suffix_bits) - 1);
-                let pad = sub_bits - suffix_bits;
-                let sub_base = (suffix << pad) as usize;
-                let sub_count = 1usize << pad;
-                let entry = (sym << 4) | (len as u16);
-
-                let dest = &mut tbl.overflow[offset + sub_base..offset + sub_base + sub_count];
-                dest.fill(entry);
-            }
-        }
-
-        // Fill unused root entries with a valid entry (avoids
-        // undefined behavior on malformed but parseable streams).
-        if let Some(fill) = first_direct_entry {
-            for (slot, &extra) in tbl.direct[..root_size]
-                .iter_mut()
-                .zip(&max_extra_per_prefix[..root_size])
-            {
-                if *slot == 0 && extra == 0 {
-                    *slot = fill;
-                }
-            }
-        }
-
-        Ok(tbl)
-    }
-
-    /// Decode one symbol from the top bits of `next_bits`.
-    /// Returns `(symbol, code_len)`.
-    ///
-    /// Worst case: exactly 2 array lookups (root + subtable).
-    #[inline(always)]
-    fn decode(&self, next_bits: u32) -> (u16, u32) {
-        let index = (next_bits >> (32 - self.table_bits)) as usize;
-        // SAFETY: index = next_bits >> (32 - table_bits).
-        // For table_bits <= 11, index < 2048 = MAX_ROOT_SIZE.
-        let entry = unsafe { *self.direct.get_unchecked(index) };
-        let code_len = (entry & 0xF) as u32;
-        if code_len != 0 {
-            return (entry >> 4, code_len);
-        }
-        // Subtable lookup: one more indexed load, no loop.
-        self.decode_subtable(next_bits, index, entry)
-    }
-
-    #[inline(always)]
-    fn decode_subtable(
-        &self,
-        next_bits: u32,
-        root_index: usize,
-        root_entry: PackedEntry,
-    ) -> (u16, u32) {
-        let sub_offset = (root_entry >> 4) as usize;
-        // SAFETY: subtable_bits_map has MAX_ROOT_SIZE entries,
-        // root_index < MAX_ROOT_SIZE (checked by caller).
-        let sub_bits = unsafe { *self.subtable_bits_map.get_unchecked(root_index) } as u32;
-        // Extract the next `sub_bits` after the root bits.
-        let sub_index = ((next_bits << self.table_bits) >> (32 - sub_bits)) as usize;
-        // SAFETY: sub_offset + sub_index < overflow_len (guaranteed by build).
-        let sub_entry = unsafe { *self.overflow.get_unchecked(sub_offset + sub_index) };
-        (sub_entry >> 4, (sub_entry & 0xF) as u32)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Cold error constructors
-// ---------------------------------------------------------------------------
-
-#[cold]
-#[inline(never)]
-fn err_invalid_data(offset: usize, detail: &str) -> Error {
-    Error::InvalidData {
-        offset,
-        reason: alloc::string::String::from(detail),
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn err_output_too_small(needed: usize, available: usize) -> Error {
-    Error::OutputTooSmall {
-        expected: needed,
-        actual: available,
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn err_input_truncated(offset: usize, expected: usize, actual: usize) -> Error {
-    Error::InputTruncated {
-        offset,
-        expected,
-        actual,
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn err_match_offset_exceeds(offset: usize, match_offset: usize, out_pos: usize) -> Error {
-    Error::InvalidData {
-        offset,
-        reason: format!(
-            "LZX match offset {match_offset} exceeds \
-             output position {out_pos}",
-        ),
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn err_position_slot_exceeds(offset: usize, slot: usize) -> Error {
-    Error::InvalidData {
-        offset,
-        reason: format!(
-            "LZX position slot {slot} exceeds maximum {}",
-            NUM_POSITION_SLOTS - 1,
-        ),
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn err_offset_below_minimum(offset: usize, raw: u32) -> Error {
-    Error::InvalidData {
-        offset,
-        reason: format!("LZX computed offset {raw} below minimum"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Manual bit accumulator state
 // ---------------------------------------------------------------------------
 
-/// Manual 32-bit bit accumulator matching BitReader's MSB-first,
+/// Manual 32-bit bit accumulator matching `BitReader`'s MSB-first,
 /// 16-bit LE word refill semantics.
 ///
 /// `next_bits` holds buffered bits MSB-aligned in a u32. After
-/// consuming N bits (shift left + decrement extra_bit_count),
-/// a refill loads one 16-bit LE word when extra_bit_count < 0.
+/// consuming N bits (shift left + decrement `extra_bit_count`),
+/// a refill loads one 16-bit LE word when `extra_bit_count` < 0.
 struct BitAccum {
     /// Buffered bits, MSB-aligned.
     next_bits: u32,
@@ -345,6 +113,11 @@ const OUTPUT_GUARD: usize = 257;
 /// Returns the number of bytes written to `output`. The caller
 /// must pre-allocate `output` to the expected decompressed size
 /// (at most 32768 bytes for WIM LZX).
+///
+/// # Errors
+///
+/// Returns an error when the bitstream is malformed or references data
+/// outside the available input or output window.
 pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     let mut ctx = DecompressCtx::new(input, output.len());
     let written = ctx.run(output)?;
@@ -453,7 +226,7 @@ impl<'a> DecompressCtx<'a> {
     fn read_block_size(&mut self) -> Result<u32> {
         let is_default = self.reader.read_bits(1)?;
         if is_default == 1 {
-            return Ok(WINDOW_SIZE as u32);
+            return Ok(u32::try_from(WINDOW_SIZE).expect("the LZX window is exactly 32 KiB"));
         }
         let size = self.reader.read_bits(16)?;
         Ok(size)
@@ -467,7 +240,8 @@ impl DecompressCtx<'_> {
     fn read_aligned_tree(&mut self) -> Result<LzxDecodeTable> {
         let mut lens = [0u8; ALIGNED_TREE_SIZE];
         for len in &mut lens {
-            *len = self.reader.read_bits(ALIGNED_CODE_BITS)? as u8;
+            *len = u8::try_from(self.reader.read_bits(ALIGNED_CODE_BITS)?)
+                .expect("aligned-tree code lengths are encoded in three bits");
         }
         LzxDecodeTable::build(&lens, ALIGNED_TABLE_BITS)
     }
@@ -495,7 +269,8 @@ impl DecompressCtx<'_> {
     fn decode_pretree_delta(&mut self, lens: &mut [u8]) -> Result<()> {
         let mut pre_lens = [0u8; PRE_TREE_SIZE];
         for pl in &mut pre_lens {
-            *pl = self.reader.read_bits(PRE_TREE_CODE_BITS)? as u8;
+            *pl = u8::try_from(self.reader.read_bits(PRE_TREE_CODE_BITS)?)
+                .expect("pre-tree code lengths are encoded in four bits");
         }
         let pre_table = HuffmanTable::from_code_lengths(&pre_lens, 6)?;
         decode_code_lengths(&mut self.reader, &pre_table, lens)
@@ -524,7 +299,7 @@ fn decode_code_lengths(
     let mut i = 0;
 
     while i < total {
-        let sym = pre_table.decode_symbol(reader)? as u32;
+        let sym = u32::from(pre_table.decode_symbol(reader)?);
 
         if sym < u32::from(PRETREE_ZERO_SHORT) {
             let old = u32::from(lens[i]);
@@ -546,7 +321,7 @@ fn decode_code_lengths(
             i = end;
         } else if sym == u32::from(PRETREE_REPEAT) {
             let run = reader.read_bits(REPEAT_BITS)? as usize + SHORT_RUN_BASE;
-            let delta_sym = pre_table.decode_symbol(reader)? as u32;
+            let delta_sym = u32::from(pre_table.decode_symbol(reader)?);
             let old = u32::from(lens[i]);
             let new_len = ((old + NUM_CODE_LENGTHS - delta_sym) % NUM_CODE_LENGTHS) as u8;
             let end = (i + run).min(total);
@@ -567,10 +342,10 @@ fn decode_code_lengths(
 
 // -- Compressed block decoding ---------------------------------------------
 
-/// Compute the logical bit position from BitReader state.
-/// The reader has loaded words up to byte_pos, and has
-/// bits_remaining bits buffered. The logical position (next
-/// bit to decode) is byte_pos*8 - bits_remaining.
+/// Compute the logical bit position from `BitReader` state.
+/// The reader has loaded words up to `byte_pos`, and has
+/// `bits_remaining` bits buffered. The logical position (next
+/// bit to decode) is `byte_pos`*8 - `bits_remaining`.
 #[inline]
 fn logical_bit_pos(reader_byte_pos: usize, reader_bits_remaining: u32) -> usize {
     reader_byte_pos * 8 - reader_bits_remaining as usize
@@ -583,7 +358,7 @@ fn logical_bit_pos(reader_byte_pos: usize, reader_bits_remaining: u32) -> usize 
 #[inline]
 fn init_accumulator(input: &[u8], bit_pos: usize) -> BitAccum {
     let word_byte_pos = (bit_pos / 16) * 2;
-    let skip_bits = (bit_pos % 16) as u32;
+    let skip_bits = u32::try_from(bit_pos % 16).expect("a bit offset within a word is below 16");
 
     // Load up to two 16-bit LE words (32 bits).
     let mut next_bits: u32 = 0;
@@ -592,7 +367,7 @@ fn init_accumulator(input: &[u8], bit_pos: usize) -> BitAccum {
 
     for _ in 0..2 {
         if byte_pos + 2 <= input.len() {
-            let w = u16::from_le_bytes([input[byte_pos], input[byte_pos + 1]]) as u32;
+            let w = u32::from(u16::from_le_bytes([input[byte_pos], input[byte_pos + 1]]));
             byte_pos += 2;
             next_bits = (next_bits << 16) | w;
             loaded_bits += 16;
@@ -608,7 +383,9 @@ fn init_accumulator(input: &[u8], bit_pos: usize) -> BitAccum {
 
     // Skip bits already consumed.
     next_bits <<= skip_bits;
-    let extra_bit_count = loaded_bits - 16 - skip_bits as i32;
+    let extra_bit_count = loaded_bits
+        - 16
+        - i32::try_from(skip_bits).expect("the initial skip is at most one 16-bit word");
 
     let mut a = BitAccum {
         next_bits,
@@ -618,25 +395,31 @@ fn init_accumulator(input: &[u8], bit_pos: usize) -> BitAccum {
 
     // Top off if below the threshold.
     if a.extra_bit_count < 0 && a.byte_pos + 2 <= input.len() {
-        let w = u16::from_le_bytes([input[a.byte_pos], input[a.byte_pos + 1]]) as u32;
+        let w = u32::from(u16::from_le_bytes([
+            input[a.byte_pos],
+            input[a.byte_pos + 1],
+        ]));
         a.byte_pos += 2;
-        a.next_bits |= w << ((-a.extra_bit_count) as u32);
+        let deficit = u32::try_from(-a.extra_bit_count)
+            .expect("this refill branch requires a negative bit count");
+        a.next_bits |= w << deficit;
         a.extra_bit_count += 16;
     }
 
     a
 }
 
-/// Restore BitReader state from a 64-bit accumulator position.
-/// Creates a new BitReader pointing at the correct position in
+/// Restore `BitReader` state from a 64-bit accumulator position.
+/// Creates a new `BitReader` pointing at the correct position in
 /// the input and pre-loads any partially consumed word.
-/// Returns `(reader, base_offset)` where base_offset is the
+/// Returns `(reader, base_offset)` where `base_offset` is the
 /// byte offset into `input` where the reader's sub-slice starts.
 fn restore_reader<'a>(input: &'a [u8], accum: &BitAccum) -> (BitReader<'a>, usize) {
-    let valid_bits = (accum.extra_bit_count + 16).max(0) as u32;
+    let valid_bits = u32::try_from((accum.extra_bit_count + 16).max(0))
+        .expect("max with zero makes the valid-bit count nonnegative");
     let end_bit_pos = accum.byte_pos * 8 - valid_bits as usize;
     let end_word_byte = (end_bit_pos / 16) * 2;
-    let end_skip = (end_bit_pos % 16) as u32;
+    let end_skip = u32::try_from(end_bit_pos % 16).expect("a bit offset within a word is below 16");
 
     let mut reader = BitReader::new(&input[end_word_byte..]);
     reader.set_zero_fill(true);
@@ -653,29 +436,40 @@ fn restore_reader<'a>(input: &'a [u8], accum: &BitAccum) -> (BitReader<'a>, usiz
 
 /// Refill the accumulator from the data stream.
 /// Loads one 16-bit LE word when available, or zero-fills.
-#[inline(always)]
-fn refill_checked(data: &[u8], accum: &mut BitAccum) -> Result<()> {
+#[inline]
+fn refill_checked(data: &[u8], accum: &mut BitAccum) {
     if accum.byte_pos + 2 <= data.len() {
-        let w = u16::from_le_bytes([data[accum.byte_pos], data[accum.byte_pos + 1]]) as u32;
+        let w = u32::from(u16::from_le_bytes([
+            data[accum.byte_pos],
+            data[accum.byte_pos + 1],
+        ]));
         accum.byte_pos += 2;
-        accum.next_bits |= w << ((-accum.extra_bit_count) as u32);
+        let deficit = u32::try_from(-accum.extra_bit_count)
+            .expect("this refill branch requires a negative bit count");
+        accum.next_bits |= w << deficit;
         accum.extra_bit_count += 16;
     } else {
         // Zero-fill: no more data.
         accum.extra_bit_count += 16;
     }
-    Ok(())
+}
+
+#[inline]
+fn literal_byte(symbol: u16) -> u8 {
+    u8::try_from(symbol).expect("literal symbols are below 256")
 }
 
 /// Refill the accumulator using unchecked reads.
 /// Loads one 16-bit LE word.
 ///
 /// SAFETY: caller must ensure `accum.byte_pos + 2 <= data.len()`.
-#[inline(always)]
+#[inline]
 unsafe fn refill_unchecked(data: &[u8], accum: &mut BitAccum) {
-    let w = unsafe { crate::raw::read_u16_le(data, accum.byte_pos) } as u32;
+    let w = u32::from(unsafe { crate::raw::read_u16_le(data, accum.byte_pos) });
     accum.byte_pos += 2;
-    accum.next_bits |= w << ((-accum.extra_bit_count) as u32);
+    let deficit = u32::try_from(-accum.extra_bit_count)
+        .expect("the unchecked refill requires a negative bit count");
+    accum.next_bits |= w << deficit;
     accum.extra_bit_count += 16;
 }
 
@@ -727,7 +521,8 @@ impl DecompressCtx<'_> {
             let (symbol, code_len) = main_tbl.decode(a.next_bits);
 
             a.next_bits <<= code_len;
-            a.extra_bit_count -= code_len as i32;
+            a.extra_bit_count -=
+                i32::try_from(code_len).expect("LZX code lengths are at most 16 bits");
 
             if a.extra_bit_count < 0 {
                 // SAFETY: INPUT_GUARD ensures byte_pos + 2 <= data_len.
@@ -737,7 +532,9 @@ impl DecompressCtx<'_> {
             if symbol < 256 {
                 // SAFETY: OUTPUT_GUARD ensures out_pos < block_end
                 // <= output.len().
-                unsafe { *output.get_unchecked_mut(out_pos) = symbol as u8 };
+                unsafe {
+                    *output.get_unchecked_mut(out_pos) = literal_byte(symbol);
+                }
                 out_pos += 1;
             } else {
                 // Inline match decode — no &mut self in the hot loop.
@@ -750,7 +547,8 @@ impl DecompressCtx<'_> {
                 } else {
                     let (len_sym, len_code_len) = len_tbl.decode(a.next_bits);
                     a.next_bits <<= len_code_len;
-                    a.extra_bit_count -= len_code_len as i32;
+                    a.extra_bit_count -=
+                        i32::try_from(len_code_len).expect("LZX code lengths are at most 16 bits");
                     if a.extra_bit_count < 0 {
                         unsafe { refill_unchecked(data, &mut a) };
                     }
@@ -771,7 +569,8 @@ impl DecompressCtx<'_> {
                         let off = read_offset_fast(position_slot, aligned_tbl, data, &mut a);
                         r2 = r1;
                         r1 = r0;
-                        r0 = off as u32;
+                        r0 = u32::try_from(off)
+                            .expect("LZX offsets are bounded by the 32 KiB window");
                         off
                     }
                 };
@@ -805,17 +604,18 @@ impl DecompressCtx<'_> {
             let (symbol, code_len) = main_tbl.decode(a.next_bits);
 
             a.next_bits <<= code_len;
-            a.extra_bit_count -= code_len as i32;
+            a.extra_bit_count -=
+                i32::try_from(code_len).expect("LZX code lengths are at most 16 bits");
 
             if a.extra_bit_count < 0 {
-                refill_checked(data, &mut a)?;
+                refill_checked(data, &mut a);
             }
 
             if symbol < 256 {
                 if self.out_pos >= output.len() {
                     return Err(err_output_too_small(self.out_pos + 1, output.len()));
                 }
-                output[self.out_pos] = symbol as u8;
+                output[self.out_pos] = literal_byte(symbol);
                 self.out_pos += 1;
             } else {
                 let (offset, length) =
@@ -852,9 +652,10 @@ impl DecompressCtx<'_> {
         } else {
             let (len_sym, len_code_len) = len_tbl.decode(a.next_bits);
             a.next_bits <<= len_code_len;
-            a.extra_bit_count -= len_code_len as i32;
+            a.extra_bit_count -=
+                i32::try_from(len_code_len).expect("LZX code lengths are at most 16 bits");
             if a.extra_bit_count < 0 {
-                refill_checked(data, a)?;
+                refill_checked(data, a);
             }
             7 + len_sym as usize + MIN_MATCH_LEN
         };
@@ -892,7 +693,8 @@ impl DecompressCtx<'_> {
                 let offset = read_offset_slow(position_slot, aligned_tbl, data, a)?;
                 self.r2 = self.r1;
                 self.r1 = self.r0;
-                self.r0 = offset as u32;
+                self.r0 =
+                    u32::try_from(offset).expect("LZX offsets are bounded by the 32 KiB window");
                 Ok(offset)
             }
         }
@@ -903,10 +705,10 @@ impl DecompressCtx<'_> {
 ///
 /// # Safety invariants (no runtime checks needed):
 /// - `position_slot < NUM_POSITION_SLOTS` is guaranteed because the
-///   decode table only produces symbols 0..MAIN_TREE_SIZE, giving
-///   position_slot = (symbol - 256) / 8 in [0, 29].
+///   decode table only produces symbols `0..MAIN_TREE_SIZE`, giving
+///   `position_slot` = (symbol - 256) / 8 in [0, 29].
 /// - `raw >= OFFSET_ADJUSTMENT` is guaranteed for slot >= 3 because
-///   POSITION_BASE[3] = 3 >= OFFSET_ADJUSTMENT = 2.
+///   `POSITION_BASE`[3] = 3 >= `OFFSET_ADJUSTMENT` = 2.
 #[inline]
 fn read_offset_fast(
     position_slot: usize,
@@ -929,7 +731,8 @@ fn read_offset_fast(
             let vb = if vb_count > 0 {
                 let v = a.next_bits >> (32 - vb_count);
                 a.next_bits <<= vb_count;
-                a.extra_bit_count -= vb_count as i32;
+                a.extra_bit_count -=
+                    i32::try_from(vb_count).expect("LZX offset fields use at most 17 bits");
                 if a.extra_bit_count < 0 {
                     // SAFETY: INPUT_GUARD headroom.
                     unsafe { refill_unchecked(data, a) };
@@ -942,15 +745,17 @@ fn read_offset_fast(
 
             let (aligned_sym, aligned_len) = atbl.decode(a.next_bits);
             a.next_bits <<= aligned_len;
-            a.extra_bit_count -= aligned_len as i32;
+            a.extra_bit_count -=
+                i32::try_from(aligned_len).expect("aligned-tree codes use at most seven bits");
             if a.extra_bit_count < 0 {
                 unsafe { refill_unchecked(data, a) };
             }
-            aligned_bits = aligned_sym as u32;
+            aligned_bits = u32::from(aligned_sym);
         } else {
             let v = a.next_bits >> (32 - extra);
             a.next_bits <<= extra;
-            a.extra_bit_count -= extra as i32;
+            a.extra_bit_count -=
+                i32::try_from(extra).expect("LZX offset fields use at most 17 bits");
             if a.extra_bit_count < 0 {
                 unsafe { refill_unchecked(data, a) };
             }
@@ -960,7 +765,7 @@ fn read_offset_fast(
     } else if extra > 0 {
         let v = a.next_bits >> (32 - extra);
         a.next_bits <<= extra;
-        a.extra_bit_count -= extra as i32;
+        a.extra_bit_count -= i32::try_from(extra).expect("LZX offset fields use at most 17 bits");
         if a.extra_bit_count < 0 {
             unsafe { refill_unchecked(data, a) };
         }
@@ -1000,9 +805,10 @@ fn read_offset_slow(
             let vb = if vb_count > 0 {
                 let v = a.next_bits >> (32 - vb_count);
                 a.next_bits <<= vb_count;
-                a.extra_bit_count -= vb_count as i32;
+                a.extra_bit_count -=
+                    i32::try_from(vb_count).expect("LZX offset fields use at most 17 bits");
                 if a.extra_bit_count < 0 {
-                    refill_checked(data, a)?;
+                    refill_checked(data, a);
                 }
                 v
             } else {
@@ -1012,17 +818,19 @@ fn read_offset_slow(
 
             let (aligned_sym, aligned_len) = atbl.decode(a.next_bits);
             a.next_bits <<= aligned_len;
-            a.extra_bit_count -= aligned_len as i32;
+            a.extra_bit_count -=
+                i32::try_from(aligned_len).expect("aligned-tree codes use at most seven bits");
             if a.extra_bit_count < 0 {
-                refill_checked(data, a)?;
+                refill_checked(data, a);
             }
-            aligned_bits = aligned_sym as u32;
+            aligned_bits = u32::from(aligned_sym);
         } else {
             let v = a.next_bits >> (32 - extra);
             a.next_bits <<= extra;
-            a.extra_bit_count -= extra as i32;
+            a.extra_bit_count -=
+                i32::try_from(extra).expect("LZX offset fields use at most 17 bits");
             if a.extra_bit_count < 0 {
-                refill_checked(data, a)?;
+                refill_checked(data, a);
             }
             verbatim_bits = v;
             aligned_bits = 0;
@@ -1030,9 +838,9 @@ fn read_offset_slow(
     } else if extra > 0 {
         let v = a.next_bits >> (32 - extra);
         a.next_bits <<= extra;
-        a.extra_bit_count -= extra as i32;
+        a.extra_bit_count -= i32::try_from(extra).expect("LZX offset fields use at most 17 bits");
         if a.extra_bit_count < 0 {
-            refill_checked(data, a)?;
+            refill_checked(data, a);
         }
         verbatim_bits = v;
         aligned_bits = 0;
@@ -1149,660 +957,5 @@ fn copy_match(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-    use alloc::vec::Vec;
-
-    use crate::test_bitwriter::BitWriter;
-
-    // -- Canonical code assignment ----------------------------------------
-
-    fn assign_codes(lengths: &[u8]) -> Vec<(u32, u8)> {
-        let mut counts = [0u32; 17];
-        for &len in lengths {
-            if len > 0 && (len as usize) < counts.len() {
-                counts[len as usize] += 1;
-            }
-        }
-        let mut next_code = [0u32; 17];
-        let mut code: u32 = 0;
-        for bits in 1..17usize {
-            code = (code + counts[bits - 1]) << 1;
-            next_code[bits] = code;
-        }
-        let mut codes = vec![(0u32, 0u8); lengths.len()];
-        for (sym, &len) in lengths.iter().enumerate() {
-            let l = len as usize;
-            if l > 0 && l < 17 {
-                codes[sym] = (next_code[l], len);
-                next_code[l] += 1;
-            }
-        }
-        codes
-    }
-
-    fn encode_symbol(w: &mut BitWriter, codes: &[(u32, u8)], sym: usize) {
-        let (code, len) = codes[sym];
-        w.write_bits(code, u32::from(len));
-    }
-
-    // -- Pre-tree and tree encoding helpers --------------------------------
-
-    /// Encode code lengths via a pre-tree, writing to the BitWriter.
-    /// `prev` contains previous block's lengths (or zeros for first block).
-    /// This writes the 20 x 4-bit pre-tree lengths, then the symbols.
-    fn write_code_lengths_simple(w: &mut BitWriter, target_lens: &[u8], prev_lens: &[u8]) {
-        // For simplicity in tests, we only use symbols 0-16 (direct
-        // delta encoding). Compute deltas.
-        let mut deltas = Vec::with_capacity(target_lens.len());
-        for (i, &target) in target_lens.iter().enumerate() {
-            let old = if i < prev_lens.len() { prev_lens[i] } else { 0 };
-            let delta_sym =
-                ((old as u32 + NUM_CODE_LENGTHS - target as u32) % NUM_CODE_LENGTHS) as u8;
-            deltas.push(delta_sym);
-        }
-
-        // Collect unique delta symbols and assign short code lengths.
-        // Use a uniform tree over all used delta symbols.
-        let mut used = [false; PRE_TREE_SIZE];
-        for &d in &deltas {
-            used[d as usize] = true;
-        }
-        let used_count = used.iter().filter(|&&u| u).count();
-        let code_len = if used_count <= 1 {
-            1u8
-        } else {
-            // Smallest power of 2 >= used_count
-            let mut bits = 1u8;
-            while (1usize << bits) < used_count {
-                bits += 1;
-            }
-            bits
-        };
-
-        // Assign code lengths: all used symbols get `code_len`.
-        let mut pre_lens = [0u8; PRE_TREE_SIZE];
-        for (i, &u) in used.iter().enumerate() {
-            if u {
-                pre_lens[i] = code_len;
-            }
-        }
-
-        // Write the 20 pre-tree code lengths (4 bits each).
-        for &pl in &pre_lens {
-            w.write_bits(u32::from(pl), PRE_TREE_CODE_BITS);
-        }
-
-        // Build codes for the pre-tree.
-        let pre_codes = assign_codes(&pre_lens);
-
-        // Write each delta symbol using the pre-tree.
-        for &d in &deltas {
-            encode_symbol(w, &pre_codes, d as usize);
-        }
-    }
-
-    /// Write a complete verbatim block header and body for the given
-    /// literal bytes.
-    fn build_verbatim_literals_block(literals: &[u8]) -> Vec<u8> {
-        let mut w = BitWriter::new();
-
-        // Block type = 1 (verbatim), 3 bits.
-        w.write_bits(BLOCK_VERBATIM, 3);
-        // Default block size flag = 1 (32768).
-        w.write_bits(1, 1);
-
-        // Build a main tree where all used literal symbols have the
-        // same code length. The main tree has 496 symbols.
-        let mut main_lens = [0u8; MAIN_TREE_SIZE];
-
-        // Collect unique literals.
-        let mut used_lits = [false; 256];
-        for &b in literals {
-            used_lits[b as usize] = true;
-        }
-        let lit_count = used_lits.iter().filter(|&&u| u).count().max(1);
-
-        // Assign uniform code length.
-        let code_len = {
-            let mut bits = 1u8;
-            while (1usize << bits) < lit_count {
-                bits += 1;
-            }
-            bits
-        };
-        for (i, &u) in used_lits.iter().enumerate() {
-            if u {
-                main_lens[i] = code_len;
-            }
-        }
-
-        // Write main tree: first half (0..256), second half (256..496).
-        let prev_main = [0u8; MAIN_TREE_SIZE];
-        write_code_lengths_simple(&mut w, &main_lens[..256], &prev_main[..256]);
-        write_code_lengths_simple(
-            &mut w,
-            &main_lens[256..MAIN_TREE_SIZE],
-            &prev_main[256..MAIN_TREE_SIZE],
-        );
-
-        // Length tree: all zeros is fine since we have no matches.
-        // But we must encode it. Use symbol 17 (run of zeros).
-        // Actually, the length tree has 249 elements. We need at
-        // least one non-zero. Let's just give symbol 0 a code length
-        // of 1 for a valid single-symbol tree.
-        let mut length_lens = [0u8; LENGTH_TREE_SIZE];
-        length_lens[0] = 1;
-        let prev_length = [0u8; LENGTH_TREE_SIZE];
-        write_code_lengths_simple(&mut w, &length_lens, &prev_length);
-
-        // Now encode the literal symbols.
-        let main_codes = assign_codes(&main_lens);
-        for &b in literals {
-            encode_symbol(&mut w, &main_codes, b as usize);
-        }
-
-        w.finish(2)
-    }
-
-    /// Build a verbatim block with literals and matches.
-    /// `ops` is a sequence of operations to encode.
-    fn build_verbatim_block_with_matches(
-        ops: &[TestOp],
-        prev_main: &[u8; MAIN_TREE_SIZE],
-        prev_length: &[u8; LENGTH_TREE_SIZE],
-    ) -> (Vec<u8>, [u8; MAIN_TREE_SIZE], [u8; LENGTH_TREE_SIZE]) {
-        let mut w = BitWriter::new();
-
-        // Block type = 1 (verbatim).
-        w.write_bits(BLOCK_VERBATIM, 3);
-        // Default block size.
-        w.write_bits(1, 1);
-
-        // Determine which main tree and length tree symbols we need.
-        let mut main_used = [false; MAIN_TREE_SIZE];
-        let mut length_used = [false; LENGTH_TREE_SIZE];
-
-        for op in ops {
-            match op {
-                TestOp::Literal(b) => {
-                    main_used[*b as usize] = true;
-                }
-                TestOp::Match {
-                    position_slot,
-                    length_header,
-                    length_extra,
-                    ..
-                } => {
-                    let main_sym = 256 + position_slot * 8 + length_header;
-                    main_used[main_sym] = true;
-                    if *length_header == 7 {
-                        length_used[*length_extra] = true;
-                    }
-                }
-            }
-        }
-
-        // Assign code lengths for used symbols.
-        let mut main_lens = [0u8; MAIN_TREE_SIZE];
-        let main_count = main_used.iter().filter(|&&u| u).count().max(1);
-        let main_cl = {
-            let mut bits = 1u8;
-            while (1usize << bits) < main_count {
-                bits += 1;
-            }
-            bits
-        };
-        for (i, &u) in main_used.iter().enumerate() {
-            if u {
-                main_lens[i] = main_cl;
-            }
-        }
-
-        let mut length_lens = [0u8; LENGTH_TREE_SIZE];
-        let len_count = length_used.iter().filter(|&&u| u).count();
-        if len_count > 0 {
-            let len_cl = {
-                let mut bits = 1u8;
-                while (1usize << bits) < len_count {
-                    bits += 1;
-                }
-                bits
-            };
-            for (i, &u) in length_used.iter().enumerate() {
-                if u {
-                    length_lens[i] = len_cl;
-                }
-            }
-        } else {
-            // Need at least one valid symbol.
-            length_lens[0] = 1;
-        }
-
-        // Write trees.
-        write_code_lengths_simple(&mut w, &main_lens[..256], &prev_main[..256]);
-        write_code_lengths_simple(
-            &mut w,
-            &main_lens[256..MAIN_TREE_SIZE],
-            &prev_main[256..MAIN_TREE_SIZE],
-        );
-        write_code_lengths_simple(&mut w, &length_lens, prev_length);
-
-        // Encode operations.
-        let main_codes = assign_codes(&main_lens);
-        let length_codes = assign_codes(&length_lens);
-
-        for op in ops {
-            match op {
-                TestOp::Literal(b) => {
-                    encode_symbol(&mut w, &main_codes, *b as usize);
-                }
-                TestOp::Match {
-                    position_slot,
-                    length_header,
-                    length_extra,
-                    footer_value,
-                } => {
-                    let main_sym = 256 + position_slot * 8 + length_header;
-                    encode_symbol(&mut w, &main_codes, main_sym);
-
-                    if *length_header == 7 {
-                        encode_symbol(&mut w, &length_codes, *length_extra);
-                    }
-
-                    // Write footer bits for position slot.
-                    if *position_slot >= 3 {
-                        let extra = u32::from(FOOTER_BITS[*position_slot]);
-                        w.write_bits(*footer_value, extra);
-                    }
-                }
-            }
-        }
-
-        (w.finish(2), main_lens, length_lens)
-    }
-
-    #[derive(Clone)]
-    enum TestOp {
-        Literal(u8),
-        Match {
-            position_slot: usize,
-            length_header: usize,
-            length_extra: usize,
-            footer_value: u32,
-        },
-    }
-
-    // -- Uncompressed block builder ----------------------------------------
-
-    fn build_uncompressed_block(data: &[u8], r0: u32, r1: u32, r2: u32) -> Vec<u8> {
-        let mut w = BitWriter::new();
-        // Block type = 3 (uncompressed), 3 bits.
-        w.write_bits(BLOCK_UNCOMPRESSED, 3);
-        // Non-default block size.
-        w.write_bits(0, 1);
-        w.write_bits(data.len() as u32, 16);
-
-        // Flush the bitstream before writing raw bytes.
-        let mut result = w.finish(2);
-        // Remove the trailing padding from BitWriter::finish.
-        result.truncate(result.len() - 4);
-
-        // Align: the BitWriter already wrote full 16-bit words, so
-        // byte_pos after align_to_u16 should be at the current position.
-        // However, we need to ensure proper alignment. The data after
-        // the bitstream should start at an even offset.
-        if !result.len().is_multiple_of(2) {
-            result.push(0);
-        }
-
-        // R0, R1, R2 as raw u32 LE.
-        result.extend_from_slice(&r0.to_le_bytes());
-        result.extend_from_slice(&r1.to_le_bytes());
-        result.extend_from_slice(&r2.to_le_bytes());
-
-        // Raw data bytes.
-        result.extend_from_slice(data);
-
-        // If odd count, add a padding byte.
-        if !data.len().is_multiple_of(2) {
-            result.push(0);
-        }
-
-        result
-    }
-
-    // -- Tests -------------------------------------------------------------
-
-    #[test]
-    fn uncompressed_block_passthrough() {
-        let payload = b"Hello, LZX!";
-        let input = build_uncompressed_block(payload, 1, 1, 1);
-        let mut output = [0u8; 11];
-        let n = decompress(&input, &mut output).expect("decompress failed");
-        // E8 post-processing may modify data containing 0xE8, but
-        // "Hello, LZX!" has no 0xE8 bytes so output should match.
-        assert_eq!(n, 11);
-        assert_eq!(&output[..n], payload);
-    }
-
-    #[test]
-    fn verbatim_block_literals_only() {
-        let literals = [0x41u8, 0x42, 0x43, 0x44]; // "ABCD"
-        let input = build_verbatim_literals_block(&literals);
-        let mut output = [0u8; 4];
-        let n = decompress(&input, &mut output).expect("decompress failed");
-        assert_eq!(n, 4);
-        assert_eq!(&output[..4], b"ABCD");
-    }
-
-    #[test]
-    fn verbatim_block_with_match() {
-        // Write "ABCD", then a match that copies 4 bytes from offset 4.
-        // Position slot 4 has base=4, footer_bits=1.
-        // Offset = base + footer_value - 2 = 4 + 0 - 2 = 2.
-        // Wait, we want offset=4. So 4 + footer_value - 2 = 4 →
-        // footer_value = 2. But footer_bits for slot 4 is 1, max
-        // value is 1. So slot 4 can encode offsets 2..3.
-        //
-        // For offset=4: 4 + 2 = 6 (stored). Slot 5: base=6,
-        // footer_bits=1. 6 + footer - 2 = offset → 6+0-2=4. Yes!
-        // Use position slot 5, footer_value=0.
-        let ops = vec![
-            TestOp::Literal(b'A'),
-            TestOp::Literal(b'B'),
-            TestOp::Literal(b'C'),
-            TestOp::Literal(b'D'),
-            TestOp::Match {
-                position_slot: 5,
-                length_header: 2, // length = 2 + 2 = 4
-                length_extra: 0,
-                footer_value: 0,
-            },
-        ];
-        let prev_main = [0u8; MAIN_TREE_SIZE];
-        let prev_length = [0u8; LENGTH_TREE_SIZE];
-        let (input, _, _) = build_verbatim_block_with_matches(&ops, &prev_main, &prev_length);
-
-        let mut output = [0u8; 8];
-        let n = decompress(&input, &mut output).expect("decompress failed");
-        assert_eq!(n, 8);
-        assert_eq!(&output[..8], b"ABCDABCD");
-    }
-
-    #[test]
-    fn aligned_offset_block() {
-        // Build an aligned offset block. We need to construct one
-        // manually since our test helpers only do verbatim.
-        let mut w = BitWriter::new();
-
-        // Block type = 2 (aligned), 3 bits.
-        w.write_bits(BLOCK_ALIGNED, 3);
-        // Default block size.
-        w.write_bits(1, 1);
-
-        // Aligned offset tree: 8 entries, 3 bits each.
-        // Use uniform 3-bit codes for all 8 symbols.
-        let aligned_lens = [3u8; ALIGNED_TREE_SIZE];
-        for &al in &aligned_lens {
-            w.write_bits(u32::from(al), ALIGNED_CODE_BITS);
-        }
-
-        // Main tree: we need literal 'X' (0x58) and a match symbol.
-        // Use position slot 6 (base=8, footer=2): offset = 8+fb-2.
-        // With aligned: read (2-3)=negative, so footer < 3 → read
-        // directly. Actually footer_bits for slot 6 = 2 which is
-        // < 3, so aligned tree isn't used for this slot.
-        //
-        // Use slot 7: base=12, footer=2. Still < 3.
-        // Use slot 8: base=16, footer=3. Aligned IS used.
-        // offset = 16 + (verbatim<<3) + aligned - 2
-        // For offset=14: 16 + 0 + 0 - 2 = 14. Yes!
-        //
-        // We need 14 literal bytes first, then a match at offset 14.
-        let mut ops = Vec::new();
-        for i in 0..14u8 {
-            ops.push(TestOp::Literal(b'A' + (i % 4)));
-        }
-        // Match: slot 8, length_header=2 (len=4), footer: verbatim
-        // bits = 0 (0 bits since footer-3=0), aligned = 0.
-        ops.push(TestOp::Match {
-            position_slot: 8,
-            length_header: 2,
-            length_extra: 0,
-            footer_value: 0, // Not used directly; handled below.
-        });
-
-        // Determine main/length tree symbols.
-        let mut main_used = [false; MAIN_TREE_SIZE];
-        let mut length_used = [false; LENGTH_TREE_SIZE];
-        for op in &ops {
-            match op {
-                TestOp::Literal(b) => main_used[*b as usize] = true,
-                TestOp::Match {
-                    position_slot,
-                    length_header,
-                    length_extra,
-                    ..
-                } => {
-                    main_used[256 + position_slot * 8 + length_header] = true;
-                    if *length_header == 7 {
-                        length_used[*length_extra] = true;
-                    }
-                }
-            }
-        }
-
-        let mut main_lens = [0u8; MAIN_TREE_SIZE];
-        let main_count = main_used.iter().filter(|&&u| u).count().max(1);
-        let main_cl = {
-            let mut bits = 1u8;
-            while (1usize << bits) < main_count {
-                bits += 1;
-            }
-            bits
-        };
-        for (i, &u) in main_used.iter().enumerate() {
-            if u {
-                main_lens[i] = main_cl;
-            }
-        }
-
-        let mut length_lens = [0u8; LENGTH_TREE_SIZE];
-        length_lens[0] = 1;
-
-        let prev_main = [0u8; MAIN_TREE_SIZE];
-        let prev_length = [0u8; LENGTH_TREE_SIZE];
-
-        // Write main tree (two halves) and length tree.
-        write_code_lengths_simple(&mut w, &main_lens[..256], &prev_main[..256]);
-        write_code_lengths_simple(
-            &mut w,
-            &main_lens[256..MAIN_TREE_SIZE],
-            &prev_main[256..MAIN_TREE_SIZE],
-        );
-        write_code_lengths_simple(&mut w, &length_lens, &prev_length);
-
-        // Encode data.
-        let main_codes = assign_codes(&main_lens);
-        let aligned_codes = assign_codes(&aligned_lens);
-
-        for op in &ops {
-            match op {
-                TestOp::Literal(b) => {
-                    encode_symbol(&mut w, &main_codes, *b as usize);
-                }
-                TestOp::Match {
-                    position_slot,
-                    length_header,
-                    length_extra,
-                    ..
-                } => {
-                    let main_sym = 256 + position_slot * 8 + length_header;
-                    encode_symbol(&mut w, &main_codes, main_sym);
-
-                    if *length_header == 7 {
-                        let length_codes_local = assign_codes(&length_lens);
-                        encode_symbol(&mut w, &length_codes_local, *length_extra);
-                    }
-
-                    // Footer bits for slot 8: 3 bits.
-                    // Aligned: read (3-3)=0 verbatim bits, then 3
-                    // aligned bits.
-                    // We want aligned_bits=0 → symbol 0.
-                    encode_symbol(&mut w, &aligned_codes, 0);
-                }
-            }
-        }
-
-        let input = w.finish(2);
-        let mut output = [0u8; 18]; // 14 + 4
-        let n = decompress(&input, &mut output).expect("decompress failed");
-        assert_eq!(n, 18);
-        // The match copies 4 bytes from offset 14 (the start).
-        assert_eq!(&output[14..18], &output[0..4]);
-    }
-
-    #[test]
-    fn repeat_offset_r0_r1_r2() {
-        // Test the LRU repeat offset queue.
-        // Write 8 bytes "ABCDABCD", then:
-        //   Match slot 0 (R0): should copy from offset of last match
-        //   Match slot 1 (R1): should swap R1↔R0
-        //   Match slot 2 (R2): should rotate
-        //
-        // First, establish R0 = 4 by doing a match at offset 4.
-        // Position slot 5: base=6, footer_bits=1, footer=0 → offset=4.
-        // Then R0=4, R1=1, R2=1.
-        //
-        // Next, use slot 0 (R0=4): copy 2 bytes from offset 4.
-        // R0 stays 4.
-        //
-        // Set R1 to something by doing another explicit match.
-        // Position slot 3: base=3, footer_bits=0 → offset=3-2=1.
-        // Now R0=1, R1=4, R2=1.
-        //
-        // Use slot 1 (R1=4): copy 2 from offset 4. R1↔R0 → R0=4,R1=1.
-        // Use slot 2 (R2=1): copy 2 from offset 1. R2=R0(4)→R0=1→ wait.
-        // Slot 2: offset=R2=1, then R2=R0, R0=offset. R0=1,R1=1,R2=4.
-
-        // For simplicity let's just verify slot 0 reuse.
-        let ops = vec![
-            TestOp::Literal(b'A'),
-            TestOp::Literal(b'B'),
-            TestOp::Literal(b'C'),
-            TestOp::Literal(b'D'),
-            // Match offset=4 via slot 5 (base=6,footer=1,value=0→6+0-2=4)
-            TestOp::Match {
-                position_slot: 5,
-                length_header: 0, // len = 0+2 = 2
-                length_extra: 0,
-                footer_value: 0,
-            },
-            // R0=4. Use slot 0 to repeat offset 4.
-            TestOp::Match {
-                position_slot: 0,
-                length_header: 0, // len = 2
-                length_extra: 0,
-                footer_value: 0,
-            },
-            // Use slot 1 (R1=1, initial). len=2, copies 2 from offset 1.
-            TestOp::Match {
-                position_slot: 1,
-                length_header: 0,
-                length_extra: 0,
-                footer_value: 0,
-            },
-        ];
-
-        let prev_main = [0u8; MAIN_TREE_SIZE];
-        let prev_length = [0u8; LENGTH_TREE_SIZE];
-        let (input, _, _) = build_verbatim_block_with_matches(&ops, &prev_main, &prev_length);
-
-        // Expected output:
-        // Pos 0-3: ABCD
-        // Pos 4-5: match offset=4, len=2 → copies [0..2] = "AB"
-        // Pos 6-7: match R0=4, len=2 → copies [2..4] = "CD"
-        // Pos 8-9: match R1=1, len=2 → copies [7..9] = "DD"
-        // Wait, R1 was initially 1. After first explicit match (slot 5),
-        // R2=R1=1, R1=R0=1, R0=4. So R1=1.
-        // After slot 0: R0 stays 4, R1=1, R2=1.
-        // After slot 1: offset=R1=1, then R1=R0=4, R0=1.
-        //   Copy 2 from offset 1: output[7]=output[6], output[8]=output[7].
-        //   At this point output[6..8] = "CD" (from R0 match).
-        //   offset 1 from pos 8: copies output[7]='D', output[8]='D'
-        // Total: "ABCD" + "AB" + "CD" + "DD" = "ABCDABCDDD"
-        let mut output = [0u8; 10];
-        let n = decompress(&input, &mut output).expect("decompress failed");
-        assert_eq!(n, 10);
-        assert_eq!(&output[..4], b"ABCD");
-        assert_eq!(&output[4..6], b"AB");
-        assert_eq!(&output[6..8], b"CD");
-        assert_eq!(&output[8..10], b"DD");
-    }
-
-    #[test]
-    fn invalid_block_type_returns_error() {
-        let mut w = BitWriter::new();
-        // Block type 0 is invalid.
-        w.write_bits(0, 3);
-        w.write_bits(1, 1); // default block size
-        let input = w.finish(2);
-
-        let mut output = [0u8; 32];
-        let result = decompress(&input, &mut output);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn e8_integration() {
-        // E8 post-processing only scans buffers > 10 bytes and
-        // only processes positions < len - 10. Use 13 bytes so
-        // E8 at pos 2 is within the scan range (2 < 13-10 = 3).
-        //
-        // Raw decompressed: [0x90, 0x90, 0xE8, 0x0A, 0x00, 0x00, 0x00, 0x90*6]
-        // E8 at pos 2: operand = 10. Relative = 10 - 2 = 8.
-        let literals = [
-            0x90u8, 0x90, 0xE8, 0x0A, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-        ];
-        let input = build_verbatim_literals_block(&literals);
-
-        let mut output = [0u8; 13];
-        let n = decompress(&input, &mut output).expect("decompress failed");
-        assert_eq!(n, 13);
-        assert_eq!(output[0], 0x90);
-        assert_eq!(output[1], 0x90);
-        assert_eq!(output[2], 0xE8);
-        let operand = i32::from_le_bytes([output[3], output[4], output[5], output[6]]);
-        assert_eq!(operand, 8);
-    }
-
-    #[test]
-    fn lenient_corrupt_block() {
-        // Feed a truncated/corrupt bitstream. Lenient mode should
-        // return partial output with had_errors = true.
-        let input = [0xFF, 0xFF, 0x00, 0x00]; // garbage
-        let mut output = [0xCC; 32];
-        let r = decompress_lenient(&input, &mut output);
-        assert!(r.had_errors);
-        // Output should be zero-filled (lenient fills zeros upfront).
-        assert!(output.iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn lenient_valid_matches_strict() {
-        let literals = [0x41u8, 0x42, 0x43, 0x44];
-        let input = build_verbatim_literals_block(&literals);
-
-        let mut strict_out = [0u8; 4];
-        let strict_n = decompress(&input, &mut strict_out).expect("strict failed");
-
-        let mut lenient_out = [0u8; 4];
-        let r = decompress_lenient(&input, &mut lenient_out);
-
-        assert!(!r.had_errors);
-        assert_eq!(r.bytes_written, strict_n);
-        assert_eq!(&lenient_out[..r.bytes_written], &strict_out[..strict_n]);
-    }
-}
+#[path = "decompress_tests/mod.rs"]
+mod tests;

@@ -43,8 +43,8 @@ impl FveBlock {
             return Err(BitLockerError::InvalidMetadata {
                 block_index,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: MIN_BLOCK_SIZE as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(MIN_BLOCK_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             });
         }
@@ -54,8 +54,8 @@ impl FveBlock {
             FveBlockHeader::read_from_prefix(buf).map_err(|_| BitLockerError::InvalidMetadata {
                 block_index,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: BLOCK_HEADER_SIZE as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(BLOCK_HEADER_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             })?;
 
@@ -73,9 +73,9 @@ impl FveBlock {
         // For V1 (Vista) the field is the raw byte count.
         // Ref: dislocker metadata.c get_metadata()
         let total_block_size = if block_version >= V_SEVEN {
-            (block_hdr.size.get() as usize) << 4
+            usize::from(block_hdr.size.get()) << 4
         } else {
-            block_hdr.size.get() as usize
+            usize::from(block_hdr.size.get())
         };
 
         // Parse the dataset header (48 bytes at offset 64).
@@ -84,18 +84,18 @@ impl FveBlock {
             .map_err(|_| BitLockerError::InvalidMetadata {
                 block_index,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: DATASET_HEADER_SIZE as u64,
-                    available: rest.len() as u64,
+                    declared: u64::try_from(DATASET_HEADER_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(rest.len()).unwrap_or(u64::MAX),
                 },
             })?;
 
-        let dataset_size = dataset_hdr.size.get() as usize;
+        let dataset_size = usize::try_from(dataset_hdr.size.get()).unwrap_or(usize::MAX);
         if dataset_size < DATASET_HEADER_SIZE {
             return Err(BitLockerError::InvalidMetadata {
                 block_index,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: DATASET_HEADER_SIZE as u64,
-                    available: dataset_size as u64,
+                    declared: u64::try_from(DATASET_HEADER_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(dataset_size).unwrap_or(u64::MAX),
                 },
             });
         }
@@ -107,8 +107,8 @@ impl FveBlock {
             return Err(BitLockerError::InvalidMetadata {
                 block_index,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: validations_end as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(validations_end).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             });
         }
@@ -117,8 +117,8 @@ impl FveBlock {
             .map_err(|_| BitLockerError::InvalidMetadata {
             block_index,
             reason: MetadataFailure::SizeBoundsExceeded {
-                declared: validations_end as u64,
-                available: buf.len() as u64,
+                declared: u64::try_from(validations_end).unwrap_or(u64::MAX),
+                available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
             },
         })?;
 
@@ -158,16 +158,19 @@ impl FveBlock {
     }
 
     #[must_use]
+    /// Returns the FVE metadata block format version.
     pub fn block_version(&self) -> u16 {
         self.block_version
     }
 
     #[must_use]
+    /// Returns the raw on-disk encryption-state identifier.
     pub fn encryption_state_raw(&self) -> u16 {
         self.encryption_state_raw
     }
 
     #[must_use]
+    /// Returns the number of volume bytes covered by encryption.
     pub fn encrypted_volume_size(&self) -> u64 {
         self.encrypted_volume_size
     }
@@ -186,52 +189,58 @@ impl FveBlock {
     }
 
     #[must_use]
+    /// Returns the dataset metadata version used to select redundant copies.
     pub fn metadata_version(&self) -> u32 {
         self.metadata_version
     }
 
     #[must_use]
+    /// Returns the raw on-disk encryption-method identifier.
     pub fn encryption_method_raw(&self) -> u32 {
         self.encryption_method_raw
     }
 
     #[must_use]
+    /// Returns the volume identifier recorded in this metadata block.
     pub fn volume_guid(&self) -> &[u8; 16] {
         &self.volume_guid
     }
 
     #[must_use]
+    /// Returns the metadata creation timestamp in its raw Windows form.
     pub fn creation_time(&self) -> u64 {
         self.creation_time
     }
 
     #[must_use]
+    /// Returns the encoded datum sequence following the dataset header.
     pub fn datum_data(&self) -> &[u8] {
         &self.datum_data
     }
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
     const VALIDATION_SIZE: usize = size_of::<FveValidation>();
 
-    #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
     fn make_fve_block(version: u16) -> Vec<u8> {
         let metadata_size: u32 = 128;
         // total_block_size = block_header (64) + metadata_size (128) = 192
-        let total_block_size: usize = BLOCK_HEADER_SIZE + metadata_size as usize;
+        let total_block_size = BLOCK_HEADER_SIZE
+            + usize::try_from(metadata_size)
+                .expect("the test metadata size fits in the host address space");
         // Buffer must hold the block + the 8-byte validations structure
         let mut buf = vec![0u8; total_block_size + VALIDATION_SIZE];
         // Block header (64 bytes)
         buf[0..8].copy_from_slice(b"-FVE-FS-");
         // Size field at offset 8: for V2 this is total_block_size >> 4
         let size_field: u16 = if version >= V_SEVEN {
-            (total_block_size >> 4) as u16
+            u16::try_from(total_block_size >> 4)
+                .expect("the test block's 16-byte unit count fits in u16")
         } else {
-            total_block_size as u16
+            u16::try_from(total_block_size).expect("the test block size fits in u16")
         };
 
         buf[0x08..0x0A].copy_from_slice(&size_field.to_le_bytes());

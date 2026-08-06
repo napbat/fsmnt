@@ -1,4 +1,6 @@
-mod common;
+//! Integration tests for ext4 inline files, directories, and symbolic links.
+
+mod support;
 
 use std::io::Cursor;
 
@@ -17,7 +19,7 @@ const INLINE_SYMLINK_INO: u32 = 530;
 
 #[test]
 fn inline_short_read_full() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     assert!(inode.is_regular_file());
     assert_eq!(inode.size(), 40);
@@ -35,7 +37,7 @@ fn inline_short_read_full() {
 
 #[test]
 fn inline_short_read_partial() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -49,7 +51,7 @@ fn inline_short_read_partial() {
 
 #[test]
 fn inline_short_seek_and_read() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -63,7 +65,7 @@ fn inline_short_seek_and_read() {
 
 #[test]
 fn inline_short_seek_past_eof() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -75,7 +77,7 @@ fn inline_short_seek_past_eof() {
 
 #[test]
 fn inline_short_seek_end() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -89,7 +91,7 @@ fn inline_short_seek_end() {
 
 #[test]
 fn inline_short_read_exact() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -101,7 +103,7 @@ fn inline_short_read_exact() {
 
 #[test]
 fn inline_short_empty_buf_returns_zero() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SHORT_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -114,7 +116,7 @@ fn inline_short_empty_buf_returns_zero() {
 
 #[test]
 fn inline_overflow_read_full() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     assert!(inode.is_regular_file());
     assert_eq!(inode.size(), 100);
@@ -132,7 +134,7 @@ fn inline_overflow_read_full() {
 
 #[test]
 fn inline_overflow_read_across_boundary() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -148,7 +150,7 @@ fn inline_overflow_read_across_boundary() {
 
 #[test]
 fn inline_overflow_read_only_overflow_region() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -163,7 +165,7 @@ fn inline_overflow_read_only_overflow_region() {
 
 #[test]
 fn inline_overflow_partial_read() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -175,7 +177,7 @@ fn inline_overflow_partial_read() {
 
 #[test]
 fn inline_overflow_seek_end() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -189,7 +191,7 @@ fn inline_overflow_seek_end() {
 
 #[test]
 fn inline_overflow_sequential_byte_read() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -208,7 +210,7 @@ fn inline_overflow_sequential_byte_read() {
 
 #[test]
 fn inline_overflow_read_exact() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_OVERFLOW_INO).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -222,7 +224,7 @@ fn inline_overflow_read_exact() {
 
 #[test]
 fn malformed_inline_overflow_returns_error() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     let ext = fs_ext::Ext::new(&mut fs).unwrap();
 
     // Verify the valid inode works first.
@@ -242,11 +244,13 @@ fn malformed_inline_overflow_returns_error() {
 
     // Read inode table block from group descriptor.
     let buf = fs.get_ref();
-    let desc_off = (block_size + u64::from(group) * 64) as usize;
+    let desc_off = usize::try_from(block_size + u64::from(group) * 64)
+        .expect("fixture descriptor offset fits usize");
     let inode_table_lo = u32::from_le_bytes(buf[desc_off + 8..desc_off + 12].try_into().unwrap());
     let inode_table_hi = u32::from_le_bytes(buf[desc_off + 40..desc_off + 44].try_into().unwrap());
     let table_block = u64::from(inode_table_lo) | (u64::from(inode_table_hi) << 32);
-    let inode_off = (table_block * block_size + u64::from(index) * inode_size) as usize;
+    let inode_off = usize::try_from(table_block * block_size + u64::from(index) * inode_size)
+        .expect("fixture inode offset fits usize");
 
     // Corrupt the xattr magic (at inode_off + 128 + 32 = inode_off + 160).
     let xattr_magic_off = inode_off + 160;
@@ -266,12 +270,12 @@ fn malformed_inline_overflow_returns_error() {
 
 // ---- Inline symlink tests -------------------------------------------
 
-/// Short symlink (size <= 60) still reads from i_block directly.
+/// Short symlink (size <= 60) still reads from `i_block` directly.
 /// This test uses the existing ext4 short symlink inode to confirm
 /// the size <= 60 branch is unaffected by the three-way dispatch.
 #[test]
 fn inline_symlink_short_still_works() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     // inode 524: short symlink "hello.txt" (9 bytes) — from symlinks.rs
     let inode = ext.inode(&mut fs, 524).unwrap();
     assert!(inode.is_symlink());
@@ -279,11 +283,11 @@ fn inline_symlink_short_still_works() {
     assert_eq!(&target, b"hello.txt");
 }
 
-/// Inline overflow symlink: 69-byte target stored 60 bytes in i_block
+/// Inline overflow symlink: 69-byte target stored 60 bytes in `i_block`
 /// and 9 bytes in the system.data xattr overflow region.
 #[test]
 fn inline_symlink_overflow_reads_correctly() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, INLINE_SYMLINK_INO).unwrap();
     assert!(inode.is_symlink());
     assert_eq!(inode.size(), 69);
@@ -306,7 +310,7 @@ const INLINE_DIR_INO: u32 = 531;
 /// List entries in an inline directory.
 #[test]
 fn inline_directory_list_entries() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut dir = ext.directory_at(INLINE_DIR_INO);
     let mut iter = dir.entries(&mut fs).unwrap();
     let mut names = Vec::new();
@@ -325,7 +329,7 @@ fn inline_directory_list_entries() {
 /// Look up an entry by name in an inline directory.
 #[test]
 fn inline_directory_lookup() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut dir = ext.directory_at(INLINE_DIR_INO);
     let entry = dir.lookup(&mut fs, b"tiny.txt").unwrap();
     assert_eq!(
@@ -336,10 +340,10 @@ fn inline_directory_lookup() {
     assert_eq!(&entry.name, b"tiny.txt");
 }
 
-/// Lookup of a name not present in the inline directory returns NotFound.
+/// Lookup of a name not present in the inline directory returns `NotFound`.
 #[test]
 fn inline_directory_lookup_not_found() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut dir = ext.directory_at(INLINE_DIR_INO);
     let err = dir.lookup(&mut fs, b"nonexistent").unwrap_err();
     assert!(
@@ -349,10 +353,10 @@ fn inline_directory_lookup_not_found() {
 }
 
 /// Corrupting the overflow xattr on an inline directory that needs
-/// overflow produces InvalidInlineData.
+/// overflow produces `InvalidInlineData`.
 #[test]
 fn inline_directory_malformed_overflow_returns_error() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     let ext = fs_ext::Ext::new(&mut fs).unwrap();
 
     // First verify the directory works uncorrupted.
@@ -372,11 +376,13 @@ fn inline_directory_malformed_overflow_returns_error() {
     let block_size = 4096u64;
 
     let buf = fs.get_ref();
-    let desc_off = (block_size + u64::from(group) * 64) as usize;
+    let desc_off = usize::try_from(block_size + u64::from(group) * 64)
+        .expect("fixture descriptor offset fits usize");
     let inode_table_lo = u32::from_le_bytes(buf[desc_off + 8..desc_off + 12].try_into().unwrap());
     let inode_table_hi = u32::from_le_bytes(buf[desc_off + 40..desc_off + 44].try_into().unwrap());
     let table_block = u64::from(inode_table_lo) | (u64::from(inode_table_hi) << 32);
-    let inode_off = (table_block * block_size + u64::from(index) * inode_size) as usize;
+    let inode_off = usize::try_from(table_block * block_size + u64::from(index) * inode_size)
+        .expect("fixture inode offset fits usize");
 
     let image = fs.get_mut();
     // Set i_size to 64 (> 60 threshold) to force overflow.
@@ -398,11 +404,11 @@ fn inline_directory_malformed_overflow_returns_error() {
 }
 
 /// Malformed inline overflow symlink: corrupt the xattr magic so
-/// find_system_data() fails, causing inline_state to become Invalid,
-/// which read_symlink() must surface as InvalidInlineData.
+/// `find_system_data()` fails, causing `inline_state` to become Invalid,
+/// which `read_symlink()` must surface as `InvalidInlineData`.
 #[test]
 fn inline_symlink_malformed_overflow_returns_invalid_inline_data() {
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     let ext = fs_ext::Ext::new(&mut fs).unwrap();
 
     // Verify the valid inode reads correctly first.
@@ -419,11 +425,13 @@ fn inline_symlink_malformed_overflow_returns_invalid_inline_data() {
     let block_size = 4096u64;
 
     let buf = fs.get_ref();
-    let desc_off = (block_size + u64::from(group) * 64) as usize;
+    let desc_off = usize::try_from(block_size + u64::from(group) * 64)
+        .expect("fixture descriptor offset fits usize");
     let inode_table_lo = u32::from_le_bytes(buf[desc_off + 8..desc_off + 12].try_into().unwrap());
     let inode_table_hi = u32::from_le_bytes(buf[desc_off + 40..desc_off + 44].try_into().unwrap());
     let table_block = u64::from(inode_table_lo) | (u64::from(inode_table_hi) << 32);
-    let inode_off = (table_block * block_size + u64::from(index) * inode_size) as usize;
+    let inode_off = usize::try_from(table_block * block_size + u64::from(index) * inode_size)
+        .expect("fixture inode offset fits usize");
 
     // Corrupt the xattr magic (at inode_off + 128 + 32 = inode_off + 160).
     let xattr_magic_off = inode_off + 160;

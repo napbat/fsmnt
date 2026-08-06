@@ -14,6 +14,7 @@ use super::{CHUNK_SIGNATURE, CHUNK_SIZE, bit_widths};
 ///
 /// Each chunk gets a 2-byte header, plus a 2-byte zero terminator.
 /// Uncompressed chunks are at most `input_len` bytes total.
+#[must_use]
 pub fn compress_bound(input_len: usize) -> usize {
     let num_chunks = input_len.div_ceil(CHUNK_SIZE).max(1);
     // 2-byte header per chunk + chunk data + 2-byte terminator
@@ -23,6 +24,10 @@ pub fn compress_bound(input_len: usize) -> usize {
 /// Compress `input` using LZNT1.
 ///
 /// Returns the number of bytes written to `output`.
+///
+/// # Errors
+///
+/// Returns an error when `output` is too small for the encoded stream.
 pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     let mut in_pos = 0;
     let mut out_pos = 0;
@@ -76,7 +81,9 @@ fn write_chunk_header(
             actual: output.len(),
         });
     }
-    let size_field = (data_size as u16 - 1) & 0x0FFF;
+    let size_field =
+        (u16::try_from(data_size).expect("an LZNT1 chunk contains at most 4096 bytes") - 1)
+            & 0x0FFF;
     let compressed_flag = if is_compressed { 0x8000u16 } else { 0 };
     let header = size_field | (CHUNK_SIGNATURE << 12) | compressed_flag;
     let bytes = header.to_le_bytes();
@@ -104,9 +111,9 @@ const HASH_SIZE: usize = 4096;
 
 /// 3-byte hash for chunk-local matching.
 fn hash3(data: &[u8], pos: usize) -> usize {
-    let b0 = data[pos] as u32;
-    let b1 = data[pos + 1] as u32;
-    let b2 = data[pos + 2] as u32;
+    let b0 = u32::from(data[pos]);
+    let b1 = u32::from(data[pos + 1]);
+    let b2 = u32::from(data[pos + 2]);
     let h = (b0 | (b1 << 8) | (b2 << 16)).wrapping_mul(0x9E37_79B1);
     (h >> 20) as usize & (HASH_SIZE - 1)
 }
@@ -142,8 +149,10 @@ fn compress_chunk(chunk: &[u8], output: &mut [u8]) -> Option<usize> {
 
                 let (length_bits, _disp_bits) = bit_widths(in_pos);
                 let length_mask = (1u16 << length_bits) - 1;
-                let encoded_disp = (displacement - 1) as u16;
-                let encoded_len = (length - 3) as u16;
+                let encoded_disp = u16::try_from(displacement - 1)
+                    .expect("an LZNT1 displacement is limited to one 4096-byte chunk");
+                let encoded_len = u16::try_from(length - 3)
+                    .expect("the LZNT1 match finder caps encoded lengths at 4095");
 
                 // Verify encoding fits.
                 if encoded_len > length_mask {
@@ -195,7 +204,7 @@ fn compress_chunk(chunk: &[u8], output: &mut [u8]) -> Option<usize> {
 fn update_hash(chunk: &[u8], pos: usize, head: &mut [u16; HASH_SIZE]) {
     if pos + 3 <= chunk.len() {
         let h = hash3(chunk, pos);
-        head[h] = pos as u16;
+        head[h] = u16::try_from(pos).expect("an LZNT1 hash position is below 4096");
     }
 }
 
@@ -286,7 +295,7 @@ mod tests {
         // Larger than one chunk (4096).
         let mut input = vec![0u8; 8200];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i % 256) as u8;
+            *byte = u8::try_from(i % 256).expect("the modulus limits values to one byte");
         }
         // Add some repetition.
         let patch: Vec<u8> = input[100..200].to_vec();
@@ -306,7 +315,7 @@ mod tests {
     fn compress_roundtrip_incompressible() {
         // Random-looking data that won't compress.
         let input: Vec<u8> = (0..200u32)
-            .map(|i| (i.wrapping_mul(137) ^ 0xAB) as u8)
+            .map(|i| (i.wrapping_mul(137) ^ 0xAB).to_le_bytes()[0])
             .collect();
         let bound = compress_bound(input.len());
         let mut compressed = vec![0u8; bound];

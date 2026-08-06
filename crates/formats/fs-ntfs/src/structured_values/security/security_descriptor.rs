@@ -23,7 +23,7 @@ const SD_HEADER_SIZE: usize = 20;
 /// NTFS stores these in **self-relative** format where all offsets are relative to the start
 /// of the descriptor.
 ///
-/// Spec reference: MS-DTYP Section 2.4.6 (SECURITY_DESCRIPTOR).
+/// Spec reference: MS-DTYP Section 2.4.6 (`SECURITY_DESCRIPTOR`).
 #[derive(Clone, Debug)]
 pub struct NtfsSecurityDescriptor<'s> {
     data: &'s [u8],
@@ -32,6 +32,11 @@ pub struct NtfsSecurityDescriptor<'s> {
 
 impl<'s> NtfsSecurityDescriptor<'s> {
     /// Parse a security descriptor from raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the self-relative descriptor header is truncated,
+    /// has an unsupported revision, or lacks the self-relative control flag.
     pub fn from_bytes(data: &'s [u8], position: NtfsPosition) -> Result<Self> {
         if data.len() < SD_HEADER_SIZE {
             return Err(NtfsError::InvalidSecurityDescriptor {
@@ -64,11 +69,13 @@ impl<'s> NtfsSecurityDescriptor<'s> {
     // mutants::skip: from_bytes rejects any data with data[0] != 1, so the only
     // constructible descriptor has revision 1; returning the constant 1 is equivalent.
     #[cfg_attr(test, mutants::skip)]
+    #[must_use]
     pub fn revision(&self) -> u8 {
         self.data[0]
     }
 
     /// Returns the control flags.
+    #[must_use]
     pub fn control(&self) -> NtfsSecurityDescriptorControl {
         let raw = u16::from_le_bytes([self.data[2], self.data[3]]);
         NtfsSecurityDescriptorControl::from_bits_truncate(raw)
@@ -95,8 +102,14 @@ impl<'s> NtfsSecurityDescriptor<'s> {
     }
 
     /// Returns the owner SID, if present.
+    #[must_use]
     pub fn owner_sid(&self) -> Option<Result<NtfsSid>> {
-        let offset = self.owner_offset() as usize;
+        let Ok(offset) = usize::try_from(self.owner_offset()) else {
+            return Some(Err(NtfsError::InvalidSecurityDescriptor {
+                position: self.position,
+                reason: "owner SID offset does not fit the target address space",
+            }));
+        };
         if offset == 0 {
             return None;
         }
@@ -110,8 +123,14 @@ impl<'s> NtfsSecurityDescriptor<'s> {
     }
 
     /// Returns the primary group SID, if present.
+    #[must_use]
     pub fn group_sid(&self) -> Option<Result<NtfsSid>> {
-        let offset = self.group_offset() as usize;
+        let Ok(offset) = usize::try_from(self.group_offset()) else {
+            return Some(Err(NtfsError::InvalidSecurityDescriptor {
+                position: self.position,
+                reason: "group SID offset does not fit the target address space",
+            }));
+        };
         if offset == 0 {
             return None;
         }
@@ -129,6 +148,7 @@ impl<'s> NtfsSecurityDescriptor<'s> {
     /// The DACL controls access to the object. If `None`, the object has no DACL
     /// (which in Windows means full access is granted to everyone — this is different
     /// from an empty DACL, which denies all access).
+    #[must_use]
     pub fn dacl(&self) -> Option<Result<NtfsAcl<'s>>> {
         if !self
             .control()
@@ -136,7 +156,12 @@ impl<'s> NtfsSecurityDescriptor<'s> {
         {
             return None;
         }
-        let offset = self.dacl_offset() as usize;
+        let Ok(offset) = usize::try_from(self.dacl_offset()) else {
+            return Some(Err(NtfsError::InvalidSecurityDescriptor {
+                position: self.position,
+                reason: "DACL offset does not fit the target address space",
+            }));
+        };
         if offset == 0 {
             return None;
         }
@@ -152,6 +177,7 @@ impl<'s> NtfsSecurityDescriptor<'s> {
     /// Returns the System ACL (SACL), if present.
     ///
     /// The SACL is used for auditing and mandatory integrity control.
+    #[must_use]
     pub fn sacl(&self) -> Option<Result<NtfsAcl<'s>>> {
         if !self
             .control()
@@ -159,7 +185,12 @@ impl<'s> NtfsSecurityDescriptor<'s> {
         {
             return None;
         }
-        let offset = self.sacl_offset() as usize;
+        let Ok(offset) = usize::try_from(self.sacl_offset()) else {
+            return Some(Err(NtfsError::InvalidSecurityDescriptor {
+                position: self.position,
+                reason: "SACL offset does not fit the target address space",
+            }));
+        };
         if offset == 0 {
             return None;
         }
@@ -251,11 +282,12 @@ mod tests {
         // owner_offset=20, group_offset=32, sacl_offset=0, dacl_offset=44
         let control: u16 = NtfsSecurityDescriptorControl::DACL_PRESENT.bits()
             | NtfsSecurityDescriptorControl::SELF_RELATIVE.bits();
+        let [control_low, control_high] = control.to_le_bytes();
         let mut sd = vec![
             0x01, // revision
             0x00, // padding
-            (control & 0xFF) as u8,
-            (control >> 8) as u8, // control (LE)
+            control_low,
+            control_high, // control (LE)
             20,
             0,
             0,
@@ -373,17 +405,18 @@ mod tests {
 
     /// Builds a self-relative SD with a SACL present at offset 20 holding one (empty) ACL.
     ///
-    /// Header (20 bytes): revision=1, control=SACL_PRESENT|SELF_RELATIVE,
-    /// owner_offset=0, group_offset=0, sacl_offset=20, dacl_offset=0.
-    /// The SACL itself is an 8-byte ACL header declaring ace_count=0.
+    /// Header (20 bytes): revision=1, `control=SACL_PRESENT|SELF_RELATIVE`,
+    /// `owner_offset=0`, `group_offset=0`, `sacl_offset=20`, `dacl_offset=0`.
+    /// The SACL itself is an 8-byte ACL header declaring `ace_count=0`.
     fn make_sd_with_sacl() -> Vec<u8> {
         let control: u16 = NtfsSecurityDescriptorControl::SACL_PRESENT.bits()
             | NtfsSecurityDescriptorControl::SELF_RELATIVE.bits();
+        let [control_low, control_high] = control.to_le_bytes();
         let mut sd = vec![
             0x01, // revision
             0x00, // padding
-            (control & 0xFF) as u8,
-            (control >> 8) as u8, // control (LE)
+            control_low,
+            control_high, // control (LE)
             0,
             0,
             0,
@@ -444,7 +477,7 @@ mod tests {
         // SACL_PRESENT set but sacl_offset points past the end of the data: sacl() => Some(Err).
         let mut data = make_sd_with_sacl();
         // Set sacl_offset to exactly data.len() (the >= boundary): must be an error.
-        let len = data.len() as u32;
+        let len = u32::try_from(data.len()).expect("test value fits u32");
         data[12..16].copy_from_slice(&len.to_le_bytes());
         let sd = NtfsSecurityDescriptor::from_bytes(&data, NtfsPosition::none()).unwrap();
         assert!(sd.sacl().unwrap().is_err());

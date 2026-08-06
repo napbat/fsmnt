@@ -18,7 +18,7 @@ where
     /// The inner reader stream.
     inner: R,
     /// The sector size set at creation.
-    sector_size: usize,
+    sector_size: u64,
     /// The current stream position as requested by the caller through `read` or `seek`.
     /// The implementation will internally make sure to only read/seek on sector boundaries.
     stream_position: u64,
@@ -30,10 +30,18 @@ impl<R> SectorReader<R>
 where
     R: Read + Seek,
 {
+    /// Creates a reader that aligns its underlying I/O to `sector_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sector size is not a power of two or cannot
+    /// be represented as a 64-bit stream offset.
     pub fn new(inner: R, sector_size: usize) -> io::Result<Self> {
         if !sector_size.is_power_of_two() {
             return Err(io::Error::other("sector_size is not a power of two"));
         }
+        let sector_size = u64::try_from(sector_size)
+            .map_err(|_| io::Error::other("sector_size does not fit in u64"))?;
 
         Ok(Self {
             inner,
@@ -44,11 +52,11 @@ where
     }
 
     fn align_down_to_sector_size(&self, n: u64) -> u64 {
-        n / self.sector_size as u64 * self.sector_size as u64
+        n / self.sector_size * self.sector_size
     }
 
     fn align_up_to_sector_size(&self, n: u64) -> u64 {
-        self.align_down_to_sector_size(n) + self.sector_size as u64
+        self.align_down_to_sector_size(n) + self.sector_size
     }
 }
 
@@ -64,9 +72,15 @@ where
 
         // We have to read more bytes now to make up for the alignment difference.
         // We can also only read in multiples of the sector size, so align up to the next sector boundary.
-        let start = (self.stream_position - aligned_position) as usize;
-        let end = start + buf.len();
-        let aligned_bytes_to_read = self.align_up_to_sector_size(end as u64) as usize;
+        let start = usize::try_from(self.stream_position - aligned_position)
+            .map_err(|_| io::Error::other("alignment offset does not fit in usize"))?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or_else(|| io::Error::other("aligned read length overflowed"))?;
+        let end_u64 =
+            u64::try_from(end).map_err(|_| io::Error::other("read length does not fit in u64"))?;
+        let aligned_bytes_to_read = usize::try_from(self.align_up_to_sector_size(end_u64))
+            .map_err(|_| io::Error::other("aligned read length does not fit in usize"))?;
 
         // Perform the sector-sized read and copy the actually requested bytes into the given buffer.
         self.temp_buf.resize(aligned_bytes_to_read, 0);
@@ -74,7 +88,12 @@ where
         buf.copy_from_slice(&self.temp_buf[start..end]);
 
         // We are done.
-        self.stream_position += buf.len() as u64;
+        let bytes_read = u64::try_from(buf.len())
+            .map_err(|_| io::Error::other("read length does not fit in u64"))?;
+        self.stream_position = self
+            .stream_position
+            .checked_add(bytes_read)
+            .ok_or_else(|| io::Error::other("stream position overflowed"))?;
         Ok(buf.len())
     }
 }
@@ -96,9 +115,9 @@ where
             }
             SeekFrom::Current(n) => {
                 if n >= 0 {
-                    self.stream_position.checked_add(n as u64)
+                    self.stream_position.checked_add(n.unsigned_abs())
                 } else {
-                    self.stream_position.checked_sub(n.wrapping_neg() as u64)
+                    self.stream_position.checked_sub(n.unsigned_abs())
                 }
             }
         };

@@ -12,7 +12,7 @@ pub(super) const WINDOW_SIZE: usize = 32768;
 /// Number of position slots for 32 KB window.
 pub(super) const NUM_POSITION_SLOTS: usize = 30;
 
-/// Main tree: 256 literals + position_slots * 8 length headers.
+/// Main tree: 256 literals + `position_slots` * 8 length headers.
 pub(super) const MAIN_TREE_SIZE: usize = 256 + NUM_POSITION_SLOTS * 8;
 
 /// Length tree size (249 symbols).
@@ -97,13 +97,17 @@ pub(super) const FOOTER_BITS: [u8; NUM_POSITION_SLOTS] = {
     let mut table = [0u8; NUM_POSITION_SLOTS];
     let mut i = 0;
     while i < NUM_POSITION_SLOTS {
-        table[i] = footer_bits_const(i) as u8;
+        table[i] = footer_bits_const(i);
         i += 1;
     }
     table
 };
 
 /// Compute footer bits for a position slot (const-compatible).
-pub(super) const fn footer_bits_const(slot: usize) -> u32 {
-    if slot < 2 { 0 } else { (slot as u32) / 2 - 1 }
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the caller supplies one of 50 position slots, so slot / 2 - 1 is at most 23"
+)]
+pub(super) const fn footer_bits_const(slot: usize) -> u8 {
+    if slot < 2 { 0 } else { (slot / 2 - 1) as u8 }
 }

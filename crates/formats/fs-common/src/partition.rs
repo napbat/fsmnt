@@ -21,7 +21,7 @@ use zerocopy::{FromBytes, Immutable, KnownLayout, U16, U32, U64, Unaligned};
 pub const MBR_SIGNATURE: u16 = 0xAA55;
 
 /// GPT signature "EFI PART"
-pub const GPT_SIGNATURE: u64 = 0x5452415020494645; // "EFI PART" in little-endian
+pub const GPT_SIGNATURE: u64 = 0x5452_4150_2049_4645; // "EFI PART" in little-endian
 
 /// Size of an MBR partition entry
 pub const MBR_ENTRY_SIZE: usize = 16;
@@ -56,23 +56,27 @@ pub struct MbrPartitionEntry {
 
 impl MbrPartitionEntry {
     /// Check if this entry is empty/unused
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.partition_type == 0
     }
 
     /// Check if this is a GPT protective MBR entry
+    #[must_use]
     pub fn is_gpt_protective(&self) -> bool {
         self.partition_type == MBR_TYPE_GPT_PROTECTIVE
     }
 
     /// Get the starting byte offset of this partition
+    #[must_use]
     pub fn start_offset(&self, bytes_per_sector: u32) -> u64 {
-        self.start_lba.get() as u64 * bytes_per_sector as u64
+        u64::from(self.start_lba.get()) * u64::from(bytes_per_sector)
     }
 
     /// Get the size of this partition in bytes
+    #[must_use]
     pub fn size_bytes(&self, bytes_per_sector: u32) -> u64 {
-        self.sector_count.get() as u64 * bytes_per_sector as u64
+        u64::from(self.sector_count.get()) * u64::from(bytes_per_sector)
     }
 }
 
@@ -90,6 +94,7 @@ pub struct Mbr {
 
 impl Mbr {
     /// Parse MBR from a 512-byte sector
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < 512 {
             return None;
@@ -98,11 +103,13 @@ impl Mbr {
     }
 
     /// Check if this is a valid MBR (has correct signature)
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.signature.get() == MBR_SIGNATURE
     }
 
     /// Check if this MBR indicates a GPT disk (protective MBR)
+    #[must_use]
     pub fn is_gpt_protective(&self) -> bool {
         self.is_valid() && self.partitions[0].is_gpt_protective()
     }
@@ -149,6 +156,7 @@ pub struct GptHeader {
 
 impl GptHeader {
     /// Parse GPT header from bytes (should be from LBA 1)
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < 92 {
             return None;
@@ -157,6 +165,7 @@ impl GptHeader {
     }
 
     /// Check if this is a valid GPT header
+    #[must_use]
     pub fn is_valid(&self) -> bool {
         self.signature.get() == GPT_SIGNATURE
     }
@@ -185,6 +194,7 @@ const NULL_GUID: [u8; 16] = [0; 16];
 
 impl GptPartitionEntry {
     /// Parse GPT partition entry from bytes
+    #[must_use]
     pub fn from_bytes(data: &[u8]) -> Option<&Self> {
         if data.len() < 128 {
             return None;
@@ -193,22 +203,26 @@ impl GptPartitionEntry {
     }
 
     /// Check if this entry is empty/unused
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.type_guid == NULL_GUID
     }
 
     /// Get the starting byte offset of this partition
+    #[must_use]
     pub fn start_offset(&self, bytes_per_sector: u32) -> u64 {
-        self.start_lba.get() * bytes_per_sector as u64
+        self.start_lba.get() * u64::from(bytes_per_sector)
     }
 
     /// Get the size of this partition in bytes
+    #[must_use]
     pub fn size_bytes(&self, bytes_per_sector: u32) -> u64 {
-        (self.end_lba.get() - self.start_lba.get() + 1) * bytes_per_sector as u64
+        (self.end_lba.get() - self.start_lba.get() + 1) * u64::from(bytes_per_sector)
     }
 
     /// Get partition name as string (UTF-16LE to String)
     #[cfg(feature = "std")]
+    #[must_use]
     pub fn name_string(&self) -> String {
         let u16_chars: Vec<u16> = self
             .name
@@ -222,6 +236,7 @@ impl GptPartitionEntry {
     /// Format the type GUID as a standard UUID string
     /// Format: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
     #[cfg(feature = "std")]
+    #[must_use]
     pub fn type_guid_string(&self) -> String {
         // GPT GUIDs are stored in mixed-endian format:
         // - First 3 fields are little-endian
@@ -249,6 +264,7 @@ impl GptPartitionEntry {
 
     /// Format the unique partition GUID as a standard UUID string
     #[cfg(feature = "std")]
+    #[must_use]
     pub fn partition_guid_string(&self) -> String {
         format!(
             "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
@@ -275,6 +291,7 @@ impl GptPartitionEntry {
 // Common MBR partition type constants
 impl MbrPartitionEntry {
     /// Get human-readable name for common partition types
+    #[must_use]
     pub fn type_name(&self) -> Option<&'static str> {
         match self.partition_type {
             0x07 => Some("NTFS/HPFS/exFAT"),
@@ -318,6 +335,7 @@ impl GptPartitionEntry {
     ];
 
     /// Get human-readable name for common GPT partition types
+    #[must_use]
     pub fn type_name(&self) -> Option<&'static str> {
         match self.type_guid {
             Self::EFI_SYSTEM_GUID => Some("EFI System"),
@@ -334,6 +352,10 @@ impl GptPartitionEntry {
 /// # Arguments
 /// * `reader` - A reader positioned anywhere (will seek to LBA 1)
 /// * `sector_size` - Sector size in bytes (typically 512)
+///
+/// # Errors
+///
+/// Returns an I/O error when the header cannot be read or its signature is invalid.
 #[cfg(feature = "std")]
 pub fn read_gpt_header<R: std::io::Read + std::io::Seek>(
     reader: &mut R,
@@ -371,6 +393,10 @@ pub fn read_gpt_header<R: std::io::Read + std::io::Seek>(
 ///
 /// # Returns
 /// A vector of non-empty partition entries
+///
+/// # Errors
+///
+/// Returns an I/O error when seeking or reading the partition array fails.
 #[cfg(feature = "std")]
 pub fn read_gpt_partitions<R: std::io::Read + std::io::Seek>(
     reader: &mut R,
@@ -453,7 +479,8 @@ mod tests {
         // disk_guid (offset 56-71, 16 bytes) left zero
         buf[72..80].copy_from_slice(&2u64.to_le_bytes()); // partition_entry_lba
         buf[80..84].copy_from_slice(&128u32.to_le_bytes()); // num_partition_entries
-        buf[84..88].copy_from_slice(&(GPT_ENTRY_SIZE as u32).to_le_bytes()); // partition_entry_size
+        let entry_size = u32::try_from(GPT_ENTRY_SIZE).expect("GPT entry size fits u32");
+        buf[84..88].copy_from_slice(&entry_size.to_le_bytes()); // partition_entry_size
         // partition_entries_crc32 (offset 88-91) left zero
         buf
     }

@@ -1,12 +1,13 @@
-mod common;
+//! Integration tests for ext4 orphan-file and legacy orphan-list recovery.
+
+mod support;
+
+use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom};
 
 use fs_ext::{Ext, JournalReplay, OrphanReplay, OverlayReader};
 
 fn fixture_available(name: &str) -> bool {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata")
-        .join(name)
-        .exists()
+    fsmnt_testkit::fixture_path(env!("CARGO_MANIFEST_DIR"), format!("testdata/{name}")).exists()
 }
 
 #[test]
@@ -15,7 +16,7 @@ fn flag_only_orphan_fixture_recovers_and_strict_reopen_succeeds() {
         eprintln!("skipping: ext4-dirty-orphan.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan.img");
+    let mut fs = support::load_image("ext4-dirty-orphan.img");
     let pre = Ext::open_lenient(&mut fs).expect("lenient");
     assert!(pre.has_orphan_present());
 
@@ -35,7 +36,7 @@ fn legacy_unlink_fixture_records_one_entry_and_succeeds() {
         eprintln!("skipping: ext4-dirty-legacy-unlink.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-legacy-unlink.img");
+    let mut fs = support::load_image("ext4-dirty-legacy-unlink.img");
     let pre = Ext::open_lenient(&mut fs).expect("lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan");
@@ -57,7 +58,7 @@ fn legacy_truncate_fixture_records_one_entry_and_succeeds() {
         eprintln!("skipping: ext4-dirty-legacy-truncate.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-legacy-truncate.img");
+    let mut fs = support::load_image("ext4-dirty-legacy-truncate.img");
     let pre = Ext::open_lenient(&mut fs).expect("lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan");
@@ -79,7 +80,7 @@ fn legacy_cycle_fixture_halts_with_cycle_stop() {
         eprintln!("skipping: ext4-dirty-legacy-cycle.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-legacy-cycle.img");
+    let mut fs = support::load_image("ext4-dirty-legacy-cycle.img");
     let pre = Ext::open_lenient(&mut fs).expect("lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan");
@@ -102,7 +103,7 @@ fn legacy_multi_fixture_records_three_unlinks_and_succeeds() {
         eprintln!("skipping: ext4-dirty-legacy-multi.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-legacy-multi.img");
+    let mut fs = support::load_image("ext4-dirty-legacy-multi.img");
     let pre = Ext::open_lenient(&mut fs).expect("lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan");
@@ -127,7 +128,7 @@ fn truncate_fixtures_parse_via_open_lenient() {
             eprintln!("skipping: {name} not generated");
             continue;
         }
-        let mut fs = common::load_image(name);
+        let mut fs = support::load_image(name);
         let _ext =
             Ext::open_lenient(&mut fs).unwrap_or_else(|err| panic!("open_lenient {name}: {err:?}"));
         // Smoke: image opens. Dirty-state assertions land in Task 16 / Task 29.
@@ -140,7 +141,7 @@ fn truncate_unlink_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-truncate-unlink.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-truncate-unlink.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-truncate-unlink.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -159,7 +160,7 @@ fn truncate_partial_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-truncate-partial.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-truncate-partial.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-truncate-partial.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -178,7 +179,7 @@ fn ea_cascade_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-ea-cascade.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-cascade.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-cascade.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -197,7 +198,7 @@ fn ea_multi_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-ea-multi.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-multi.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-multi.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -216,7 +217,7 @@ fn ea_partial_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-ea-partial.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-partial.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-partial.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -235,7 +236,7 @@ fn ea_missing_flag_fixture_halts_with_missing_flag_stop() {
         eprintln!("skipping: ext4-dirty-orphan-ea-missing-flag.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-missing-flag.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-missing-flag.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -257,7 +258,7 @@ fn ea_size_mismatch_fixture_halts_with_size_mismatch_stop() {
         eprintln!("skipping: ext4-dirty-orphan-ea-size-mismatch.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-size-mismatch.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-size-mismatch.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -279,7 +280,7 @@ fn ea_refcount_zero_fixture_halts_with_refcount_zero_stop() {
         eprintln!("skipping: ext4-dirty-orphan-ea-refcount-zero.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-refcount-zero.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-refcount-zero.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -301,7 +302,7 @@ fn ea_checksum_invalid_fixture_halts_with_checksum_invalid_stop() {
         eprintln!("skipping: ext4-dirty-orphan-ea-checksum-invalid.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-ea-checksum-invalid.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-ea-checksum-invalid.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -323,7 +324,7 @@ fn shared_xattr_exclusive_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-shared-xattr-exclusive.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-shared-xattr-exclusive.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-shared-xattr-exclusive.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -342,7 +343,7 @@ fn shared_xattr_shared_fixture_replays_cleanly() {
         eprintln!("skipping: ext4-dirty-orphan-shared-xattr-shared.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-shared-xattr-shared.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-shared-xattr-shared.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -361,7 +362,7 @@ fn shared_xattr_refcount_zero_fixture_halts_with_refcount_zero_stop() {
         eprintln!("skipping: ext4-dirty-orphan-shared-xattr-refcount-zero.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-shared-xattr-refcount-zero.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-shared-xattr-refcount-zero.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -383,7 +384,7 @@ fn shared_xattr_refcount_overflow_fixture_halts_with_refcount_overflow_stop() {
         eprintln!("skipping: ext4-dirty-orphan-shared-xattr-refcount-overflow.img not generated");
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-shared-xattr-refcount-overflow.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-shared-xattr-refcount-overflow.img");
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -408,7 +409,7 @@ fn orphan_file_fixture_recovers_when_present() {
         );
         return;
     }
-    let mut fs = common::load_image("ext4-dirty-orphan-file.img");
+    let mut fs = support::load_image("ext4-dirty-orphan-file.img");
     let pre = Ext::open_lenient(&mut fs).expect("lenient");
     assert!(pre.has_orphan_file());
     assert!(pre.has_orphan_present());
@@ -437,7 +438,7 @@ fn bigalloc_orphan_fixture_recovers_cleanly_when_present() {
         );
         return;
     }
-    let mut fs = common::load_image(NAME);
+    let mut fs = support::load_image(NAME);
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -457,7 +458,7 @@ fn bigalloc_overlap_fixture_halts_with_overlap_stop_when_present() {
         eprintln!("skipping {NAME}: fixture not available (requires byte-patched bigalloc base)");
         return;
     }
-    let mut fs = common::load_image(NAME);
+    let mut fs = support::load_image(NAME);
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -503,7 +504,7 @@ fn invariant_4_no_bigalloc_overlap_on_non_bigalloc_fixtures() {
             eprintln!("skipping invariant-4 check for {name}: fixture not available");
             continue;
         }
-        let mut fs = common::load_image(name);
+        let mut fs = support::load_image(name);
         let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
         let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
         let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -541,7 +542,7 @@ fn invariant_4_bigalloc_overlap_fires_end_to_end_on_overlap_scenario() {
         );
         return;
     }
-    let mut fs = common::load_image(NAME);
+    let mut fs = support::load_image(NAME);
     let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -590,7 +591,7 @@ fn invariant_5_sb_free_blocks_equals_sum_of_group_tallies_after_apply() {
             eprintln!("skipping invariant-5 check for {name}: fixture not available");
             continue;
         }
-        let mut fs = common::load_image(name);
+        let mut fs = support::load_image(name);
         let pre = Ext::open_lenient(&mut fs).expect("open_lenient");
         let journal = JournalReplay::build(&pre, &mut fs).expect("journal build");
         let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
@@ -608,7 +609,6 @@ fn invariant_5_sb_free_blocks_equals_sum_of_group_tallies_after_apply() {
         // Read s_free_blocks_count_{lo,hi} directly from the overlay bytes.
         // Superblock is at byte offset 1024; s_free_blocks_count_lo at +0x0C,
         // s_free_blocks_count_hi (64-bit only) at superblock +0x150.
-        use std::io::{Read as StdRead, Seek as StdSeek, SeekFrom};
         let mut overlay2 = OverlayReader::new(&mut fs, &replay);
 
         let mut buf4 = [0u8; 4];

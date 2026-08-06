@@ -53,7 +53,7 @@ mod tests {
     fn lenient_uncompressed_chunk() {
         // Uncompressed LZNT1 chunk: bit 15 = 0, sig bits [14:12] = 0b011.
         let data = b"Hello";
-        let chunk_data_size = data.len() as u16;
+        let chunk_data_size = u16::try_from(data.len()).expect("test value fits u16");
         let header = ((chunk_data_size - 1) & 0x0FFF) | (0b011 << 12);
         let mut input = alloc::vec::Vec::new();
         input.extend_from_slice(&header.to_le_bytes());
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn lenient_truncated_input() {
         // Header claims 100 bytes but only 5 are present.
-        let header: u16 = (99 & 0x0FFF) | (0b011 << 12);
+        let header: u16 = (0x63 & 0x0FFF) | (0b011 << 12);
         let mut input = alloc::vec::Vec::new();
         input.extend_from_slice(&header.to_le_bytes());
         input.extend_from_slice(&[0xAA; 5]);
@@ -97,10 +97,10 @@ mod tests {
             b'B',
             b'C',
             b'D',
-            word as u8,
-            (word >> 8) as u8,
+            word.to_le_bytes()[0],
+            word.to_le_bytes()[1],
         ];
-        let chunk_data_size = body.len() as u16;
+        let chunk_data_size = u16::try_from(body.len()).expect("test value fits u16");
         let header = ((chunk_data_size - 1) & 0x0FFF) | (0b011 << 12) | 0x8000;
         let mut input = alloc::vec::Vec::new();
         input.extend_from_slice(&header.to_le_bytes());
@@ -118,7 +118,7 @@ mod tests {
     fn lenient_corrupt_compressed_chunk() {
         // Compressed chunk with garbage body.
         let garbage = [0xFF; 10];
-        let chunk_data_size = garbage.len() as u16;
+        let chunk_data_size = u16::try_from(garbage.len()).expect("test value fits u16");
         let header = ((chunk_data_size - 1) & 0x0FFF) | 0x8000 | (0b011 << 12);
         let mut input = alloc::vec::Vec::new();
         input.extend_from_slice(&header.to_le_bytes());

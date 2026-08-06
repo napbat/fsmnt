@@ -49,18 +49,18 @@ pub(crate) struct DirEntryInfo {
     pub name_end: usize,
     /// File type byte (0 if the filesystem lacks FILETYPE support).
     pub file_type: u8,
-    /// Byte offset of the next entry (current offset + rec_len).
+    /// Byte offset of the next entry (current offset + `rec_len`).
     pub next_offset: usize,
 }
 
-/// Minimum directory entry size: 4 (inode) + 2 (rec_len) + 1 (name_len) + 1 (file_type/name_len_hi).
+/// Minimum directory entry size: 4 (inode) + 2 (`rec_len`) + 1 (`name_len`) + 1 (`file_type/name_len_hi`).
 const MIN_DIR_ENTRY_SIZE: u16 = 8;
 
 /// Parse the next valid directory entry from `buf` starting at `offset`.
 ///
 /// Skips entries where inode == 0 (deleted/padding) and "."/"..".
 /// Returns `Ok(None)` when `offset >= buf.len()` or `rec_len` would
-/// go past `buf`. Returns an error if rec_len or name_len is invalid.
+/// go past `buf`. Returns an error if `rec_len` or `name_len` is invalid.
 pub(crate) fn parse_next_entry(
     buf: &[u8],
     mut offset: usize,
@@ -158,10 +158,13 @@ mod tests {
         buf[off..off + 4].copy_from_slice(&inode.to_le_bytes());
         buf[off + 4..off + 6].copy_from_slice(&rec_len.to_le_bytes());
         if has_filetype {
-            buf[off + 6] = name.len() as u8;
+            buf[off + 6] = (name.len()).to_le_bytes()[0];
             buf[off + 7] = file_type;
         } else {
-            buf[off + 6..off + 8].copy_from_slice(&(name.len() as u16).to_le_bytes());
+            buf[off + 6..off + 8].copy_from_slice(
+                &(u16::try_from(name.len()).expect("the test fixture value fits in u16"))
+                    .to_le_bytes(),
+            );
         }
         buf[off + 8..off + 8 + name.len()].copy_from_slice(name);
     }

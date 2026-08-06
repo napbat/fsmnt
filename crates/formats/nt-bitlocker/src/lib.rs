@@ -1,3 +1,14 @@
+//! Read-only `BitLocker` metadata parsing and transparent volume decryption.
+//!
+//! The crate validates all three FVE metadata copies, identifies the selected
+//! encryption method and key protectors, unwraps a volume master key from a
+//! supplied credential, and exposes decrypted volume bytes through
+//! [`std::io::Read`] and [`std::io::Seek`].
+//!
+//! `BitLocker` cryptographic keys are held in zeroizing containers where
+//! practical. This crate is the workspace's intentionally `std`-only format
+//! component because unlocked volumes wrap seekable host readers.
+
 #![forbid(unsafe_code)]
 
 mod crypto;

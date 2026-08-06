@@ -40,7 +40,7 @@ pub(crate) struct OpenJournalSource {
 /// Compose a `JournalSource` for the internal journal.
 ///
 /// Returns `Ok(None)` when the filesystem has no journal (ext2-style).
-/// Returns `Err` when HAS_JOURNAL implies a journal but the inode number is
+/// Returns `Err` when `HAS_JOURNAL` implies a journal but the inode number is
 /// zero, or when the journal superblock itself fails parse, or when the
 /// journal block size does not match the filesystem block size.
 ///
@@ -101,7 +101,7 @@ enum JournalFileBackend<'e> {
     },
 }
 
-impl<'e> JournalFile<'e> {
+impl JournalFile<'_> {
     /// Read one journal block into `buf` by its journal block index.
     pub(crate) fn read_block<T: Read + Seek>(
         &mut self,
@@ -109,13 +109,15 @@ impl<'e> JournalFile<'e> {
         journal_block: u64,
         buf: &mut [u8],
     ) -> Result<()> {
-        debug_assert_eq!(buf.len(), self.block_size as usize);
-        if journal_block > u64::from(u32::MAX) {
-            return Err(ExtError::InvalidJournalSuperblock {
+        let block_size =
+            usize::try_from(self.block_size).map_err(|_| ExtError::InvalidJournalSuperblock {
+                reason: "journal block size exceeds addressable memory",
+            })?;
+        debug_assert_eq!(buf.len(), block_size);
+        let journal_block =
+            u32::try_from(journal_block).map_err(|_| ExtError::InvalidJournalSuperblock {
                 reason: "journal block index overflow",
-            });
-        }
-        let journal_block = journal_block as u32;
+            })?;
         match &mut self.backend {
             JournalFileBackend::Inode(file) => {
                 let offset = u64::from(journal_block)
@@ -164,13 +166,29 @@ impl<'e> JournalFile<'e> {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<()> {
-        let block_size = self.block_size as usize;
+        let block_size =
+            usize::try_from(self.block_size).map_err(|_| ExtError::InvalidJournalSuperblock {
+                reason: "journal block size exceeds addressable memory",
+            })?;
         let mut scratch = alloc::vec![0u8; block_size];
         let mut done = 0usize;
         while done < buf.len() {
-            let absolute = offset + done as u64;
+            let absolute = offset
+                .checked_add(u64::try_from(done).map_err(|_| {
+                    ExtError::InvalidJournalSuperblock {
+                        reason: "journal read offset exceeds u64",
+                    }
+                })?)
+                .ok_or(ExtError::InvalidJournalSuperblock {
+                    reason: "journal read offset overflow",
+                })?;
             let block = absolute / u64::from(self.block_size);
-            let in_block = (absolute % u64::from(self.block_size)) as usize;
+            let in_block =
+                usize::try_from(absolute % u64::from(self.block_size)).map_err(|_| {
+                    ExtError::InvalidJournalSuperblock {
+                        reason: "journal in-block offset exceeds addressable memory",
+                    }
+                })?;
             self.read_block(fs, block, &mut scratch)?;
             let take = core::cmp::min(block_size - in_block, buf.len() - done);
             buf[done..done + take].copy_from_slice(&scratch[in_block..in_block + take]);
@@ -282,8 +300,7 @@ fn journal_backup_mapping<T: Read + Seek>(
     if crate::extent::parse_header(i_block, ext.journal_inum()).is_ok() {
         let generation = ext
             .inode(fs, ext.journal_inum())
-            .map(|inode| inode.generation())
-            .unwrap_or(0);
+            .map_or(0, |inode| inode.generation());
         JournalBackupMapping::Extents { generation }
     } else {
         JournalBackupMapping::BlockMap

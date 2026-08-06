@@ -34,6 +34,10 @@ pub const OBJ_NONPERSISTENT: u32 = 0x0800_0000;
 /// The on-disk `obj_phys_t` header — 32 bytes, little-endian.
 ///
 /// Apple File System Reference, `02-objects.md`.
+#[allow(
+    clippy::struct_field_names,
+    reason = "the o_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct RawObjPhys {

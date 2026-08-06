@@ -32,6 +32,11 @@ use super::entry::{SDS_HEADER_SIZE, SDS_MAX_SIZE};
 /// The `buf` parameter is a reusable buffer for reading the raw
 /// SDS entry. Its contents after the call contain the raw entry
 /// data; the returned [`NtfsSecurityDescriptor`] borrows from it.
+///
+/// # Errors
+///
+/// Returns an error if the `$SII` or `$SDS` attributes cannot be read, the
+/// security ID is absent, or the referenced SDS entry is malformed.
 pub fn ntfs_secure_lookup<'s, T>(
     secure_file: &NtfsFile<'_>,
     fs: &mut T,
@@ -87,6 +92,11 @@ where
 /// and collects those with a matching hash. No `$SDS` reads are
 /// performed; callers can inspect the returned security IDs and
 /// offsets directly.
+///
+/// # Errors
+///
+/// Returns an error if the `$SDH` index cannot be opened or traversed, or if
+/// an index entry has missing or inconsistent key and data records.
 pub fn ntfs_secure_sdh_entries<T>(
     secure_file: &NtfsFile<'_>,
     fs: &mut T,
@@ -140,6 +150,11 @@ where
 /// For callers that need all matching entries (e.g., to inspect
 /// every security ID sharing a hash), use
 /// [`ntfs_secure_sdh_entries`] instead.
+///
+/// # Errors
+///
+/// Returns an error if the hash is absent, the `$SDH` index cannot be read, or
+/// the selected `$SDS` entry is malformed.
 pub fn ntfs_secure_lookup_by_hash<'s, T>(
     secure_file: &NtfsFile<'_>,
     fs: &mut T,
@@ -180,7 +195,11 @@ fn read_sds_entry<'s, T>(
 where
     T: Read + Seek,
 {
-    let sds_size_usize = sds_size as usize;
+    let sds_size_usize =
+        usize::try_from(sds_size).map_err(|_| NtfsError::InvalidSecurityDescriptor {
+            position: NtfsPosition::new(sds_offset),
+            reason: "$SDS entry size does not fit the target address space",
+        })?;
     let sds_position = NtfsPosition::new(sds_offset);
 
     if sds_size_usize <= SDS_HEADER_SIZE {
@@ -223,7 +242,8 @@ where
     }
 
     let descriptor_data = &buf[SDS_HEADER_SIZE..];
-    let descriptor_position = sds_position + SDS_HEADER_SIZE as u64;
+    let descriptor_position =
+        sds_position + u64::try_from(SDS_HEADER_SIZE).expect("the 20-byte SDS header fits in u64");
     NtfsSecurityDescriptor::from_bytes(descriptor_data, descriptor_position)
 }
 
@@ -250,7 +270,7 @@ where
     open_named_index(secure_file, fs, "$SDH")
 }
 
-/// Opens a named index (IndexRoot + optional IndexAllocation)
+/// Opens a named index (`IndexRoot` + optional `IndexAllocation`)
 /// on a file.
 fn open_named_index<'n, E, T>(
     file: &NtfsFile<'n>,
@@ -276,7 +296,12 @@ where
         )?);
     }
 
-    NtfsIndex::<E>::new(file.ntfs(), index_root_item, index_allocation_item, fs)
+    NtfsIndex::<E>::new(
+        file.ntfs(),
+        &index_root_item,
+        index_allocation_item.as_ref(),
+        fs,
+    )
 }
 
 /// Finds a named attribute on a file.

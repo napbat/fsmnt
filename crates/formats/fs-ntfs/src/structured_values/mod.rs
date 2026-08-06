@@ -107,6 +107,7 @@ bitflags! {
         /// File is transparently compressed by the filesystem (using LZNT1 algorithm).
         /// For directories, this attribute denotes that compression is enabled by default for new files inside that directory.
         const COMPRESSED = 0x0800;
+        /// File contents are not immediately available from local storage.
         const OFFLINE = 0x1000;
         /// File has not (yet) been indexed by the Windows Indexing Service.
         const NOT_CONTENT_INDEXED = 0x2000;
@@ -152,9 +153,15 @@ impl<'a> arbitrary::Arbitrary<'a> for NtfsFileAttributeFlags {
 
 /// Trait implemented by every NTFS attribute structured value.
 pub trait NtfsStructuredValue<'n, 'f>: Sized {
+    /// NTFS attribute type that carries this structured value.
     const TY: NtfsAttributeType;
 
     /// Create a structured value from an arbitrary `NtfsAttributeValue`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the attribute value cannot be read or does not have
+    /// the layout required by this structured value.
     fn from_attribute_value<T>(fs: &mut T, value: NtfsAttributeValue<'n, 'f>) -> Result<Self>
     where
         T: Read + Seek;
@@ -167,6 +174,11 @@ pub trait NtfsStructuredValueFromResidentAttributeValue<'n, 'f>:
     /// Create a structured value from a resident attribute value.
     ///
     /// This is a fast path for the few structured values that are always in resident attributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the resident bytes do not form a valid value of this
+    /// structured type.
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self>;
 }
 
@@ -218,8 +230,8 @@ mod tests {
         assert_ne!(s, std::string::String::default());
     }
 
-    /// DIRECTORY (0x0010, from $STANDARD_INFORMATION) and
-    /// IS_DIRECTORY (0x1000_0000, from $FILE_NAME) must be
+    /// DIRECTORY (0x0010, from $`STANDARD_INFORMATION`) and
+    /// `IS_DIRECTORY` (`0x1000_0000`, from $`FILE_NAME`) must be
     /// distinct flags that can be set independently.
     #[test]
     fn directory_and_is_directory_are_distinct() {
@@ -235,7 +247,7 @@ mod tests {
         assert_eq!(both.bits(), 0x1000_0010);
     }
 
-    /// Every known bit must survive a from_bits_truncate round-trip.
+    /// Every known bit must survive a `from_bits_truncate` round-trip.
     #[test]
     fn from_bits_truncate_round_trip() {
         let all = NtfsFileAttributeFlags::all();
@@ -243,7 +255,7 @@ mod tests {
         assert_eq!(round_tripped, all);
     }
 
-    /// Unknown bits must be dropped by from_bits_truncate.
+    /// Unknown bits must be dropped by `from_bits_truncate`.
     #[test]
     fn from_bits_truncate_drops_unknown() {
         // 0x0001_0000 is a gap in the spec (no flag defined).
@@ -251,7 +263,7 @@ mod tests {
         assert!(flags.is_empty());
     }
 
-    /// Verify we have exactly 21 flags (19 spec + DEVICE + IS_DIRECTORY).
+    /// Verify we have exactly 21 flags (19 spec + DEVICE + `IS_DIRECTORY`).
     #[test]
     fn total_flag_count() {
         // Count distinct single-bit flags by iterating known flags.

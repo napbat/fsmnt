@@ -5,7 +5,7 @@ use core::fmt;
 use nt_string::u16strle::U16StrLe;
 
 use crate::attribute::NtfsAttributeType;
-use crate::error::Result;
+use crate::error::{NtfsError, Result};
 use crate::file::KnownNtfsFileRecordNumber;
 use crate::io::{Read, Seek};
 use crate::ntfs::Ntfs;
@@ -25,6 +25,13 @@ const OFF_MIN_SIZE: usize = 144;
 
 /// Byte offset of the `max_size` field within an entry.
 const OFF_MAX_SIZE: usize = 152;
+
+fn validated_entry_bytes<const N: usize>(data: &[u8], start: usize) -> [u8; N] {
+    data.get(start..)
+        .and_then(|bytes| bytes.first_chunk())
+        .copied()
+        .expect("attribute-definition iteration yields complete fixed-size entries")
+}
 
 bitflags! {
     /// Flags from an `$AttrDef` entry indicating attribute behaviour constraints.
@@ -60,12 +67,14 @@ impl<'d> NtfsAttrDefEntry<'d> {
     ///
     /// The name occupies the first 128 bytes (64 UTF-16 code points max)
     /// and is null-terminated.
+    #[must_use]
     pub fn name(&self) -> U16StrLe<'d> {
         let name_bytes = &self.data[..self.name_length()];
         U16StrLe(name_bytes)
     }
 
     /// Returns the length of the attribute name in bytes (excluding null terminator).
+    #[must_use]
     pub fn name_length(&self) -> usize {
         // Scan for first null UTF-16 code point (two zero bytes at an even offset).
         let label = &self.data[..128];
@@ -80,31 +89,36 @@ impl<'d> NtfsAttrDefEntry<'d> {
     }
 
     /// Returns the attribute type, or `None` if the type code is not recognized.
+    #[must_use]
     pub fn attribute_type(&self) -> Option<NtfsAttributeType> {
         NtfsAttributeType::n(self.attribute_type_code())
     }
 
     /// Returns the raw attribute type code.
+    #[must_use]
     pub fn attribute_type_code(&self) -> u32 {
-        u32::from_le_bytes(self.data[OFF_ATTR_TYPE..][..4].try_into().unwrap())
+        u32::from_le_bytes(validated_entry_bytes(self.data, OFF_ATTR_TYPE))
     }
 
     /// Returns the flags for this attribute definition entry.
+    #[must_use]
     pub fn flags(&self) -> NtfsAttrDefFlags {
-        let bits = u32::from_le_bytes(self.data[OFF_FLAGS..][..4].try_into().unwrap());
+        let bits = u32::from_le_bytes(validated_entry_bytes(self.data, OFF_FLAGS));
         NtfsAttrDefFlags::from_bits_truncate(bits)
     }
 
     /// Returns the minimum allowed size for this attribute's value, in bytes.
+    #[must_use]
     pub fn min_size(&self) -> u64 {
-        u64::from_le_bytes(self.data[OFF_MIN_SIZE..][..8].try_into().unwrap())
+        u64::from_le_bytes(validated_entry_bytes(self.data, OFF_MIN_SIZE))
     }
 
     /// Returns the maximum allowed size for this attribute's value, in bytes.
     ///
     /// A value of `u64::MAX` (0xFFFFFFFFFFFFFFFF) typically means "no limit".
+    #[must_use]
     pub fn max_size(&self) -> u64 {
-        u64::from_le_bytes(self.data[OFF_MAX_SIZE..][..8].try_into().unwrap())
+        u64::from_le_bytes(validated_entry_bytes(self.data, OFF_MAX_SIZE))
     }
 }
 
@@ -125,6 +139,7 @@ impl NtfsAttrDef {
     ///
     /// This is useful for testing and fuzzing, bypassing the MFT/attribute
     /// parsing layer.
+    #[must_use]
     pub fn from_bytes(data: Vec<u8>) -> Self {
         Self { data }
     }
@@ -132,13 +147,24 @@ impl NtfsAttrDef {
     /// Loads the `$AttrDef` metafile from the filesystem.
     ///
     /// Opens MFT record 4 and reads its `$DATA` attribute into memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested NTFS metafile is missing, malformed, or cannot be read.
     pub fn load<T: Read + Seek>(ntfs: &Ntfs, fs: &mut T) -> Result<Self> {
-        let attrdef_file = ntfs.file(fs, KnownNtfsFileRecordNumber::AttrDef as u64)?;
+        let attrdef_file = ntfs.file(fs, KnownNtfsFileRecordNumber::AttrDef.as_u64())?;
         let data_attribute =
             attrdef_file.find_resident_attribute(NtfsAttributeType::Data, None, None)?;
         let mut data_value = data_attribute.value(fs)?;
 
-        let len = data_value.len() as usize;
+        let value_length = data_value.len();
+        let len =
+            usize::try_from(value_length).map_err(|_| NtfsError::InvalidStructuredValueSize {
+                position: data_value.data_position(),
+                ty: NtfsAttributeType::AttributeList,
+                expected: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+                actual: value_length,
+            })?;
         let mut data = alloc::vec![0u8; len];
         data_value.read_exact(fs, &mut data)?;
 
@@ -149,6 +175,7 @@ impl NtfsAttrDef {
     ///
     /// Iteration stops when an entry with `attr_type == 0` is encountered
     /// or when the data is exhausted.
+    #[must_use]
     pub fn entries(&self) -> NtfsAttrDefEntries<'_> {
         NtfsAttrDefEntries {
             data: &self.data,
@@ -157,14 +184,16 @@ impl NtfsAttrDef {
     }
 
     /// Finds an entry by its [`NtfsAttributeType`].
+    #[must_use]
     pub fn find_by_type(&self, ty: NtfsAttributeType) -> Option<NtfsAttrDefEntry<'_>> {
-        self.find_by_type_code(ty as u32)
+        self.find_by_type_code(ty.as_u32())
     }
 
     /// Finds an entry by its raw attribute type code.
     ///
     /// This is useful for looking up attribute types that are not in the
     /// [`NtfsAttributeType`] enum.
+    #[must_use]
     pub fn find_by_type_code(&self, code: u32) -> Option<NtfsAttrDefEntry<'_>> {
         self.entries().find(|e| e.attribute_type_code() == code)
     }
@@ -219,7 +248,7 @@ mod tests {
         max_size: u64,
     ) -> [u8; 160] {
         let mut buf = [0u8; 160];
-        let name_utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let name_utf16: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
         buf[..name_utf16.len()].copy_from_slice(&name_utf16);
         buf[OFF_ATTR_TYPE..][..4].copy_from_slice(&attr_type.to_le_bytes());
         buf[OFF_FLAGS..][..4].copy_from_slice(&flags.to_le_bytes());

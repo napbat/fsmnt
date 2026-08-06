@@ -1,6 +1,6 @@
-//! Projected File System (ProjFS) reparse point parsing.
+//! Projected File System (`ProjFS`) reparse point parsing.
 //!
-//! ProjFS lets a user-mode provider populate a directory tree on demand.
+//! `ProjFS` lets a user-mode provider populate a directory tree on demand.
 //! A projected file that has not been fully hydrated carries a reparse
 //! point; deleting a projected file leaves a tombstone reparse point.
 //! Providers include VFS for Git / Scalar (large monorepos) and the
@@ -32,7 +32,7 @@ use crate::types::NtfsPosition;
 
 use zerocopy::FromBytes;
 
-/// Identifies which ProjFS tag a reparse point uses.
+/// Identifies which `ProjFS` tag a reparse point uses.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProjFsTag {
     /// `IO_REPARSE_TAG_PROJFS` (0x9000001C) — an active projected placeholder.
@@ -44,6 +44,7 @@ pub enum ProjFsTag {
 impl ProjFsTag {
     /// Maps a raw reparse tag constant to a [`ProjFsTag`] variant, or
     /// `None` for any non-ProjFS tag.
+    #[must_use]
     pub fn from_raw(raw_tag: u32) -> Option<Self> {
         match raw_tag {
             reparse_tags::PROJFS => Some(Self::Placeholder),
@@ -53,6 +54,7 @@ impl ProjFsTag {
     }
 
     /// Returns the raw reparse tag value for this variant.
+    #[must_use]
     pub fn as_u32(self) -> u32 {
         match self {
             Self::Placeholder => reparse_tags::PROJFS,
@@ -102,17 +104,20 @@ impl NtfsProjFsReparsePoint {
         })
     }
 
-    /// Returns which ProjFS tag this reparse point uses.
+    /// Returns which `ProjFS` tag this reparse point uses.
+    #[must_use]
     pub fn tag(&self) -> ProjFsTag {
         self.tag
     }
 
-    /// Returns `true` if this is a ProjFS tombstone (a deleted projected file).
+    /// Returns `true` if this is a `ProjFS` tombstone (a deleted projected file).
+    #[must_use]
     pub fn is_tombstone(&self) -> bool {
         self.tag == ProjFsTag::Tombstone
     }
 
     /// Returns the GUID identifying the virtualization provider.
+    #[must_use]
     pub fn provider_id(&self) -> &NtfsGuid {
         &self.provider_id
     }
@@ -121,23 +126,30 @@ impl NtfsProjFsReparsePoint {
     ///
     /// The format is private to each provider; the bytes are exposed
     /// verbatim for forensic inspection.
+    #[must_use]
     pub fn provider_data(&self) -> &[u8] {
         &self.provider_data
     }
 }
 
 impl NtfsReparsePoint {
-    /// Attempts to parse this reparse point as a ProjFS reparse point.
+    /// Attempts to parse this reparse point as a `ProjFS` reparse point.
     ///
     /// Succeeds for both `IO_REPARSE_TAG_PROJFS` and
     /// `IO_REPARSE_TAG_PROJFS_TOMBSTONE`; returns an error for any other
     /// tag, or if the data is too small to hold the provider GUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-ProjFS tag or a payload too short to contain
+    /// the provider identifier.
     pub fn as_projfs(&self) -> Result<NtfsProjFsReparsePoint> {
         NtfsProjFsReparsePoint::from_reparse_point(self)
     }
 
     /// Returns `true` if this is any ProjFS-family reparse point
     /// (placeholder or tombstone).
+    #[must_use]
     pub fn is_projfs(&self) -> bool {
         matches!(
             self.tag(),
@@ -145,7 +157,8 @@ impl NtfsReparsePoint {
         )
     }
 
-    /// Returns `true` if this is a ProjFS tombstone reparse point.
+    /// Returns `true` if this is a `ProjFS` tombstone reparse point.
+    #[must_use]
     pub fn is_projfs_tombstone(&self) -> bool {
         self.tag() == reparse_tags::PROJFS_TOMBSTONE
     }
@@ -159,7 +172,11 @@ mod tests {
     fn make_reparse_bytes(tag: u32, reparse_data: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&tag.to_le_bytes());
-        buf.extend_from_slice(&(reparse_data.len() as u16).to_le_bytes());
+        buf.extend_from_slice(
+            &u16::try_from(reparse_data.len())
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(&[0u8; 2]); // reserved
         buf.extend_from_slice(reparse_data);
         buf

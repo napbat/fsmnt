@@ -7,7 +7,7 @@
 //! created by real tools, not just hand-crafted byte arrays.
 
 use std::collections::BTreeSet;
-use std::io::{Cursor, Read as _};
+use std::io::Cursor;
 
 use fs_common::FsReadSeek;
 use fs_common::traverse::walk_dir;
@@ -15,18 +15,14 @@ use fs_fat::{Fat, FatDirectory, FatDirectoryEntry, FatType};
 
 fn load_test_image() -> Option<Cursor<Vec<u8>>> {
     let path = "testdata/testfs1";
-    if !std::path::Path::new(path).exists() {
+    let Some(buffer) = fsmnt_testkit::read_optional_fixture(env!("CARGO_MANIFEST_DIR"), path)
+    else {
         eprintln!(
             "SKIPPED: {path} not found — run: \
              sudo bash testdata/create-testfs1.sh"
         );
         return None;
-    }
-    let mut buffer = Vec::new();
-    std::fs::File::open(path)
-        .unwrap()
-        .read_to_end(&mut buffer)
-        .unwrap();
+    };
     Some(Cursor::new(buffer))
 }
 
@@ -259,7 +255,10 @@ fn read_multi_cluster_file() {
     let fat = Fat::new(&mut cursor).unwrap();
 
     let file = fat.open(&mut cursor, "multi-cluster.bin").unwrap();
-    assert_eq!(file.file_size() as usize, 64 * 1024);
+    assert_eq!(
+        usize::try_from(file.file_size()).expect("the fixture file size fits usize"),
+        64 * 1024
+    );
 
     let mut value = file.data().unwrap();
     let mut buf = vec![0u8; 64 * 1024];

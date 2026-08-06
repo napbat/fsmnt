@@ -9,6 +9,14 @@ use crate::extent::{collect_extents_into, resolve_extent};
 use crate::inode::InodeFlags;
 use crate::io::{FsReadSeek, Read, Seek, SeekFrom};
 
+fn usize_from_u64(value: u64) -> Result<usize> {
+    usize::try_from(value).map_err(|_| ExtError::from(IoError::invalid_input()))
+}
+
+fn u64_from_usize(value: usize) -> Result<u64> {
+    u64::try_from(value).map_err(|_| ExtError::from(IoError::invalid_input()))
+}
+
 /// Stable stand-in for the nightly-only `OnceCell::get_or_try_init`.
 ///
 /// Upstream used `#![feature(once_cell_try)]`; fsmnt builds on stable, so
@@ -193,7 +201,8 @@ impl<'e> ExtFile<'e> {
         Self {
             backing: ExtFileBacking::InlineShort {
                 data: i_block,
-                len: size as u16,
+                len: u16::try_from(size)
+                    .expect("inline-short data is validated to contain at most 60 bytes"),
             },
             size,
             stream_pos: 0,
@@ -357,18 +366,20 @@ struct VerityTreeReader<'a, R: Read + Seek> {
 }
 
 #[cfg(feature = "verity")]
-impl<'a, R: Read + Seek> crate::verity::TreeBlockReader for VerityTreeReader<'a, R> {
+impl<R: Read + Seek> crate::verity::TreeBlockReader for VerityTreeReader<'_, R> {
     fn read_at(&mut self, offset: u64, len: usize) -> Result<alloc::vec::Vec<u8>> {
         let block_size = u64::from(self.ext.block_size);
         let mut out = alloc::vec![0u8; len];
         let mut done = 0usize;
         while done < len {
-            let cur = offset + done as u64;
+            let cur = offset
+                .checked_add(u64_from_usize(done)?)
+                .ok_or_else(|| ExtError::from(IoError::invalid_input()))?;
             let lb = u32::try_from(cur / block_size).map_err(|_| ExtError::BlockOutOfRange {
                 block: cur / block_size,
             })?;
-            let in_block = (cur % block_size) as usize;
-            let chunk = (block_size as usize - in_block).min(len - done);
+            let in_block = usize_from_u64(cur % block_size)?;
+            let chunk = (usize_from_u64(block_size)? - in_block).min(len - done);
             let physical = if self.i_flags.contains(InodeFlags::EXTENTS_FL) {
                 resolve_extent(
                     self.ext,
@@ -394,7 +405,7 @@ impl<'a, R: Read + Seek> crate::verity::TreeBlockReader for VerityTreeReader<'a,
                 Some(e) => {
                     let blocks_into = u64::from(lb - e.logical_block);
                     let byte_offset =
-                        (e.physical_block + blocks_into) * block_size + in_block as u64;
+                        (e.physical_block + blocks_into) * block_size + u64_from_usize(in_block)?;
                     self.fs.seek(SeekFrom::Start(byte_offset))?;
                     self.fs.read_exact(&mut out[done..done + chunk])?;
                 }
@@ -467,11 +478,11 @@ fn verity_read<R: Read + Seek>(ctx: VerityReadCtx<'_, R>) -> Result<usize> {
     let block_size = u64::from(ext.block_size);
     let remaining_in_file = size - stream_pos;
     let logical_block = stream_pos / block_size;
-    let offset_in_block = (stream_pos % block_size) as usize;
-    let remaining_in_block = block_size as usize - offset_in_block;
+    let offset_in_block = usize_from_u64(stream_pos % block_size)?;
+    let remaining_in_block = usize_from_u64(block_size)? - offset_in_block;
     let n = buf
         .len()
-        .min(remaining_in_file as usize)
+        .min(usize::try_from(remaining_in_file).unwrap_or(usize::MAX))
         .min(remaining_in_block);
 
     let lb = u32::try_from(logical_block).map_err(|_| ExtError::BlockOutOfRange {
@@ -489,7 +500,7 @@ fn verity_read<R: Read + Seek>(ctx: VerityReadCtx<'_, R>) -> Result<usize> {
         })?;
 
     // Read the full data block (zero-padded past EOF) into scratch.
-    let bs = block_size as usize;
+    let bs = usize_from_u64(block_size)?;
     if scratch.len() != bs {
         scratch.resize(bs, 0);
     }
@@ -530,6 +541,197 @@ fn verity_read<R: Read + Seek>(ctx: VerityReadCtx<'_, R>) -> Result<usize> {
     Ok(n)
 }
 
+#[derive(Clone, Copy)]
+struct BlockReadWindow {
+    logical_block_u32: u32,
+    offset_in_block: u64,
+    len: usize,
+}
+
+fn block_read_window(
+    size: u64,
+    stream_pos: u64,
+    block_size: u64,
+    requested_len: usize,
+) -> Result<BlockReadWindow> {
+    let logical_block = stream_pos / block_size;
+    let offset_in_block = stream_pos % block_size;
+    let len = requested_len
+        .min(usize::try_from(size - stream_pos).unwrap_or(usize::MAX))
+        .min(usize::try_from(block_size - offset_in_block).unwrap_or(usize::MAX));
+    let logical_block_u32 =
+        u32::try_from(logical_block).map_err(|_| ExtError::BlockOutOfRange {
+            block: logical_block,
+        })?;
+    Ok(BlockReadWindow {
+        logical_block_u32,
+        offset_in_block,
+        len,
+    })
+}
+
+fn resolve_data_extent<T: Read + Seek>(
+    ext: &Ext,
+    fs: &mut T,
+    inode_number: u32,
+    generation: u32,
+    i_block: &[u8; 60],
+    i_flags: InodeFlags,
+    logical_block: u32,
+) -> Result<Option<crate::extent::Extent>> {
+    if i_flags.contains(InodeFlags::EXTENTS_FL) {
+        resolve_extent(ext, fs, inode_number, generation, i_block, logical_block)
+    } else {
+        Ok(
+            resolve_block_map(ext, fs, i_block, logical_block)?.map(|physical_block| {
+                crate::extent::Extent {
+                    logical_block,
+                    physical_block,
+                    len: 1,
+                    uninitialized: false,
+                }
+            }),
+        )
+    }
+}
+
+struct MappedReadContext<'a> {
+    ext: &'a Ext,
+    inode_number: u32,
+    generation: u32,
+    i_block: &'a [u8; 60],
+    i_flags: InodeFlags,
+    size: u64,
+    stream_pos: u64,
+}
+
+fn mapped_read<T: Read + Seek>(
+    context: &MappedReadContext<'_>,
+    fs: &mut T,
+    buffer: &mut [u8],
+) -> Result<usize> {
+    let block_size = u64::from(context.ext.block_size);
+    let window = block_read_window(context.size, context.stream_pos, block_size, buffer.len())?;
+    let physical = resolve_data_extent(
+        context.ext,
+        fs,
+        context.inode_number,
+        context.generation,
+        context.i_block,
+        context.i_flags,
+        window.logical_block_u32,
+    )?;
+    match physical {
+        None => buffer[..window.len].fill(0),
+        Some(extent) if extent.uninitialized => buffer[..window.len].fill(0),
+        Some(extent) => {
+            let blocks_into = u64::from(window.logical_block_u32 - extent.logical_block);
+            let byte_offset =
+                (extent.physical_block + blocks_into) * block_size + window.offset_in_block;
+            fs.seek(SeekFrom::Start(byte_offset))?;
+            fs.read_exact(&mut buffer[..window.len])?;
+        }
+    }
+    Ok(window.len)
+}
+
+#[cfg(feature = "fscrypt")]
+struct EncryptedReadContext<'a> {
+    ext: &'a Ext,
+    inode_number: u32,
+    generation: u32,
+    i_block: &'a [u8; 60],
+    i_flags: InodeFlags,
+    cipher: &'a core::cell::OnceCell<crate::fscrypt::ContentCipher>,
+    scratch: &'a mut alloc::vec::Vec<u8>,
+    size: u64,
+    stream_pos: u64,
+}
+
+#[cfg(feature = "fscrypt")]
+fn encrypted_mapped_read<T: Read + Seek>(
+    context: &mut EncryptedReadContext<'_>,
+    fs: &mut T,
+    buffer: &mut [u8],
+) -> Result<usize> {
+    let block_size = u64::from(context.ext.block_size);
+    let window = block_read_window(context.size, context.stream_pos, block_size, buffer.len())?;
+    let cipher = once_get_or_try_init(context.cipher, || {
+        crate::fscrypt::content::build_cipher_for_inode(
+            context.ext,
+            fs,
+            context.inode_number,
+            |source| {
+                let inode = context.ext.inode(source, context.inode_number)?;
+                inode
+                    .xattr(source, "encryption.c")?
+                    .ok_or(ExtError::InvalidFscryptPolicy {
+                        inode: context.inode_number,
+                        reason: "ENCRYPT_FL set but encryption.c xattr missing",
+                    })
+            },
+        )
+    })?;
+    let physical = resolve_data_extent(
+        context.ext,
+        fs,
+        context.inode_number,
+        context.generation,
+        context.i_block,
+        context.i_flags,
+        window.logical_block_u32,
+    )?;
+    match physical {
+        None => buffer[..window.len].fill(0),
+        Some(extent) if extent.uninitialized => buffer[..window.len].fill(0),
+        Some(extent) => {
+            let block_size_usize = usize_from_u64(block_size)?;
+            if context.scratch.len() != block_size_usize {
+                context.scratch.resize(block_size_usize, 0);
+            }
+            let blocks_into = u64::from(window.logical_block_u32 - extent.logical_block);
+            let byte_offset = (extent.physical_block + blocks_into) * block_size;
+            fs.seek(SeekFrom::Start(byte_offset))?;
+            fs.read_exact(context.scratch.as_mut_slice())?;
+            cipher.decrypt_block(
+                context.scratch.as_mut_slice(),
+                u128::from(window.logical_block_u32),
+            )?;
+            let start = usize_from_u64(window.offset_in_block)?;
+            buffer[..window.len].copy_from_slice(&context.scratch[start..start + window.len]);
+        }
+    }
+    Ok(window.len)
+}
+
+#[cfg(feature = "fscrypt")]
+fn ensure_encrypted_file_key<R: Read + Seek>(
+    backing: &ExtFileBacking<'_>,
+    fs: &mut R,
+) -> Result<()> {
+    let ExtFileBacking::EncryptedMapped {
+        ext,
+        inode_number,
+        cipher,
+        ..
+    } = backing
+    else {
+        return Ok(());
+    };
+    once_get_or_try_init(cipher, || {
+        crate::fscrypt::content::build_cipher_for_inode(ext, fs, *inode_number, |source| {
+            let inode = ext.inode(source, *inode_number)?;
+            inode
+                .xattr(source, "encryption.c")?
+                .ok_or(ExtError::InvalidFscryptPolicy {
+                    inode: *inode_number,
+                    reason: "ENCRYPT_FL set but encryption.c xattr missing",
+                })
+        })
+    })?;
+    Ok(())
+}
+
 /// Read from an inline buffer at `stream_pos` into `buf`, returning
 /// the number of bytes copied. The inline content is described by
 /// `i_block[0..i_block_len]` followed by `overflow[0..overflow_len]`.
@@ -545,9 +747,11 @@ fn read_inline(
         return 0;
     }
 
-    let remaining = (size - stream_pos) as usize;
+    let remaining = usize::try_from(size - stream_pos).unwrap_or(usize::MAX);
     let to_read = buf.len().min(remaining);
-    let pos = stream_pos as usize;
+    let Ok(pos) = usize::try_from(stream_pos) else {
+        return 0;
+    };
 
     let mut written = 0;
     while written < to_read {
@@ -570,33 +774,12 @@ fn read_inline(
     written
 }
 
-impl<'e, R: Read + Seek> FsReadSeek<R> for ExtFile<'e> {
+impl<R: Read + Seek> FsReadSeek<R> for ExtFile<'_> {
     type Error = ExtError;
 
     fn read(&mut self, fs: &mut R, buf: &mut [u8]) -> Result<usize> {
-        // Fail-closed key validation for encrypted files: any read on an
-        // EncryptedMapped backing requires the key, even buf.len() == 0
-        // or EOF reads. The OnceCell makes this a no-op after first use.
         #[cfg(feature = "fscrypt")]
-        if let ExtFileBacking::EncryptedMapped {
-            ext,
-            inode_number,
-            cipher,
-            ..
-        } = &self.backing
-        {
-            once_get_or_try_init(cipher, || {
-                crate::fscrypt::content::build_cipher_for_inode(ext, fs, *inode_number, |fs2| {
-                    let inode = ext.inode(fs2, *inode_number)?;
-                    inode
-                        .xattr(fs2, "encryption.c")?
-                        .ok_or(ExtError::InvalidFscryptPolicy {
-                            inode: *inode_number,
-                            reason: "ENCRYPT_FL set but encryption.c xattr missing",
-                        })
-                })
-            })?;
-        }
+        ensure_encrypted_file_key(&self.backing, fs)?;
 
         if buf.is_empty() || self.stream_pos >= self.size {
             return Ok(0);
@@ -609,51 +792,19 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExtFile<'e> {
                 generation,
                 i_block,
                 i_flags,
-            } => {
-                let block_size = u64::from(ext.block_size);
-                let remaining_in_file = self.size - self.stream_pos;
-                let logical_block = self.stream_pos / block_size;
-                let offset_in_block = self.stream_pos % block_size;
-                let remaining_in_block = block_size - offset_in_block;
-
-                let n = buf
-                    .len()
-                    .min(remaining_in_file as usize)
-                    .min(remaining_in_block as usize);
-
-                let lb = u32::try_from(logical_block).map_err(|_| ExtError::BlockOutOfRange {
-                    block: logical_block,
-                })?;
-
-                let physical = if i_flags.contains(InodeFlags::EXTENTS_FL) {
-                    resolve_extent(ext, fs, *inode_number, *generation, i_block, lb)?
-                } else {
-                    resolve_block_map(ext, fs, i_block, lb)?.map(|phys| crate::extent::Extent {
-                        logical_block: lb,
-                        physical_block: phys,
-                        len: 1,
-                        uninitialized: false,
-                    })
-                };
-
-                match physical {
-                    None => {
-                        buf[..n].fill(0);
-                    }
-                    Some(ext) if ext.uninitialized => {
-                        buf[..n].fill(0);
-                    }
-                    Some(ext) => {
-                        let blocks_into = u64::from(lb - ext.logical_block);
-                        let byte_offset =
-                            (ext.physical_block + blocks_into) * block_size + offset_in_block;
-                        fs.seek(SeekFrom::Start(byte_offset))?;
-                        fs.read_exact(&mut buf[..n])?;
-                    }
-                }
-
-                n
-            }
+            } => mapped_read(
+                &MappedReadContext {
+                    ext,
+                    inode_number: *inode_number,
+                    generation: *generation,
+                    i_block,
+                    i_flags: *i_flags,
+                    size: self.size,
+                    stream_pos: self.stream_pos,
+                },
+                fs,
+                buf,
+            )?,
             #[cfg(feature = "fscrypt")]
             ExtFileBacking::EncryptedMapped {
                 ext,
@@ -663,76 +814,21 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExtFile<'e> {
                 i_flags,
                 cipher,
                 scratch,
-            } => {
-                let block_size = u64::from(ext.block_size);
-                let remaining_in_file = self.size - self.stream_pos;
-                let logical_block = self.stream_pos / block_size;
-                let offset_in_block = self.stream_pos % block_size;
-                let remaining_in_block = block_size - offset_in_block;
-
-                let n = buf
-                    .len()
-                    .min(remaining_in_file as usize)
-                    .min(remaining_in_block as usize);
-
-                let lb = u32::try_from(logical_block).map_err(|_| ExtError::BlockOutOfRange {
-                    block: logical_block,
-                })?;
-
-                // Build (or reuse) the AES-256-XTS cipher BEFORE we
-                // resolve the block. Sparse / uninitialized regions
-                // legitimately read as zeros, but a missing key or
-                // unsupported policy must fail-closed regardless of
-                // whether the touched block is a hole. The closure
-                // re-fetches the inode + xattr from `fs`; `Ext::inode`
-                // is `&self`, not `&mut`, so calling it here is safe.
-                let cipher_ref = once_get_or_try_init(cipher, || {
-                    crate::fscrypt::content::build_cipher_for_inode(ext, fs, *inode_number, |fs2| {
-                        let inode = ext.inode(fs2, *inode_number)?;
-                        inode
-                            .xattr(fs2, "encryption.c")?
-                            .ok_or(ExtError::InvalidFscryptPolicy {
-                                inode: *inode_number,
-                                reason: "ENCRYPT_FL set but encryption.c xattr missing",
-                            })
-                    })
-                })?;
-
-                let physical = if i_flags.contains(InodeFlags::EXTENTS_FL) {
-                    resolve_extent(ext, fs, *inode_number, *generation, i_block, lb)?
-                } else {
-                    resolve_block_map(ext, fs, i_block, lb)?.map(|phys| crate::extent::Extent {
-                        logical_block: lb,
-                        physical_block: phys,
-                        len: 1,
-                        uninitialized: false,
-                    })
-                };
-
-                match physical {
-                    None => buf[..n].fill(0),
-                    Some(e) if e.uninitialized => buf[..n].fill(0),
-                    Some(e) => {
-                        // Read and decrypt the entire physical block,
-                        // then slice into the user buffer. The scratch
-                        // buffer is lazily sized to block_size on first
-                        // use and reused across subsequent reads.
-                        let bs = block_size as usize;
-                        if scratch.len() != bs {
-                            scratch.resize(bs, 0);
-                        }
-                        let blocks_into = u64::from(lb - e.logical_block);
-                        let byte_offset = (e.physical_block + blocks_into) * block_size;
-                        fs.seek(SeekFrom::Start(byte_offset))?;
-                        fs.read_exact(scratch.as_mut_slice())?;
-                        cipher_ref.decrypt_block(scratch.as_mut_slice(), u128::from(lb))?;
-                        let start = offset_in_block as usize;
-                        buf[..n].copy_from_slice(&scratch[start..start + n]);
-                    }
-                }
-
-                n
-            }
+            } => encrypted_mapped_read(
+                &mut EncryptedReadContext {
+                    ext,
+                    inode_number: *inode_number,
+                    generation: *generation,
+                    i_block,
+                    i_flags: *i_flags,
+                    cipher,
+                    scratch,
+                    size: self.size,
+                    stream_pos: self.stream_pos,
+                },
+                fs,
+                buf,
+            )?,
             #[cfg(feature = "verity")]
             ExtFileBacking::VerityMapped {
                 ext,
@@ -755,15 +851,20 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExtFile<'e> {
                 stream_pos: self.stream_pos,
                 buf,
             })?,
-            ExtFileBacking::InlineShort { data, len } => {
-                read_inline(data, *len as usize, &[], self.stream_pos, self.size, buf)
-            }
+            ExtFileBacking::InlineShort { data, len } => read_inline(
+                data,
+                usize::from(*len),
+                &[],
+                self.stream_pos,
+                self.size,
+                buf,
+            ),
             ExtFileBacking::InlineOverflow { i_block, overflow } => {
                 read_inline(i_block, 60, overflow, self.stream_pos, self.size, buf)
             }
         };
 
-        self.stream_pos += n as u64;
+        self.stream_pos += u64_from_usize(n)?;
         Ok(n)
     }
 
@@ -778,7 +879,7 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExtFile<'e> {
         };
 
         let new_pos = if offset >= 0 {
-            base.checked_add(offset as u64)
+            base.checked_add(offset.unsigned_abs())
         } else {
             base.checked_sub(offset.unsigned_abs())
         };

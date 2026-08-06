@@ -1,4 +1,5 @@
 pub mod cbc;
+/// Elephant diffuser transformations used by legacy CBC+diffuser volumes.
 pub mod diffuser;
 pub mod xts;
 
@@ -15,10 +16,16 @@ pub(crate) trait SectorDecryptor: Zeroize + ZeroizeOnDrop {
 
 /// Enum-based sector decryptor dispatch (avoids object safety issues).
 #[derive(Debug)]
-#[expect(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "decryptors remain inline so key-bearing cipher schedules are not separately allocated"
+)]
 pub enum Decryptor {
+    /// AES-CBC sector decryption without the legacy diffuser.
     Cbc(cbc::AesCbcDecryptor),
+    /// AES-CBC sector decryption followed by Elephant diffusion.
     CbcDiffuser(cbc::AesCbcDiffuserDecryptor),
+    /// AES-XTS sector decryption.
     Xts(xts::AesXtsDecryptor),
 }
 

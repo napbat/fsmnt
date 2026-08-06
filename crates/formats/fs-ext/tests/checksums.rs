@@ -1,4 +1,6 @@
-mod common;
+//! Integration tests for ext filesystem metadata checksum validation.
+
+mod support;
 
 use fs_common::io::FsReadSeek;
 use fs_common::iter::FsTryIterator;
@@ -15,7 +17,7 @@ fn lookup_inode(ext: &fs_ext::Ext, fs: &mut std::io::Cursor<Vec<u8>>, name: &[u8
 fn read_file_validates_extent_checksums() {
     // Reading a block-backed file exercises extent resolution.
     // If checksums were wrong, the read would fail.
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"hello.txt");
     let inode = ext.inode(&mut fs, ino).unwrap();
     let mut file = inode.open_file().unwrap();
@@ -27,7 +29,7 @@ fn read_file_validates_extent_checksums() {
 #[test]
 fn directory_traversal_validates_dir_checksums() {
     // Listing root directory exercises directory block reading.
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut entries = root.entries(&mut fs).unwrap();
     let mut count = 0;
@@ -41,7 +43,7 @@ fn directory_traversal_validates_dir_checksums() {
 fn htree_lookup_validates_dx_checksums() {
     // The htree_dir directory has 500 files, triggering htree
     // lookup. A successful lookup means dx node checksums passed.
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"htree_dir");
     let mut dir = ext.directory_at(ino);
     let entry = dir.lookup(&mut fs, b"file_250.txt").unwrap();
@@ -52,7 +54,7 @@ fn htree_lookup_validates_dx_checksums() {
 fn ext3_no_checksums_still_works() {
     // ext3.img has no METADATA_CSUM -- all checksums should be
     // Unknown (skipped). Operations should succeed.
-    let (ext, mut fs) = common::open_ext("ext3.img");
+    let (ext, mut fs) = support::open_ext("ext3.img");
     let mut root = ext.root_directory();
     let entry = root.lookup(&mut fs, b"hello.txt").unwrap();
     let inode = ext.inode(&mut fs, entry.inode_number).unwrap();
@@ -72,7 +74,7 @@ fn htree_leaf_missing_tail_is_rejected() {
     // target filename's hash happens to land in on the current fixture.
     const HTREE_LEAF_PHYS_BLOCKS: [usize; 4] = [1535, 1740, 1839, 1840];
 
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     for pb in HTREE_LEAF_PHYS_BLOCKS {
         fs.get_mut()[pb * BLOCK_SIZE + DIR_ENTRY_TAIL_FILE_TYPE_OFF] = 0;
     }

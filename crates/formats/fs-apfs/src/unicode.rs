@@ -81,7 +81,11 @@ pub fn name_hash(name: &str, case_fold: bool) -> u32 {
     }
     let hash = crc32c(&bytes) & 0x003F_FFFF;
     // The stored name length includes the trailing NUL.
-    let name_len = (name.len() as u32 + 1) & J_DREC_LEN_MASK;
+    let masked_len = name.len() & usize::try_from(J_DREC_LEN_MASK).unwrap_or(usize::MAX);
+    let name_len = u32::try_from(masked_len)
+        .unwrap_or_default()
+        .wrapping_add(1)
+        & J_DREC_LEN_MASK;
     pack_hash_len(hash, name_len)
 }
 
@@ -127,7 +131,10 @@ mod tests {
     fn name_hash_packs_the_name_length() {
         // The low ten bits hold the UTF-8 length plus the NUL.
         let packed = name_hash("file.txt", false);
-        assert_eq!(packed & J_DREC_LEN_MASK, "file.txt".len() as u32 + 1);
+        assert_eq!(
+            packed & J_DREC_LEN_MASK,
+            u32::try_from("file.txt".len()).expect("the test fixture value fits in u32") + 1
+        );
     }
 
     #[test]

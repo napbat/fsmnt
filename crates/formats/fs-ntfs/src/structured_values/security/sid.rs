@@ -1,6 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use core::fmt;
+use core::fmt::Write;
 
 use arrayvec::ArrayVec;
 
@@ -33,6 +34,11 @@ pub struct NtfsSid {
 
 impl NtfsSid {
     /// Parse a SID from raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the SID header or declared sub-authorities are
+    /// truncated, or if the SID revision is unsupported.
     pub fn from_bytes(data: &[u8], position: NtfsPosition) -> Result<Self> {
         if data.len() < SID_MIN_SIZE {
             return Err(NtfsError::InvalidSid {
@@ -42,7 +48,7 @@ impl NtfsSid {
         }
 
         let revision = data[0];
-        let sub_authority_count = data[1] as usize;
+        let sub_authority_count = usize::from(data[1]);
 
         if sub_authority_count > SID_MAX_SUB_AUTHORITIES {
             return Err(NtfsError::InvalidSid {
@@ -82,6 +88,7 @@ impl NtfsSid {
     }
 
     /// Returns the SID revision (always 1 for current Windows versions).
+    #[must_use]
     pub fn revision(&self) -> u8 {
         self.revision
     }
@@ -95,27 +102,31 @@ impl NtfsSid {
     // equivalent mutants. The shift amounts and the assembled value are pinned
     // by `authority_big_endian_assembly` and the well-known-SID tests.
     #[cfg_attr(test, mutants::skip)]
+    #[must_use]
     pub fn authority(&self) -> u64 {
         let a = &self.identifier_authority;
-        ((a[0] as u64) << 40)
-            | ((a[1] as u64) << 32)
-            | ((a[2] as u64) << 24)
-            | ((a[3] as u64) << 16)
-            | ((a[4] as u64) << 8)
-            | (a[5] as u64)
+        (u64::from(a[0]) << 40)
+            | (u64::from(a[1]) << 32)
+            | (u64::from(a[2]) << 24)
+            | (u64::from(a[3]) << 16)
+            | (u64::from(a[4]) << 8)
+            | u64::from(a[5])
     }
 
     /// Returns the sub-authority values.
+    #[must_use]
     pub fn sub_authorities(&self) -> &[u32] {
         &self.sub_authorities
     }
 
     /// Returns the total size of this SID in bytes.
+    #[must_use]
     pub fn byte_size(&self) -> usize {
         SID_MIN_SIZE + self.sub_authorities.len() * 4
     }
 
     /// Returns a well-known name if this is a recognized SID, or `None`.
+    #[must_use]
     pub fn well_known_name(&self) -> Option<&'static str> {
         let auth = self.authority();
         let subs = self.sub_authorities();
@@ -135,19 +146,20 @@ impl NtfsSid {
     }
 
     /// Formats the SID as a string: `S-{revision}-{authority}-{sub1}-{sub2}-...`
+    #[must_use]
     pub fn to_sid_string(&self) -> String {
         let mut s = format!("S-{}", self.revision);
 
         let auth = self.authority();
         if auth >= (1u64 << 32) {
             // Display as hex with 0x prefix for large authorities (theoretical)
-            s += &format!("-0x{auth:012x}");
+            let _ = write!(s, "-0x{auth:012x}");
         } else {
-            s += &format!("-{auth}");
+            let _ = write!(s, "-{auth}");
         }
 
         for sub in &self.sub_authorities {
-            s += &format!("-{sub}");
+            let _ = write!(s, "-{sub}");
         }
 
         s
@@ -323,7 +335,16 @@ mod tests {
         // One fixture per well_known_name match arm so deleting any arm
         // changes the returned name. Each tuple is (authority, sub-auths).
         fn make_sid(authority: u8, subs: &[u32]) -> NtfsSid {
-            let mut data = vec![0x01, subs.len() as u8, 0, 0, 0, 0, 0, authority];
+            let mut data = vec![
+                0x01,
+                u8::try_from(subs.len()).expect("test value fits u8"),
+                0,
+                0,
+                0,
+                0,
+                0,
+                authority,
+            ];
             for sub in subs {
                 data.extend_from_slice(&sub.to_le_bytes());
             }

@@ -9,7 +9,7 @@ fn main() {
     divan::main();
 }
 
-/// Pre-compress data and return (compressed_bytes, original_len).
+/// Pre-compress data and return (`compressed_bytes`, `original_len`).
 fn precompressed<F>(
     data: &[u8],
     bound_fn: F,
@@ -37,7 +37,7 @@ const LZX_SIZES: &[usize] = &[4_096, 32_768];
 
 #[divan::bench_group]
 mod lznt1 {
-    use super::*;
+    use super::{BytesCount, SIZES, mixed, precompressed, random_ish, zeros};
 
     #[divan::bench(args = SIZES)]
     fn decompress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -85,7 +85,7 @@ mod lznt1 {
 
 #[divan::bench_group]
 mod xpress {
-    use super::*;
+    use super::{BytesCount, SIZES, mixed, precompressed, random_ish, zeros};
 
     #[divan::bench(args = SIZES)]
     fn decompress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -133,7 +133,7 @@ mod xpress {
 
 #[divan::bench_group]
 mod xpress_huffman {
-    use super::*;
+    use super::{BytesCount, SIZES, mixed, precompressed, random_ish, zeros};
 
     #[divan::bench(args = SIZES)]
     fn decompress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -187,7 +187,7 @@ mod xpress_huffman {
 
 #[divan::bench_group]
 mod lzx {
-    use super::*;
+    use super::{BytesCount, LZX_SIZES, mixed, precompressed, random_ish, zeros};
 
     #[divan::bench(args = LZX_SIZES)]
     fn decompress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {

@@ -11,7 +11,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use zerocopy::{FromBytes, Immutable, KnownLayout, LittleEndian as LE, U32, U64, Unaligned};
+use zerocopy::{FromBytes, I64, Immutable, KnownLayout, LittleEndian as LE, U32, U64, Unaligned};
 
 use crate::btree::BtreeNode;
 use crate::checksum;
@@ -39,6 +39,10 @@ const PRANGE_SIZE: usize = 16;
 const MAX_DESC_TREE_NODES: usize = 4096;
 
 /// On-disk `checkpoint_mapping_t` (40 bytes).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the cpm_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawCheckpointMapping {
@@ -48,13 +52,17 @@ struct RawCheckpointMapping {
     cpm_pad: U32<LE>,
     cpm_fs_oid: U64<LE>,
     cpm_oid: U64<LE>,
-    cpm_paddr: U64<LE>,
+    cpm_paddr: I64<LE>,
 }
 
 /// Size of a `checkpoint_mapping_t`.
 const CHECKPOINT_MAPPING_SIZE: usize = core::mem::size_of::<RawCheckpointMapping>();
 
 /// On-disk `checkpoint_map_phys_t` fixed header (`obj_phys_t` + flags + count).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the cpm_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawCheckpointMapHeader {
@@ -142,7 +150,7 @@ impl CheckpointMapPhys {
                 size: raw.cpm_size.get(),
                 fs_oid: Oid(raw.cpm_fs_oid.get()),
                 oid: Oid(raw.cpm_oid.get()),
-                paddr: Paddr(raw.cpm_paddr.get() as i64),
+                paddr: Paddr(raw.cpm_paddr.get()),
             });
         }
         Ok(Self { flags, mappings })
@@ -495,10 +503,18 @@ mod tests {
         b[0x10..0x18].copy_from_slice(&xid.to_le_bytes());
         b[0x18..0x1C].copy_from_slice(&(OBJ_EPHEMERAL | 0x01).to_le_bytes());
         b[0x20..0x24].copy_from_slice(&0x4253_584Eu32.to_le_bytes()); // NXSB
-        b[0x24..0x28].copy_from_slice(&(BLK as u32).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         b[0x28..0x30].copy_from_slice(&100_000u64.to_le_bytes());
         b[0x68..0x6C].copy_from_slice(&desc_blocks.to_le_bytes()); // nx_xp_desc_blocks
-        b[0x70..0x78].copy_from_slice(&(desc_base as i64).to_le_bytes()); // nx_xp_desc_base
+        b[0x70..0x78].copy_from_slice(
+            &i64::try_from(desc_base)
+                .expect("the test fixture descriptor base fits in i64")
+                .to_le_bytes(),
+        ); // nx_xp_desc_base
         b[0x88..0x8C].copy_from_slice(&desc_index.to_le_bytes()); // nx_xp_desc_index
         b[0x8C..0x90].copy_from_slice(&desc_len.to_le_bytes()); // nx_xp_desc_len
         seal(&mut b);
@@ -595,18 +611,38 @@ mod tests {
         let mut b = vec![0u8; BLK];
         b[0x18..0x1C].copy_from_slice(&0x4000_0002u32.to_le_bytes()); // BTREE, physical
         b[0x20..0x22].copy_from_slice(&0x0007u16.to_le_bytes()); // ROOT|LEAF|FIXED
-        b[0x24..0x28].copy_from_slice(&(fragments.len() as u32).to_le_bytes()); // btn_nkeys
-        b[0x2A..0x2C].copy_from_slice(&((fragments.len() * 4) as u16).to_le_bytes()); // toc len
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(fragments.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        ); // btn_nkeys
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(fragments.len() * 4)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        ); // toc len
         let key_area = BTN_DATA_OFFSET + fragments.len() * 4;
         let value_end = BLK - BTREE_INFO_SIZE;
         for (i, &(index, phys, count)) in fragments.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 4;
-            b[toc..toc + 2].copy_from_slice(&((i * 8) as u16).to_le_bytes()); // key offset
-            b[toc + 2..toc + 4].copy_from_slice(&(((i + 1) * 16) as u16).to_le_bytes()); // val
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(i * 8)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            ); // key offset
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from((i + 1) * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            ); // val
             let ks = key_area + i * 8;
             b[ks..ks + 8].copy_from_slice(&index.to_le_bytes());
             let vs = value_end - (i + 1) * 16;
-            b[vs..vs + 8].copy_from_slice(&(phys as i64).to_le_bytes()); // pr_start_addr
+            b[vs..vs + 8].copy_from_slice(
+                &i64::try_from(phys)
+                    .expect("the test fixture physical address fits in i64")
+                    .to_le_bytes(),
+            ); // pr_start_addr
             b[vs + 8..vs + 16].copy_from_slice(&count.to_le_bytes()); // pr_block_count
         }
         let info = BLK - BTREE_INFO_SIZE;
@@ -733,7 +769,11 @@ mod tests {
         // re-read mapping 0 for index 1.
         let n = 2;
         let mut b = vec![0u8; CHECKPOINT_MAP_HEADER_SIZE + n * CHECKPOINT_MAPPING_SIZE];
-        b[OBJ_PHYS_SIZE + 4..OBJ_PHYS_SIZE + 8].copy_from_slice(&(n as u32).to_le_bytes());
+        b[OBJ_PHYS_SIZE + 4..OBJ_PHYS_SIZE + 8].copy_from_slice(
+            &u32::try_from(n)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         // cpm_map[0]: oid=100 at offset +24.
         let m0 = CHECKPOINT_MAP_HEADER_SIZE;
         b[m0 + 24..m0 + 32].copy_from_slice(&100u64.to_le_bytes());

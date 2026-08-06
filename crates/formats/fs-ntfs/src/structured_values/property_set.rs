@@ -16,6 +16,7 @@ use crate::types::NtfsPosition;
 /// inside an MFT record (typically 1KB, at most 4KB). 4KB is therefore a safe
 /// upper bound that accommodates the largest possible MFT record size.
 const MAX_PROPERTY_SET_SIZE: usize = 4096;
+const MAX_PROPERTY_SET_SIZE_U64: u64 = 4096;
 
 /// Structure of a `$PROPERTY_SET` attribute (type 0xF0).
 ///
@@ -39,16 +40,17 @@ impl NtfsPropertySet {
     where
         T: Read,
     {
-        if value_length > MAX_PROPERTY_SET_SIZE as u64 {
+        if value_length > MAX_PROPERTY_SET_SIZE_U64 {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::PropertySet,
-                expected: MAX_PROPERTY_SET_SIZE as u64,
+                expected: MAX_PROPERTY_SET_SIZE_U64,
                 actual: value_length,
             });
         }
 
-        let value_length = value_length as usize;
+        let value_length =
+            usize::try_from(value_length).expect("validated property set size fits in usize");
 
         let mut data = ArrayVec::from([0u8; MAX_PROPERTY_SET_SIZE]);
         r.read_exact(&mut data[..value_length])?;
@@ -60,11 +62,13 @@ impl NtfsPropertySet {
     /// Returns the raw property set data as a byte slice.
     ///
     /// The data follows the OLE Property Set format (MS-OLEPS).
+    #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
     /// Returns the length of the property set data in bytes.
+    #[must_use]
     pub fn data_length(&self) -> usize {
         self.data.len()
     }
@@ -72,7 +76,7 @@ impl NtfsPropertySet {
 
 impl_structured_value_via_new!(NtfsPropertySet, NtfsAttributeType::PropertySet);
 
-impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsPropertySet {
+impl<'f> NtfsStructuredValueFromResidentAttributeValue<'_, 'f> for NtfsPropertySet {
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self> {
         let position = value.data_position();
         let value_length = value.len();
@@ -85,7 +89,7 @@ impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsPrope
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for NtfsPropertySet {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let len = u.arbitrary::<u16>()? as usize % (MAX_PROPERTY_SET_SIZE + 1);
+        let len = usize::from(u.arbitrary::<u16>()?) % (MAX_PROPERTY_SET_SIZE + 1);
         let mut data = ArrayVec::new();
         for _ in 0..len {
             data.push(u.arbitrary()?);
@@ -103,8 +107,12 @@ mod tests {
         // Minimal data — just some raw bytes
         let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let mut cursor = ReadOnlyCursor::new(&data);
-        let ps = NtfsPropertySet::new(&mut cursor, NtfsPosition::none(), data.len() as u64)
-            .expect("should parse valid property set");
+        let ps = NtfsPropertySet::new(
+            &mut cursor,
+            NtfsPosition::none(),
+            u64::try_from(data.len()).expect("test property-set length fits u64"),
+        )
+        .expect("should parse valid property set");
 
         assert_eq!(ps.data(), &data);
         assert_eq!(ps.data_length(), 8);
@@ -128,7 +136,7 @@ mod tests {
         let result = NtfsPropertySet::new(
             &mut cursor,
             NtfsPosition::new(0x200),
-            (MAX_PROPERTY_SET_SIZE as u64) + 1,
+            u64::try_from(MAX_PROPERTY_SET_SIZE).expect("property-set size limit fits u64") + 1,
         );
         assert!(result.is_err());
     }
@@ -140,7 +148,7 @@ mod tests {
         let ps = NtfsPropertySet::new(
             &mut cursor,
             NtfsPosition::none(),
-            MAX_PROPERTY_SET_SIZE as u64,
+            u64::try_from(MAX_PROPERTY_SET_SIZE).expect("property-set size limit fits u64"),
         )
         .expect("should parse max-size property set");
 
@@ -190,8 +198,12 @@ mod tests {
         data[27] = 0x00;
 
         let mut cursor = ReadOnlyCursor::new(&data);
-        let ps = NtfsPropertySet::new(&mut cursor, NtfsPosition::none(), data.len() as u64)
-            .expect("should parse OLE-like property set");
+        let ps = NtfsPropertySet::new(
+            &mut cursor,
+            NtfsPosition::none(),
+            u64::try_from(data.len()).expect("test property-set length fits u64"),
+        )
+        .expect("should parse OLE-like property set");
 
         assert_eq!(ps.data(), &data);
         assert_eq!(ps.data()[0..2], [0xFE, 0xFF]);

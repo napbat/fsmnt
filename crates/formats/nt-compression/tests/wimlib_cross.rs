@@ -29,7 +29,9 @@ fn test_patterns() -> vec::Vec<(&'static str, vec::Vec<u8>)> {
     patterns.push(("zeros_1k", vec![0u8; 1024]));
 
     // Sequential bytes.
-    let sequential: vec::Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+    let sequential: vec::Vec<u8> = (0..512)
+        .map(|i| u8::try_from(i % 256).expect("the modulus limits values to one byte"))
+        .collect();
     patterns.push(("sequential_512", sequential));
 
     // Repetitive short pattern.
@@ -40,27 +42,36 @@ fn test_patterns() -> vec::Vec<(&'static str, vec::Vec<u8>)> {
     let mut mixed = vec![0u8; 4096];
     for (i, byte) in mixed.iter_mut().enumerate() {
         *byte = if i < 2048 {
-            (i % 64) as u8
+            u8::try_from(i % 64).expect("the modulus limits values below 64")
         } else {
-            ((i * 7 + 13) % 251) as u8
+            u8::try_from((i * 7 + 13) % 251).expect("the modulus limits values below 251")
         };
     }
     patterns.push(("mixed_4k", mixed));
 
     // High entropy (nearly incompressible).
     let high_entropy: vec::Vec<u8> = (0..4096)
-        .map(|i| ((i as u64 * 2_654_435_761_u64) >> 16) as u8)
+        .map(|i| {
+            let mixed = u64::try_from(i)
+                .expect("the test range fits in u64")
+                .wrapping_mul(2_654_435_761);
+            (mixed >> 16).to_le_bytes()[0]
+        })
         .collect();
     patterns.push(("high_entropy_4k", high_entropy));
 
     // Full 32 KB chunk with repeated patches (LZX block size).
-    let mut full_chunk_32k: vec::Vec<u8> = (0..32768).map(|i| (i % 251) as u8).collect();
+    let mut full_chunk_32k: vec::Vec<u8> = (0..32768)
+        .map(|i| u8::try_from(i % 251).expect("the modulus limits values below 251"))
+        .collect();
     let patch = vec![0xAA_u8; 1000];
     full_chunk_32k[15000..16000].copy_from_slice(&patch);
     patterns.push(("full_chunk_32k", full_chunk_32k));
 
     // Full 64 KB chunk with repeated patches (XPRESS Huffman block size).
-    let mut full_chunk_64k: vec::Vec<u8> = (0..65536).map(|i| (i % 251) as u8).collect();
+    let mut full_chunk_64k: vec::Vec<u8> = (0..65536)
+        .map(|i| u8::try_from(i % 251).expect("the modulus limits values below 251"))
+        .collect();
     let patch64 = vec![0xBB_u8; 2000];
     full_chunk_64k[30000..32000].copy_from_slice(&patch64);
     patterns.push(("full_chunk_64k", full_chunk_64k));

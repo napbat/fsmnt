@@ -24,7 +24,6 @@ const INTERVALS_PER_MILLISECOND: u64 = 10_000;
 ///
 /// Creation time has additional 10ms resolution via the `tenths` field (0-199).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FatTime {
     /// DOS date (packed format).
     date: u16,
@@ -35,9 +34,21 @@ pub struct FatTime {
     tenths: u8,
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for FatTime {
+    fn arbitrary(unstructured: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            date: unstructured.arbitrary()?,
+            time: unstructured.arbitrary()?,
+            tenths: unstructured.arbitrary()?,
+        })
+    }
+}
+
 impl FatTime {
     /// Creates a new `FatTime` from DOS date, time, and tenths values.
     #[inline]
+    #[must_use]
     pub const fn new(date: u16, time: u16, tenths: u8) -> Self {
         Self { date, time, tenths }
     }
@@ -46,6 +57,7 @@ impl FatTime {
     ///
     /// This is useful for the `access_date` field which has no time component.
     #[inline]
+    #[must_use]
     pub const fn from_date(date: u16) -> Self {
         Self {
             date,
@@ -56,40 +68,46 @@ impl FatTime {
 
     /// Returns the year (1980-2107).
     #[inline]
+    #[must_use]
     pub const fn year(&self) -> u16 {
         1980 + ((self.date >> 9) & 0x7F)
     }
 
     /// Returns the month (1-12).
     #[inline]
+    #[must_use]
     pub const fn month(&self) -> u8 {
-        ((self.date >> 5) & 0x0F) as u8
+        ((self.date >> 5) & 0x0F).to_le_bytes()[0]
     }
 
     /// Returns the day of the month (1-31).
     #[inline]
+    #[must_use]
     pub const fn day(&self) -> u8 {
-        (self.date & 0x1F) as u8
+        self.date.to_le_bytes()[0] & 0x1F
     }
 
     /// Returns the hour (0-23).
     #[inline]
+    #[must_use]
     pub const fn hour(&self) -> u8 {
-        ((self.time >> 11) & 0x1F) as u8
+        ((self.time >> 11) & 0x1F).to_le_bytes()[0]
     }
 
     /// Returns the minute (0-59).
     #[inline]
+    #[must_use]
     pub const fn minute(&self) -> u8 {
-        ((self.time >> 5) & 0x3F) as u8
+        ((self.time >> 5) & 0x3F).to_le_bytes()[0]
     }
 
     /// Returns the second (0-59).
     ///
     /// For creation time, this includes the additional second from `tenths` if >= 100.
     #[inline]
+    #[must_use]
     pub const fn second(&self) -> u8 {
-        let base_seconds = ((self.time & 0x1F) * 2) as u8;
+        let base_seconds = ((self.time & 0x1F) * 2).to_le_bytes()[0];
         if self.tenths >= 100 {
             base_seconds + 1
         } else {
@@ -99,29 +117,33 @@ impl FatTime {
 
     /// Returns the millisecond (0-990, in 10ms increments).
     #[inline]
+    #[must_use]
     pub const fn millisecond(&self) -> u16 {
         let tenths_mod = if self.tenths >= 100 {
             self.tenths - 100
         } else {
             self.tenths
         };
-        (tenths_mod as u16) * 10
+        u16::from_le_bytes([tenths_mod, 0]) * 10
     }
 
     /// Returns the raw DOS date value.
     #[inline]
+    #[must_use]
     pub const fn raw_date(&self) -> u16 {
         self.date
     }
 
     /// Returns the raw DOS time value.
     #[inline]
+    #[must_use]
     pub const fn raw_time(&self) -> u16 {
         self.time
     }
 
     /// Returns the raw tenths value.
     #[inline]
+    #[must_use]
     pub const fn raw_tenths(&self) -> u8 {
         self.tenths
     }
@@ -130,29 +152,31 @@ impl FatTime {
     /// since January 1, 1601).
     ///
     /// This is useful for compatibility with NTFS timestamps.
+    #[must_use]
     pub fn nt_timestamp(&self) -> u64 {
         // Calculate days since FAT epoch (1980-01-01)
         let days = self.days_since_fat_epoch();
 
         // Calculate seconds within the day
-        let seconds_in_day =
-            (self.hour() as u64) * 3600 + (self.minute() as u64) * 60 + (self.second() as u64);
+        let seconds_in_day = u64::from(self.hour()) * 3600
+            + u64::from(self.minute()) * 60
+            + u64::from(self.second());
 
         // Calculate total seconds since FAT epoch
-        let total_seconds = (days as u64) * 86400 + seconds_in_day;
+        let total_seconds = u64::from(days) * 86400 + seconds_in_day;
 
         // Convert to 100-nanosecond intervals and add FAT epoch offset
         let intervals = total_seconds * INTERVALS_PER_SECOND
-            + (self.millisecond() as u64) * INTERVALS_PER_MILLISECOND;
+            + u64::from(self.millisecond()) * INTERVALS_PER_MILLISECOND;
 
         FAT_EPOCH_DIFFERENCE_IN_INTERVALS + intervals
     }
 
     /// Calculates the number of days since the FAT epoch (1980-01-01).
-    fn days_since_fat_epoch(&self) -> u32 {
-        let year = self.year() as u32;
-        let month = self.month() as u32;
-        let day = self.day() as u32;
+    fn days_since_fat_epoch(self) -> u32 {
+        let year = u32::from(self.year());
+        let month = usize::from(self.month());
+        let day = u32::from(self.day());
 
         // Years since 1980
         let years_since_epoch = year - 1980;
@@ -170,7 +194,7 @@ impl FatTime {
         days_from_years + days_from_months + day.saturating_sub(1)
     }
 
-    /// Counts leap years in the range [start_year, end_year).
+    /// Counts leap years in the range [`start_year`, `end_year`).
     fn count_leap_years(start_year: u32, end_year: u32) -> u32 {
         if end_year <= start_year {
             return 0;
@@ -193,7 +217,7 @@ impl FatTime {
     }
 
     /// Returns the number of days before the given month (1-12) in a year.
-    const fn days_before_month(month: u32, is_leap: bool) -> u32 {
+    const fn days_before_month(month: usize, is_leap: bool) -> u32 {
         const DAYS_BEFORE: [u32; 13] = [0, 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
         const DAYS_BEFORE_LEAP: [u32; 13] =
             [0, 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335];
@@ -203,9 +227,9 @@ impl FatTime {
         }
 
         if is_leap {
-            DAYS_BEFORE_LEAP[month as usize]
+            DAYS_BEFORE_LEAP[month]
         } else {
-            DAYS_BEFORE[month as usize]
+            DAYS_BEFORE[month]
         }
     }
 }
@@ -224,16 +248,18 @@ impl From<FatTime> for chrono::DateTime<chrono::Utc> {
         use chrono::{TimeZone, Utc};
 
         Utc.with_ymd_and_hms(
-            fat.year() as i32,
-            fat.month() as u32,
-            fat.day() as u32,
-            fat.hour() as u32,
-            fat.minute() as u32,
-            fat.second() as u32,
+            i32::from(fat.year()),
+            u32::from(fat.month()),
+            u32::from(fat.day()),
+            u32::from(fat.hour()),
+            u32::from(fat.minute()),
+            u32::from(fat.second()),
         )
         .single()
-        .map(|dt| dt + chrono::Duration::milliseconds(fat.millisecond() as i64))
-        .unwrap_or_else(|| Utc.with_ymd_and_hms(1980, 1, 1, 0, 0, 0).unwrap())
+        .map_or_else(
+            || Utc.with_ymd_and_hms(1980, 1, 1, 0, 0, 0).unwrap(),
+            |dt| dt + chrono::Duration::milliseconds(i64::from(fat.millisecond())),
+        )
     }
 }
 
@@ -266,13 +292,21 @@ impl<Tz: chrono::TimeZone> TryFrom<chrono::DateTime<Tz>> for FatTime {
             return Err(crate::error::FatError::InvalidTime);
         }
 
-        let year_offset = (year - 1980) as u16;
-        let date = (year_offset << 9) | ((month as u16) << 5) | (day as u16);
-        let time = ((hour as u16) << 11) | ((minute as u16) << 5) | ((second / 2) as u16);
+        let year_offset =
+            u16::try_from(year - 1980).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let month = u16::try_from(month).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let day = u16::try_from(day).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let hour = u16::try_from(hour).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let minute = u16::try_from(minute).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let second = u16::try_from(second).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let date = (year_offset << 9) | (month << 5) | day;
+        let time = (hour << 11) | (minute << 5) | (second / 2);
 
         // Calculate tenths: odd seconds add 100, plus milliseconds / 10
         // Clamp to 99 to ensure the result fits in the valid range (0-199)
-        let tenths = if second % 2 == 1 { 100 } else { 0 } + (millis / 10).min(99) as u8;
+        let subsecond_tenths =
+            u8::try_from((millis / 10).min(99)).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let tenths = if second % 2 == 1 { 100 } else { 0 } + subsecond_tenths;
 
         Ok(Self::new(date, time, tenths))
     }
@@ -285,7 +319,7 @@ impl TryFrom<FatTime> for time::OffsetDateTime {
 
     fn try_from(fat: FatTime) -> Result<Self, Self::Error> {
         let date = time::Date::from_calendar_date(
-            fat.year() as i32,
+            i32::from(fat.year()),
             time::Month::try_from(fat.month())?,
             fat.day(),
         )?;
@@ -305,7 +339,7 @@ impl TryFrom<time::OffsetDateTime> for FatTime {
     #[cfg_attr(test, mutants::skip)]
     fn try_from(dt: time::OffsetDateTime) -> Result<Self, Self::Error> {
         let year = dt.year();
-        let month = dt.month() as u8;
+        let month = u8::from(dt.month());
         let day = dt.day();
         let hour = dt.hour();
         let minute = dt.minute();
@@ -317,13 +351,16 @@ impl TryFrom<time::OffsetDateTime> for FatTime {
             return Err(crate::error::FatError::InvalidTime);
         }
 
-        let year_offset = (year - 1980) as u16;
-        let date = (year_offset << 9) | ((month as u16) << 5) | (day as u16);
-        let time = ((hour as u16) << 11) | ((minute as u16) << 5) | ((second / 2) as u16);
+        let year_offset =
+            u16::try_from(year - 1980).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let date = (year_offset << 9) | (u16::from(month) << 5) | u16::from(day);
+        let time = (u16::from(hour) << 11) | (u16::from(minute) << 5) | u16::from(second / 2);
 
         // Calculate tenths: odd seconds add 100, plus milliseconds / 10
         // Clamp to 99 to ensure the result fits in the valid range (0-199)
-        let tenths = if second % 2 == 1 { 100 } else { 0 } + (millis / 10).min(99) as u8;
+        let subsecond_tenths =
+            u8::try_from((millis / 10).min(99)).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let tenths = if second % 2 == 1 { 100 } else { 0 } + subsecond_tenths;
 
         Ok(Self::new(date, time, tenths))
     }
@@ -356,30 +393,38 @@ impl TryFrom<std::time::SystemTime> for FatTime {
         }
 
         let secs_since_fat = secs_since_unix - FAT_EPOCH_UNIX_SECONDS;
-        let millis = (duration_since_unix.subsec_millis()) as u16;
+        let millis = u16::try_from(duration_since_unix.subsec_millis())
+            .map_err(|_| crate::error::FatError::InvalidTime)?;
 
         // Convert seconds to date/time components
         let days = secs_since_fat / 86400;
         let time_of_day = secs_since_fat % 86400;
 
-        let hour = (time_of_day / 3600) as u8;
-        let minute = ((time_of_day % 3600) / 60) as u8;
-        let second = (time_of_day % 60) as u8;
+        let hour =
+            u8::try_from(time_of_day / 3600).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let minute = u8::try_from((time_of_day % 3600) / 60)
+            .map_err(|_| crate::error::FatError::InvalidTime)?;
+        let second =
+            u8::try_from(time_of_day % 60).map_err(|_| crate::error::FatError::InvalidTime)?;
 
         // Convert days to year/month/day
-        let (year, month, day) = Self::days_to_ymd(days as u32);
+        let days = u32::try_from(days).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let (year, month, day) = Self::days_to_ymd(days);
 
         if year > 2107 {
             return Err(crate::error::FatError::InvalidTime);
         }
 
-        let year_offset = (year - 1980) as u16;
-        let date = (year_offset << 9) | ((month as u16) << 5) | (day as u16);
-        let time = ((hour as u16) << 11) | ((minute as u16) << 5) | ((second / 2) as u16);
+        let year_offset =
+            u16::try_from(year - 1980).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let date = (year_offset << 9) | (u16::from(month) << 5) | u16::from(day);
+        let time = (u16::from(hour) << 11) | (u16::from(minute) << 5) | u16::from(second / 2);
 
         // Calculate tenths: odd seconds add 100, plus milliseconds / 10
         // Clamp to 99 to ensure the result fits in the valid range (0-199)
-        let tenths = if second % 2 == 1 { 100 } else { 0 } + ((millis / 10).min(99)) as u8;
+        let subsecond_tenths =
+            u8::try_from((millis / 10).min(99)).map_err(|_| crate::error::FatError::InvalidTime)?;
+        let tenths = if second % 2 == 1 { 100 } else { 0 } + subsecond_tenths;
 
         Ok(Self::new(date, time, tenths))
     }
@@ -418,7 +463,7 @@ impl FatTime {
             month += 1;
         }
 
-        let day = (days + 1) as u8; // days is 0-based, day is 1-based
+        let day = u8::try_from(days + 1).unwrap_or(31); // days is 0-based, day is 1-based
 
         (year, month, day)
     }
@@ -436,7 +481,7 @@ mod tests {
         // Time: (14 << 11) | (30 << 5) | 22 = 28672 + 960 + 22 = 0x73D6 (22 = 45/2)
         // Tenths: 100 (odd second) + 12 (120ms / 10) = 112
         let date = ((43u16) << 9) | ((6u16) << 5) | 15u16; // 0x56CF
-        let time = ((14u16) << 11) | ((30u16) << 5) | 22u16; // 0x73D6
+        let time = ((14u16) << 11) | ((30u16) << 5) | 0x16u16; // 0x73D6
         let fat = FatTime::new(date, time, 112);
 
         assert_eq!(fat.year(), 2023);
@@ -554,7 +599,7 @@ mod tests {
         // seconds_in_day = 14*3600 + 30*60 + 45 = 50400 + 1800 + 45 = 52245
         // milliseconds = 120
         let date = ((43u16) << 9) | ((6u16) << 5) | 15u16; // 0x56CF
-        let time = ((14u16) << 11) | ((30u16) << 5) | 22u16; // 0x73D6 (sec/2 = 22)
+        let time = ((14u16) << 11) | ((30u16) << 5) | 0x16u16; // 0x73D6 (sec/2 = 22)
         let tenths = 112u8; // odd second + 12 → second 45, ms 120
         let fat = FatTime::new(date, time, tenths);
 
@@ -713,7 +758,7 @@ mod tests {
         use chrono::{Datelike, Timelike};
 
         let date = ((43u16) << 9) | ((6u16) << 5) | 15u16;
-        let time = ((14u16) << 11) | ((30u16) << 5) | 22u16;
+        let time = ((14u16) << 11) | ((30u16) << 5) | 0x16u16;
         let fat = FatTime::new(date, time, 112);
 
         let dt: chrono::DateTime<chrono::Utc> = fat.into();
@@ -897,7 +942,7 @@ mod tests {
         // FAT_EPOCH_UNIX_SECONDS = 315_532_800 = 1980-01-01 00:00:00 UTC.
         // Original `if secs < FAT_EPOCH` rejects strictly-before; the
         // FAT-epoch second itself must succeed.
-        let st = UNIX_EPOCH + Duration::from_secs(315_532_800);
+        let st = UNIX_EPOCH + Duration::from_hours(87648);
         let fat = FatTime::try_from(st).unwrap();
         assert_eq!(fat.year(), 1980);
         assert_eq!(fat.month(), 1);
@@ -917,7 +962,7 @@ mod tests {
         // = 31 leap days.)
         // secs_since_fat = 46_386 × 86_400 = 4_007_750_400.
         // secs_since_unix = 4_007_750_400 + 315_532_800 = 4_323_283_200.
-        let st = UNIX_EPOCH + Duration::from_secs(4_323_283_200);
+        let st = UNIX_EPOCH + Duration::from_hours(1_200_912);
         let fat = FatTime::try_from(st).unwrap();
         assert_eq!(fat.year(), 2107);
         assert_eq!(fat.month(), 1);
@@ -935,7 +980,7 @@ mod tests {
         // Without a midnight fixture, the truncation to u8 can mask
         // the `+ 86400` mutation when the upstream calculation lands
         // on the same low byte.
-        let st = UNIX_EPOCH + Duration::from_secs(1_686_787_200); // 2023-06-15 00:00:00
+        let st = UNIX_EPOCH + Duration::from_hours(468_552); // 2023-06-15 00:00:00
         let fat = FatTime::try_from(st).unwrap();
         assert_eq!(fat.year(), 2023);
         assert_eq!(fat.month(), 6);

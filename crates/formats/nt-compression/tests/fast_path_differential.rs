@@ -2,7 +2,7 @@
 //! comparing output between fast-path (large buffers that enter the
 //! guard-margin loop) and slow-path (small buffers that skip it).
 //!
-//! Also tests boundary conditions where out_pos is near OUTPUT_GUARD.
+//! Also tests boundary conditions where `out_pos` is near `OUTPUT_GUARD`.
 
 use proptest::prelude::*;
 
@@ -81,7 +81,9 @@ proptest! {
 #[test]
 fn xpress_boundary_sizes() {
     for size in [200, 255, 256, 257, 512, 1023, 1024, 4096, 65535, 65536] {
-        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let data: Vec<u8> = (0..size)
+            .map(|i| u8::try_from(i % 251).expect("the modulus limits values below 251"))
+            .collect();
         roundtrip_xpress(&data);
     }
 }
@@ -91,7 +93,9 @@ fn xpress_huffman_boundary_sizes() {
     for size in [
         200, 255, 256, 257, 512, 1023, 1024, 4096, 65535, 65536, 65537,
     ] {
-        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let data: Vec<u8> = (0..size)
+            .map(|i| u8::try_from(i % 251).expect("the modulus limits values below 251"))
+            .collect();
         roundtrip_xpress_huffman(&data);
     }
 }

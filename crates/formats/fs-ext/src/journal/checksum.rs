@@ -1,7 +1,7 @@
 //! Journal checksum primitives.
 //!
-//! - CSUM_V2/V3 use CRC32C with seed = `crc32c(~0, journal_uuid)`.
-//! - COMPAT_CHECKSUM uses CRC32 (IEEE polynomial) with seed 0, computed over
+//! - `CSUM_V2/V3` use CRC32C with seed = `crc32c(~0, journal_uuid)`.
+//! - `COMPAT_CHECKSUM` uses CRC32 (IEEE polynomial) with seed 0, computed over
 //!   the concatenated data blocks in tag order.
 //! - Descriptor/revocation/commit block checksums use the CRC32C seed above
 //!   over the block bytes with the checksum field zeroed.
@@ -14,7 +14,7 @@ pub(crate) fn journal_csum_seed(journal_uuid: &[u8; 16]) -> u32 {
     ext4_crc32c(!0, journal_uuid)
 }
 
-/// Per-block tag checksum under CSUM_V2/V3.
+/// Per-block tag checksum under `CSUM_V2/V3`.
 ///
 /// Input: `crc32c(seed, BE(sequence) || data_block)`.
 /// V2 takes the low 16 bits; V3 keeps the full 32-bit value.
@@ -27,11 +27,7 @@ pub(crate) fn tag_block_checksum(
     let mut crc = ext4_crc32c(seed, &sequence.to_be_bytes());
     crc = ext4_crc32c(crc, data_block);
     match mode {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "intentional 16-bit truncation for CSUM_V2"
-        )]
-        JournalChecksumMode::V2Crc32c => u32::from(crc as u16),
+        JournalChecksumMode::V2Crc32c => crc & u32::from(u16::MAX),
         JournalChecksumMode::V3Crc32c => crc,
         _ => 0,
     }
@@ -48,7 +44,7 @@ pub(crate) fn block_tail_checksum_split(seed: u32, before_csum: &[u8], after_csu
     ext4_crc32c(crc, after_csum)
 }
 
-/// Incremental CRC32 helper for COMPAT_CHECKSUM commit-block validation.
+/// Incremental CRC32 helper for `COMPAT_CHECKSUM` commit-block validation.
 ///
 /// Callers create one hasher, push each pending transaction's data block
 /// into it in tag order, and compare the final value against the commit
@@ -79,7 +75,7 @@ mod tests {
         let seed = 0x1234_5678;
         let full = tag_block_checksum(JournalChecksumMode::V3Crc32c, seed, 1, &[0u8; 16]);
         let trunc = tag_block_checksum(JournalChecksumMode::V2Crc32c, seed, 1, &[0u8; 16]);
-        assert_eq!(trunc, u32::from(full as u16));
+        assert_eq!(trunc, full & u32::from(u16::MAX));
     }
 
     #[test]

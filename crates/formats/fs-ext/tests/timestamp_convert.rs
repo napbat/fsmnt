@@ -1,3 +1,5 @@
+//! Integration tests for feature-gated ext timestamp conversions.
+
 #[cfg(feature = "chrono")]
 mod chrono_tests {
     use chrono::{DateTime, Utc};

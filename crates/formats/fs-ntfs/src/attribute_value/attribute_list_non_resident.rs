@@ -82,21 +82,25 @@ impl<'n, 'f> NtfsAttributeListNonResidentAttributeValue<'n, 'f> {
     /// This may be `None` if:
     ///   * The current seek position is outside the valid range, or
     ///   * The current Data Run is a "sparse" Data Run.
+    #[must_use]
     pub fn data_position(&self) -> NtfsPosition {
         self.stream_state.data_position()
     }
 
     /// Returns `true` if the non-resident attribute value contains no data.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the total length of the non-resident attribute value data, in bytes.
+    #[must_use]
     pub fn len(&self) -> u64 {
         self.data_size
     }
 
     /// Returns the current stream position within this value, in bytes.
+    #[must_use]
     pub fn stream_position(&self) -> u64 {
         self.stream_state.stream_position()
     }
@@ -108,14 +112,12 @@ impl<'n, 'f> NtfsAttributeListNonResidentAttributeValue<'n, 'f> {
         ntfs: &'n Ntfs,
         attribute_state: &mut Option<AttributeState<'n>>,
     ) -> Result<Option<NtfsDataRun>> {
-        let state = match attribute_state {
-            Some(state) => state,
-            None => return Ok(None),
+        let Some(state) = attribute_state else {
+            return Ok(None);
         };
 
-        let data_runs_state = match state.data_runs_state.take() {
-            Some(s) => s,
-            None => return Ok(None),
+        let Some(data_runs_state) = state.data_runs_state.take() else {
+            return Ok(None);
         };
 
         let attribute = NtfsAttribute::new(&state.file, state.attribute_offset, None)?;
@@ -145,9 +147,8 @@ impl<'n, 'f> NtfsAttributeListNonResidentAttributeValue<'n, 'f> {
     where
         T: Read + Seek,
     {
-        let entry = match connected_entries.next(fs) {
-            Some(entry) => entry,
-            None => return Ok(None),
+        let Some(entry) = connected_entries.next(fs) else {
+            return Ok(None);
         };
 
         let entry = entry?;
@@ -215,6 +216,7 @@ impl<'n, 'f> NtfsAttributeListNonResidentAttributeValue<'n, 'f> {
     }
 
     /// Returns the [`Ntfs`] object reference associated to this value.
+    #[must_use]
     pub fn ntfs(&self) -> &'n Ntfs {
         self.ntfs
     }
@@ -263,7 +265,7 @@ impl<R: Read + Seek> FsReadSeek<R> for NtfsAttributeListNonResidentAttributeValu
                 self.rewind(fs)?;
                 n
             }
-            SeekFrom::Current(n) if n >= 0 => n as u64,
+            SeekFrom::Current(n) if n >= 0 => n.unsigned_abs(),
             _ => unreachable!(),
         };
 
@@ -329,6 +331,6 @@ struct AttributeState<'n> {
     file: NtfsFile<'n>,
     attribute_offset: usize,
     /// We cannot store an `NtfsDataRuns` here, because it has a reference to the `NtfsFile` that is also stored here.
-    /// This is why we have to go via `DataRunsState` in an `Option` to take() it and deserialize it into an `NtfsDataRuns` whenever necessary.
+    /// This is why we have to go via `DataRunsState` in an `Option` to `take()` it and deserialize it into an `NtfsDataRuns` whenever necessary.
     data_runs_state: Option<DataRunsState>,
 }

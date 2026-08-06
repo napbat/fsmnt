@@ -40,6 +40,7 @@ pub struct NtfsObjectIdIndexKey {
 
 impl NtfsObjectIdIndexKey {
     /// Returns the object ID GUID.
+    #[must_use]
     pub fn object_id(&self) -> &NtfsGuid {
         &self.object_id
     }
@@ -92,23 +93,27 @@ pub struct NtfsObjectIdIndexData {
 impl NtfsObjectIdIndexData {
     /// Returns the file reference (MFT record number + sequence number)
     /// of the file that owns this object ID.
+    #[must_use]
     pub fn file_reference(&self) -> NtfsFileReference {
         self.file_reference
     }
 
     /// Returns the object ID of the `$Volume` file on the partition
     /// where this file was originally created.
+    #[must_use]
     pub fn birth_volume_id(&self) -> &NtfsGuid {
         &self.birth_volume_id
     }
 
     /// Returns the first object ID that was ever assigned to this file,
     /// persisting across moves and renames for distributed link tracking.
+    #[must_use]
     pub fn birth_object_id(&self) -> &NtfsGuid {
         &self.birth_object_id
     }
 
     /// Returns the domain ID (reserved, typically zero).
+    #[must_use]
     pub fn domain_id(&self) -> &NtfsGuid {
         &self.domain_id
     }
@@ -187,7 +192,7 @@ mod tests {
 
     /// Builds a packed 8-byte file reference from record number and sequence.
     fn build_file_ref(record_number: u64, sequence_number: u16) -> [u8; 8] {
-        let packed = (record_number & 0x0000_ffff_ffff_ffff) | ((sequence_number as u64) << 48);
+        let packed = (record_number & 0x0000_ffff_ffff_ffff) | (u64::from(sequence_number) << 48);
         packed.to_le_bytes()
     }
 
@@ -377,7 +382,7 @@ mod tests {
             .expect("should parse data for display test");
         let s = format!("{data}");
         assert!(s.contains("42"), "expected record number in display: {s}");
-        assert!(s.contains("7"), "expected sequence number in display: {s}");
+        assert!(s.contains('7'), "expected sequence number in display: {s}");
         assert!(s.contains("AAAABBBB"), "expected birth_vol in display: {s}");
         assert!(s.contains("CCCCDDDD"), "expected birth_obj in display: {s}");
         assert!(s.contains("EEEEFFFF"), "expected domain in display: {s}");

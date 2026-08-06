@@ -18,7 +18,7 @@ use crate::error::{ExtError, Result};
 
 // === Constants ===========================================================
 
-/// 32-byte Adiantum master key (used directly as XChaCha12 stream key K_S).
+/// 32-byte Adiantum master key (used directly as `XChaCha12` stream key `K_S`).
 pub(crate) const ADIANTUM_KEY_SIZE: usize = 32;
 
 /// 32-byte Adiantum tweak (`.ivsize` of kernel `adiantum(xchacha12,aes)`).
@@ -32,11 +32,11 @@ const AES_KEY_SIZE: usize = 32;
 const POLY1305_R_SIZE: usize = 16;
 
 /// NH hash key length, per kernel `crypto/nhpoly1305.c`. Note this is
-/// the key size, not the chunk size (NH_MESSAGE_UNIT * NH_NUM_STRIDES =
+/// the key size, not the chunk size (`NH_MESSAGE_UNIT` * `NH_NUM_STRIDES` =
 /// 1024 bytes is the chunk size).
 const NH_KEY_SIZE: usize = 1072;
 
-/// Total subkey material derived from one XChaCha12 keystream run on
+/// Total subkey material derived from one `XChaCha12` keystream run on
 /// the 32-byte master key with a fixed IV.
 const SUBKEY_BYTES: usize = AES_KEY_SIZE + POLY1305_R_SIZE + POLY1305_R_SIZE + NH_KEY_SIZE;
 // 32 + 16 + 16 + 1072 == 1136
@@ -44,7 +44,7 @@ const SUBKEY_BYTES: usize = AES_KEY_SIZE + POLY1305_R_SIZE + POLY1305_R_SIZE + N
 // === Subkey schedule =====================================================
 
 /// Cached subkeys derived once per [`AdiantumCipher`] instance via
-/// XChaCha12. Order matches kernel `adiantum_setkey` (see §4.3 of the
+/// `XChaCha12`. Order matches kernel `adiantum_setkey` (see §4.3 of the
 /// design doc).
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct Subkeys {
@@ -104,7 +104,7 @@ impl Subkeys {
 /// open file, or directory entries within one open directory).
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub(crate) struct AdiantumCipher {
-    /// XChaCha12 stream key K_S. Stored separately from the subkey
+    /// `XChaCha12` stream key `K_S`. Stored separately from the subkey
     /// schedule because the stream phase of `decrypt_in_place` needs
     /// it directly.
     stream_key: [u8; ADIANTUM_KEY_SIZE],
@@ -133,7 +133,7 @@ impl AdiantumCipher {
     /// is computed as:
     ///
     /// 1. `C_M = C_R + H(T, C_L)` mod 2^128
-    /// 2. `P_L = C_L ⊕ S(K_S, C_M)` (XChaCha12 stream over `buf[..n-16]`)
+    /// 2. `P_L = C_L ⊕ S(K_S, C_M)` (`XChaCha12` stream over `buf[..n-16]`)
     /// 3. `P_M = AES_256^{-1}(K_E, C_M)`
     /// 4. `P_R = P_M − H(T, P_L)` mod 2^128
     pub(crate) fn decrypt_in_place(
@@ -153,12 +153,12 @@ impl AdiantumCipher {
 
         let n = buf.len();
         // m_l_bits is the bit-length of C_L (= P_L), which is (n - 16) bytes.
-        let m_l_bits: u64 = ((n - 16) as u64).wrapping_mul(8);
+        let m_l_bits = u64::try_from(n - 16).unwrap_or(u64::MAX).wrapping_mul(8);
 
         // Step 1: C_M = C_R + H(T, C_L) mod 2^128
         // Read C_R (the tail 16 bytes) before the stream cipher touches C_L.
         let c_r_bytes: [u8; 16] = buf[n - 16..].try_into().expect("16-byte tail");
-        let h_cl = hash_h(
+        let ciphertext_hash = hash_h(
             &self.subkeys.header_poly,
             &self.subkeys.msg_poly,
             &self.subkeys.nh,
@@ -166,7 +166,8 @@ impl AdiantumCipher {
             m_l_bits,
             &buf[..n - 16],
         );
-        let c_m_u128 = u128::from_le_bytes(c_r_bytes).wrapping_add(u128::from_le_bytes(h_cl));
+        let c_m_u128 =
+            u128::from_le_bytes(c_r_bytes).wrapping_add(u128::from_le_bytes(ciphertext_hash));
         let c_m = c_m_u128.to_le_bytes();
 
         // Step 2: P_L = C_L ⊕ S(K_S, C_M) — XChaCha12 stream over buf[..n-16].
@@ -180,7 +181,7 @@ impl AdiantumCipher {
 
         // Step 4: P_R = P_M − H(T, P_L) mod 2^128
         // This second hash runs over buf[..n-16] which is now P_L (after step 2).
-        let h_pl = hash_h(
+        let plaintext_hash = hash_h(
             &self.subkeys.header_poly,
             &self.subkeys.msg_poly,
             &self.subkeys.nh,
@@ -188,7 +189,7 @@ impl AdiantumCipher {
             m_l_bits,
             &buf[..n - 16],
         );
-        let p_r_u128 = u128::from_le_bytes(p_m).wrapping_sub(u128::from_le_bytes(h_pl));
+        let p_r_u128 = u128::from_le_bytes(p_m).wrapping_sub(u128::from_le_bytes(plaintext_hash));
         buf[n - 16..].copy_from_slice(&p_r_u128.to_le_bytes());
 
         Ok(())
@@ -492,9 +493,9 @@ mod tests {
         // is verified by Task 7's NHPoly1305 KAT against kernel test vectors.
         let mut key = [0u8; NH_KEY_SIZE];
         for (i, b) in key.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(7);
+            *b = ((i).to_le_bytes()[0]).wrapping_mul(7);
         }
-        let msg: [u8; 64] = core::array::from_fn(|i| i as u8);
+        let msg: [u8; 64] = core::array::from_fn(|i| (i).to_le_bytes()[0]);
         let a = nh_chunk(&key, &msg);
         let b = nh_chunk(&key, &msg);
         assert_eq!(a, b);
@@ -651,8 +652,9 @@ mod tests {
         assert_eq!(buf, PT);
     }
 
-    #[test]
-    fn adiantum_decrypt_kat_multichunk() {
+    mod adiantum_multichunk_kat {
+        use super::*;
+
         // Linux kernel testmgr.h `adiantum_xchacha12_aes_tv_template[4]`
         // klen=32, ilen=1536. m_l = 1520 bytes → 2 NH chunks (1024 + 496),
         // confirming the multi-chunk NHPoly1305 path.
@@ -867,12 +869,15 @@ mod tests {
             0x8a, 0x33, 0xdd, 0x8a, 0x06, 0x23, 0x06, 0x0b, 0x7f, 0x70, 0xbe, 0x7e, 0xa1, 0x80, 0xbc, 0x7a,
         ];
 
-        assert_eq!(PT.len(), CT.len(), "Adiantum is length-preserving");
-        assert!(PT.len() >= 1024, "multichunk KAT requires >=1024 bytes");
-        let cipher = AdiantumCipher::new(&KEY);
-        let mut buf = CT.to_vec();
-        cipher.decrypt_in_place(&IV, &mut buf).unwrap();
-        assert_eq!(buf, PT);
+        #[test]
+        fn decrypts_multichunk_vector() {
+            assert_eq!(PT.len(), CT.len(), "Adiantum is length-preserving");
+            assert!(PT.len() >= 1024, "multichunk KAT requires >=1024 bytes");
+            let cipher = AdiantumCipher::new(&KEY);
+            let mut buf = CT.to_vec();
+            cipher.decrypt_in_place(&IV, &mut buf).unwrap();
+            assert_eq!(buf, PT);
+        }
     }
 
     #[test]

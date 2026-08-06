@@ -24,11 +24,17 @@ impl ExFatBitmap {
     ///
     /// Clusters are numbered starting at 2. Bit 0 of byte 0
     /// corresponds to cluster 2.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExFatError::InvalidCluster`] when `cluster` is outside
+    /// the volume or its bit is missing from the bitmap data.
     pub fn is_allocated(&self, cluster: u32) -> Result<bool> {
         if cluster < 2 || cluster > self.cluster_count.saturating_add(1) {
             return Err(ExFatError::InvalidCluster { cluster });
         }
-        let bit_index = (cluster - 2) as usize;
+        let bit_index =
+            usize::try_from(cluster - 2).map_err(|_| ExFatError::InvalidCluster { cluster })?;
         let byte_offset = bit_index / 8;
         let bit_offset = bit_index % 8;
         if byte_offset >= self.data.len() {
@@ -46,8 +52,9 @@ impl ExFatBitmap {
     // `(1u8 << 0) - 1` evaluates to `0`, so `(last_byte & 0).count_ones()`
     // adds zero — observationally identical to the short-circuit.
     #[cfg_attr(test, mutants::skip)]
+    #[must_use]
     pub fn allocated_count(&self) -> u32 {
-        let total_bits = self.cluster_count as usize;
+        let total_bits = usize::try_from(self.cluster_count).unwrap_or(usize::MAX);
         let full_bytes = total_bits / 8;
         let remaining_bits = total_bits % 8;
 
@@ -67,6 +74,7 @@ impl ExFatBitmap {
     }
 
     /// Returns the total number of free clusters.
+    #[must_use]
     pub fn free_count(&self) -> u32 {
         self.cluster_count - self.allocated_count()
     }

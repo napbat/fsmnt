@@ -34,7 +34,6 @@ pub fn unwrap_aes_ccm(kek: &[u8], nonce: &[u8; 12], wrapped: &[u8]) -> Result<Ze
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
     use ccm::aead::{Aead, KeyInit};

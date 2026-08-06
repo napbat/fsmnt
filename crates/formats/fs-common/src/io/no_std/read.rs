@@ -1,4 +1,5 @@
-//! Mostly imported from https://github.com/rust-lang/rust/blob/561364e4d5ccc506f610208a4989e91fdbdc8ca7/library/std/src/io/mod.rs
+//! Mostly imported from
+//! <https://github.com/rust-lang/rust/blob/561364e4d5ccc506f610208a4989e91fdbdc8ca7/library/std/src/io/mod.rs>.
 
 use super::{Error, ErrorKind, Result};
 
@@ -7,9 +8,17 @@ use super::{Error, ErrorKind, Result};
 /// See its documentation for more details.
 pub trait Read {
     /// See [`std::io::Read::read`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when bytes cannot be read.
     fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
 
     /// See [`std::io::Read::read_exact`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error on read failure or premature end of input.
     //
     // Verbatim port of the upstream stdlib at rust-lang/rust@561364e4. Only
     // compiled in `no_std` builds; `FsReadSeek::read_exact` in
@@ -28,10 +37,10 @@ pub trait Read {
             }
         }
 
-        if !buf.is_empty() {
-            Err(Error::unexpected_eof())
-        } else {
+        if buf.is_empty() {
             Ok(())
+        } else {
+            Err(Error::unexpected_eof())
         }
     }
 }

@@ -39,7 +39,7 @@
 //! | Reaper, Fusion address resolution, keybag parsing | implemented |
 //! | Encryption-rolling state, deleted-file recovery | implemented |
 //! | `decmpfs` zlib compression | partial — [#227] (LZVN/LZFSE: [#281]) |
-//! | FileVault key hierarchy and AES-XTS decryption | partial — [#235] |
+//! | `FileVault` key hierarchy and AES-XTS decryption | partial — [#235] |
 //! | Encryption-rolling state v1 layout | open — [#279] |
 //! | Keybag object-subtype decoding | open — [#280] |
 //! | On-disk mutation / write paths | unsupported by design — read-only parser |

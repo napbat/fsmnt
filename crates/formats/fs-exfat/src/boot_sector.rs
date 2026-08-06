@@ -27,7 +27,7 @@ bitflags! {
 
 /// Offset of the backup boot sector (sector 12, always at 12 * 512
 /// because we do not yet know the true sector size).
-const BACKUP_BOOT_SECTOR_OFFSET: u64 = 12 * BOOT_SECTOR_SIZE as u64;
+const BACKUP_BOOT_SECTOR_OFFSET: u64 = 12 * 512;
 
 /// Validates every field of an exFAT boot sector that can be checked
 /// without I/O beyond the sector itself.
@@ -90,8 +90,7 @@ pub(crate) fn validate_boot_sector(bs: &ExFatBootSector) -> Result<()> {
     }
 
     // 9. FilesystemRevision major must be 0 or 1
-    let rev_major = (bs.filesystem_revision.get() >> 8) as u8;
-    let rev_minor = (bs.filesystem_revision.get() & 0xFF) as u8;
+    let [rev_minor, rev_major] = bs.filesystem_revision.get().to_le_bytes();
     if rev_major > 1 {
         return Err(ExFatError::UnsupportedRevision {
             major: rev_major,
@@ -158,8 +157,8 @@ where
 ///
 /// The checksum is a rotating right-shift with carry (bit 0 moves to
 /// bit 31).
-pub(crate) fn compute_boot_checksum(sectors: &[u8], bytes_per_sector: u32) -> u32 {
-    let len = bytes_per_sector as usize * 11;
+pub(crate) fn compute_boot_checksum(sectors: &[u8], bytes_per_sector: usize) -> u32 {
+    let len = bytes_per_sector.saturating_mul(11);
     let mut checksum: u32 = 0;
 
     for i in 0..len {
@@ -168,7 +167,7 @@ pub(crate) fn compute_boot_checksum(sectors: &[u8], bytes_per_sector: u32) -> u3
             continue;
         }
         let byte = if i < sectors.len() {
-            sectors[i] as u32
+            u32::from(sectors[i])
         } else {
             0
         };
@@ -194,7 +193,10 @@ pub(crate) fn verify_boot_checksum<T>(
 where
     T: Read + Seek,
 {
-    let bps = bytes_per_sector as usize;
+    let bps = usize::try_from(bytes_per_sector).map_err(|_| ExFatError::InvalidEntrySet {
+        reason: "sector size exceeds addressable memory",
+        byte_offset: base_offset,
+    })?;
     let data_len = bps * 11;
 
     // Read sectors 0 through 10.
@@ -202,7 +204,7 @@ where
     let mut data = alloc::vec![0u8; data_len];
     fs.read_exact(&mut data)?;
 
-    let expected = compute_boot_checksum(&data, bytes_per_sector);
+    let expected = compute_boot_checksum(&data, bps);
 
     // Read sector 11 (the checksum sector).
     let mut checksum_sector = alloc::vec![0u8; bps];
@@ -224,7 +226,7 @@ mod tests {
     use super::*;
     use zerocopy::{U16, U32, U64};
 
-    /// Creates a valid ExFatBootSector for testing.
+    /// Creates a valid `ExFatBootSector` for testing.
     fn make_valid_boot_sector() -> ExFatBootSector {
         ExFatBootSector {
             jump_instruction: [0xEB, 0x76, 0x90],

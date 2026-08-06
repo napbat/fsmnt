@@ -389,18 +389,42 @@ mod tests {
     fn catalog_leaf(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0003u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -409,7 +433,7 @@ mod tests {
     }
 
     fn extent_key(obj_id: u64, logical: u64) -> Vec<u8> {
-        let mut k = (((JObjType::FileExtent.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let mut k = ((u64::from(JObjType::FileExtent.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         k.extend_from_slice(&logical.to_le_bytes());
@@ -440,7 +464,12 @@ mod tests {
         image.append(&mut block4);
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(60), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(60),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             Cursor::new(image),
         )
     }
@@ -451,7 +480,12 @@ mod tests {
         let file = File::open(&catalog, &mut reader, 5, 8192).unwrap();
         assert_eq!(file.extents().len(), 2);
 
-        let content = file.read_all(&mut reader, BLK as u32).unwrap();
+        let content = file
+            .read_all(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            )
+            .unwrap();
         assert_eq!(content.len(), 8192);
         assert_eq!(content[0], 0x01); // first byte of block 3
         assert_eq!(content[1], 0xC3);
@@ -464,7 +498,12 @@ mod tests {
         let file = File::open(&catalog, &mut reader, 5, 8192).unwrap();
         let mut buf = [0u8; 4];
         let n = file
-            .read_at(&mut reader, BLK as u32, 4094, &mut buf)
+            .read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                4094,
+                &mut buf,
+            )
             .unwrap();
         assert_eq!(n, 4);
         // Two bytes from block 3's tail, then two from block 4's head.
@@ -477,14 +516,24 @@ mod tests {
         let file = File::open(&catalog, &mut reader, 5, 8192).unwrap();
         let mut buf = [0u8; 16];
         assert_eq!(
-            file.read_at(&mut reader, BLK as u32, 8192, &mut buf)
-                .unwrap(),
+            file.read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                8192,
+                &mut buf
+            )
+            .unwrap(),
             0
         );
         // A read straddling EOF is truncated.
         assert_eq!(
-            file.read_at(&mut reader, BLK as u32, 8190, &mut buf)
-                .unwrap(),
+            file.read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                8190,
+                &mut buf
+            )
+            .unwrap(),
             2
         );
     }
@@ -498,11 +547,21 @@ mod tests {
         image.extend(leaf);
         image.append(&mut vec![0xC3u8; BLK]); // block 3
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(60), omap, BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(60),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         let file = File::open(&catalog, &mut reader, 5, 8192).unwrap();
-        let content = file.read_all(&mut reader, BLK as u32).unwrap();
+        let content = file
+            .read_all(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            )
+            .unwrap();
         assert_eq!(content.len(), 8192);
         assert!(content[..4096].iter().all(|&b| b == 0xC3));
         assert!(content[4096..].iter().all(|&b| b == 0)); // the hole
@@ -542,7 +601,14 @@ mod tests {
             }],
         );
         let mut buf = [0u8; 64];
-        let n = file.read_at(&mut reader, BLK as u32, 4, &mut buf).unwrap();
+        let n = file
+            .read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                4,
+                &mut buf,
+            )
+            .unwrap();
         assert_eq!(n, 6);
         assert!(buf[..6].iter().all(|&b| b == 0xAA));
         // Nothing past the logical size is touched.
@@ -589,7 +655,14 @@ mod tests {
         // reading into the unrelated 0xFF gap on disk.
         let (mut reader, file) = noncontiguous_extents_image();
         let mut buf = vec![0u8; BLK + 4];
-        let n = file.read_at(&mut reader, BLK as u32, 2, &mut buf).unwrap();
+        let n = file
+            .read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                2,
+                &mut buf,
+            )
+            .unwrap();
         assert_eq!(n, BLK + 4);
         // First BLK-2 bytes from extent A's tail.
         assert!(buf[..BLK - 2].iter().all(|&b| b == 0xAA), "extent A tail");
@@ -606,7 +679,12 @@ mod tests {
         let (mut reader, file) = noncontiguous_extents_image();
         let mut buf = vec![0u8; 300];
         let n = file
-            .read_at(&mut reader, BLK as u32, (BLK - 6) as u64, &mut buf)
+            .read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                (BLK - 6) as u64,
+                &mut buf,
+            )
             .unwrap();
         assert_eq!(n, 300);
         assert!(buf[..6].iter().all(|&b| b == 0xAA));
@@ -631,7 +709,14 @@ mod tests {
             }],
         );
         let mut buf = vec![0u8; 100];
-        let n = file.read_at(&mut reader, BLK as u32, 0, &mut buf).unwrap();
+        let n = file
+            .read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                0,
+                &mut buf,
+            )
+            .unwrap();
         assert_eq!(n, 100);
         assert!(buf.iter().all(|&b| b == 0), "leading hole zero-fill");
     }
@@ -645,7 +730,12 @@ mod tests {
         let (mut reader, file) = noncontiguous_extents_image();
         let mut buf = vec![0u8; 5000];
         let n = file
-            .read_at(&mut reader, BLK as u32, (BLK - 6) as u64, &mut buf)
+            .read_at(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                (BLK - 6) as u64,
+                &mut buf,
+            )
             .unwrap();
         assert_eq!(n, 5000);
         assert!(buf[..6].iter().all(|&b| b == 0xAA), "extent A tail");

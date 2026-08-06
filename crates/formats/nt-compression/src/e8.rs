@@ -41,7 +41,12 @@ pub(crate) fn apply_e8_preprocessing(data: &mut [u8], file_size: i32, chunk_offs
             data[operand_start + 3],
         ]);
 
-        let current_pos = (chunk_offset + pos as i64) as i32;
+        let Ok(pos_i64) = i64::try_from(pos) else {
+            return;
+        };
+        let Ok(current_pos) = i32::try_from(chunk_offset + pos_i64) else {
+            return;
+        };
 
         if n >= -current_pos && n < file_size - current_pos {
             let absolute = if n >= 0 {
@@ -93,7 +98,12 @@ pub(crate) fn undo_e8_preprocessing(data: &mut [u8], file_size: i32, chunk_offse
             data[operand_start + 3],
         ]);
 
-        let current_pos = (chunk_offset + pos as i64) as i32;
+        let Ok(pos_i64) = i64::try_from(pos) else {
+            return;
+        };
+        let Ok(current_pos) = i32::try_from(chunk_offset + pos_i64) else {
+            return;
+        };
 
         let result = if n >= 0 && n < file_size {
             let mut relative = n - current_pos;

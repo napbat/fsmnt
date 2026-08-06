@@ -123,6 +123,10 @@ struct RawDqHeader {
     dqh_version: U32<LE>,
 }
 
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical quota dqi_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawDqInfo {
@@ -134,6 +138,10 @@ struct RawDqInfo {
     dqi_free_entry: U32<LE>,
 }
 
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical quota dqdh_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawDqdbHeader {
@@ -144,6 +152,10 @@ struct RawDqdbHeader {
     dqdh_pad2: U32<LE>,
 }
 
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical quota dqb_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawDqBlk {
@@ -249,13 +261,10 @@ pub(crate) fn open_quota<T: Read + Seek>(
     let inode = ext.inode(fs, inum)?;
     let size = inode.size();
     let mut file = inode.open_file()?;
-    if size > usize::MAX as u64 {
-        return Err(ExtError::InvalidQuotaFile {
-            inode: inum,
-            reason: "quota file size exceeds platform addressable memory",
-        });
-    }
-    let size_usize = size as usize;
+    let size_usize = usize::try_from(size).map_err(|_| ExtError::InvalidQuotaFile {
+        inode: inum,
+        reason: "quota file size exceeds platform addressable memory",
+    })?;
     if size_usize < 2 * QUOTA_BLOCK_SIZE {
         return Err(ExtError::InvalidQuotaFile {
             inode: inum,
@@ -276,7 +285,7 @@ pub(crate) fn open_quota<T: Read + Seek>(
         if n == 0 {
             return Err(ExtError::UnexpectedEof {
                 context: "reading quota file",
-                offset: read as u64,
+                offset: u64::try_from(read).unwrap_or(u64::MAX),
             });
         }
         read += n;
@@ -354,13 +363,16 @@ fn read_dqi_blocks(buf: &[u8], inum: u32) -> Result<u32> {
 }
 
 fn block_slice(buf: &[u8], block: u32, inum: u32) -> Result<&[u8]> {
-    let start =
-        (block as usize)
-            .checked_mul(QUOTA_BLOCK_SIZE)
-            .ok_or(ExtError::InvalidQuotaFile {
-                inode: inum,
-                reason: "tree block offset overflow",
-            })?;
+    let start = usize::try_from(block)
+        .map_err(|_| ExtError::InvalidQuotaFile {
+            inode: inum,
+            reason: "tree block number exceeds addressable memory",
+        })?
+        .checked_mul(QUOTA_BLOCK_SIZE)
+        .ok_or(ExtError::InvalidQuotaFile {
+            inode: inum,
+            reason: "tree block offset overflow",
+        })?;
     let end = start
         .checked_add(QUOTA_BLOCK_SIZE)
         .ok_or(ExtError::InvalidQuotaFile {
@@ -455,7 +467,7 @@ fn decode_leaf(buf: &[u8], block: u32, inum: u32) -> Result<Vec<QuotaRecord>> {
             reason: "leaf header truncated",
         }
     })?;
-    let claimed = header.dqdh_entries.get() as usize;
+    let claimed = usize::from(header.dqdh_entries.get());
     if claimed > ENTRIES_PER_LEAF {
         return Err(ExtError::InvalidQuotaFile {
             inode: inum,
@@ -503,7 +515,7 @@ fn decode_leaf(buf: &[u8], block: u32, inum: u32) -> Result<Vec<QuotaRecord>> {
 
 /// Convert a quota-block count to bytes (`v2_qbtos` in the kernel).
 const fn qbtos(blocks: u64) -> u64 {
-    blocks.saturating_mul(QUOTA_BLOCK_SIZE as u64)
+    blocks.saturating_mul(1024)
 }
 
 /// Detect the kernel's all-zero escape sentinel: every byte is zero
@@ -543,6 +555,12 @@ impl Ext {
     /// not match, the file is too short, a tree pointer is out of range,
     /// or a cycle is detected. Inode-level errors (out-of-range, encrypted,
     /// EA inode) propagate from [`Ext::inode`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or inode-access error, or
+    /// [`ExtError::InvalidQuotaFile`] when the quota header or tree is
+    /// malformed.
     pub fn quota<T: Read + Seek>(&self, fs: &mut T, kind: QuotaKind) -> Result<QuotaIter> {
         let inum = match kind {
             QuotaKind::User => self.usr_quota_inum,
@@ -569,7 +587,9 @@ mod tests {
         buf[20..24].copy_from_slice(&6u32.to_le_bytes());
         // Tree blocks 1 -> 2 -> 3 -> 4 -> leaf 5.
         for (block, target) in [(1u32, 2u32), (2, 3), (3, 4), (4, 5)] {
-            let off = (block as usize) * QUOTA_BLOCK_SIZE;
+            let off = usize::try_from(block)
+                .expect("the synthetic quota block number fits in usize")
+                * QUOTA_BLOCK_SIZE;
             buf[off..off + 4].copy_from_slice(&target.to_le_bytes());
         }
         // Leaf block 5: dqdh_entries = 1, then one record at offset 16.

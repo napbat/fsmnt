@@ -51,7 +51,9 @@ mod roundtrip {
 
     #[test]
     fn sequential_bytes() {
-        let data: vec::Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+        let data: vec::Vec<u8> = (0..1000)
+            .map(|i| u8::try_from(i % 256).expect("the modulus limits values to one byte"))
+            .collect();
         roundtrip("sequential_1k", &data);
     }
 
@@ -66,11 +68,11 @@ mod roundtrip {
         let mut data = vec![0u8; 16384];
         for (i, byte) in data.iter_mut().enumerate() {
             *byte = if i < 4096 {
-                (i % 64) as u8
+                u8::try_from(i % 64).expect("the modulus limits values below 64")
             } else if i < 8192 {
                 0
             } else {
-                ((i * 7 + 13) % 251) as u8
+                u8::try_from((i * 7 + 13) % 251).expect("the modulus limits values below 251")
             };
         }
         roundtrip("mixed_16k", &data);
@@ -80,7 +82,7 @@ mod roundtrip {
     fn full_chunk_varied() {
         let mut data = vec![0u8; 32768];
         for (i, byte) in data.iter_mut().enumerate() {
-            *byte = (i % 251) as u8;
+            *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
         }
         // Add repetitive regions to exercise match finding.
         let patch: vec::Vec<u8> = data[1000..2000].to_vec();
@@ -97,7 +99,9 @@ mod roundtrip {
         for i in (0..data.len()).step_by(100) {
             data[i] = 0xE8;
             if i + 4 < data.len() {
-                let val = (i as u32).to_le_bytes();
+                let val = u32::try_from(i)
+                    .expect("the compatibility vector is 4096 bytes")
+                    .to_le_bytes();
                 data[i + 1] = val[0];
                 data[i + 2] = val[1];
                 data[i + 3] = val[2];
@@ -119,7 +123,9 @@ mod roundtrip {
 
     #[test]
     fn near_max_chunk() {
-        let data: vec::Vec<u8> = (0..32767).map(|i| (i % 251) as u8).collect();
+        let data: vec::Vec<u8> = (0..32767)
+            .map(|i| u8::try_from(i % 251).expect("the modulus limits values below 251"))
+            .collect();
         roundtrip("near_max_32767", &data);
     }
 }

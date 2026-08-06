@@ -25,7 +25,7 @@ pub struct Ntfs {
     size: u64,
     /// Absolute position of the Master File Table (MFT), in bytes.
     mft_position: NtfsPosition,
-    /// Absolute position of the MFT Mirror ($MFTMirr), in bytes.
+    /// Absolute position of the MFT Mirror ($`MFTMirr`), in bytes.
     mft_mirror_position: NtfsPosition,
     /// Size of a single File Record, in bytes.
     file_record_size: u32,
@@ -40,6 +40,10 @@ impl Ntfs {
     ///
     /// The reader must cover the entire NTFS partition, not more and not less.
     /// It will be rewinded to the beginning before reading anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn new<T>(fs: &mut T) -> Result<Self>
     where
         T: Read + Seek,
@@ -48,14 +52,19 @@ impl Ntfs {
         fs.rewind()?;
         let mut boot_sector_bytes = [0u8; BOOT_SECTOR_SIZE];
         fs.read_exact(&mut boot_sector_bytes)?;
-        let boot_sector = BootSector::ref_from_bytes(&boot_sector_bytes).unwrap();
+        let boot_sector = BootSector::ref_from_bytes(&boot_sector_bytes).map_err(|_| {
+            NtfsError::BufferTooSmall {
+                expected: BOOT_SECTOR_SIZE,
+                actual: boot_sector_bytes.len(),
+            }
+        })?;
         boot_sector.validate()?;
 
         let cluster_size = boot_sector.cluster_size()?;
         let sector_size = boot_sector.sector_size()?;
         let total_sectors = boot_sector.total_sectors();
         let size = total_sectors
-            .checked_mul(sector_size as u64)
+            .checked_mul(u64::from(sector_size))
             .ok_or(NtfsError::TotalSectorsTooBig { total_sectors })?;
         let mft_position = NtfsPosition::none();
         let mft_mirror_position = NtfsPosition::none();
@@ -80,6 +89,7 @@ impl Ntfs {
     }
 
     /// Returns the size of a single cluster, in bytes.
+    #[must_use]
     pub fn cluster_size(&self) -> u32 {
         self.cluster_size
     }
@@ -88,20 +98,24 @@ impl Ntfs {
     ///
     /// The first few NTFS files have fixed indexes and contain filesystem
     /// management information (see the [`KnownNtfsFileRecordNumber`] enum).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn file<'n, T>(&'n self, fs: &mut T, file_record_number: u64) -> Result<NtfsFile<'n>>
     where
         T: Read + Seek,
     {
         let offset = file_record_number
-            .checked_mul(self.file_record_size as u64)
+            .checked_mul(u64::from(self.file_record_size))
             .ok_or(NtfsError::InvalidFileRecordNumber { file_record_number })?;
 
         // The MFT may be split into multiple data runs, referenced by its $DATA attribute.
         // We therefore read it just like any other non-resident attribute value.
         // However, this code assumes that the MFT does not have an Attribute List!
         //
-        // This unwrap is safe, because `self.mft_position` has been checked in `Ntfs::new`.
-        let mft = NtfsFile::new(self, fs, self.mft_position.value().unwrap(), 0)?;
+        let mft_position = self.mft_position.value().ok_or(NtfsError::InvalidMftLcn)?;
+        let mft = NtfsFile::new(self, fs, mft_position, 0)?;
         let mft_data_attribute =
             mft.find_resident_attribute(NtfsAttributeType::Data, None, None)?;
         let mut mft_data_value = mft_data_attribute.value(fs)?;
@@ -116,6 +130,7 @@ impl Ntfs {
     }
 
     /// Returns the size of a File Record of this NTFS filesystem, in bytes.
+    #[must_use]
     pub fn file_record_size(&self) -> u32 {
         self.file_record_size
     }
@@ -125,6 +140,10 @@ impl Ntfs {
     /// This is much more efficient than calling [`Ntfs::file`] in a loop,
     /// because it opens the MFT `$DATA` attribute only once and caches its
     /// physical layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn mft_entries<T>(&self, fs: &mut T) -> Result<NtfsMftEntries>
     where
         T: Read + Seek,
@@ -136,6 +155,10 @@ impl Ntfs {
     ///
     /// Returns an [`NtfsAttrDef`] that can be queried for attribute type
     /// metadata such as human-readable names, flags, and size constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn attr_def<T: Read + Seek>(&self, fs: &mut T) -> Result<NtfsAttrDef> {
         NtfsAttrDef::load(self, fs)
     }
@@ -144,6 +167,10 @@ impl Ntfs {
     ///
     /// Returns an [`NtfsBadClusters`] that can report whether the volume
     /// has any bad clusters and enumerate their locations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn bad_clusters<T: Read + Seek>(&self, fs: &mut T) -> Result<NtfsBadClusters> {
         NtfsBadClusters::load(self, fs)
     }
@@ -152,6 +179,10 @@ impl Ntfs {
     ///
     /// Loads the cluster bitmap and MFT entry iterator, then yields
     /// deleted files one at a time via [`NtfsDeletedFileScanner::next`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     #[cfg(feature = "std")]
     pub fn deleted_files<T: Read + Seek>(
         &self,
@@ -164,6 +195,10 @@ impl Ntfs {
     ///
     /// Returns an [`NtfsLogFile`] containing all parsed log records,
     /// restart information, and the open attribute table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     #[cfg(feature = "std")]
     pub fn logfile<T: Read + Seek>(&self, fs: &mut T) -> Result<crate::logfile::NtfsLogFile> {
         crate::logfile::NtfsLogFile::load(self, fs)
@@ -173,6 +208,10 @@ impl Ntfs {
     ///
     /// Returns an [`NtfsClusterBitmap`] that can be used to query whether
     /// individual clusters are allocated or free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn cluster_bitmap<T: Read + Seek>(&self, fs: &mut T) -> Result<NtfsClusterBitmap> {
         NtfsClusterBitmap::load(self, fs)
     }
@@ -182,6 +221,10 @@ impl Ntfs {
     /// Returns an [`NtfsClusterCarver`] that scans clusters the `$Bitmap`
     /// reports as free for known file signatures, recovering content
     /// even when the originating MFT records have been reused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn carve_unallocated<T: Read + Seek>(
         &self,
         fs: &mut T,
@@ -192,6 +235,10 @@ impl Ntfs {
     /// Builds an [`NtfsParentMap`] by scanning the entire MFT.
     ///
     /// This is a convenience wrapper around [`NtfsParentMap::build`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     #[cfg(feature = "std")]
     pub fn build_parent_map<T: Read + Seek>(
         &self,
@@ -203,21 +250,27 @@ impl Ntfs {
     /// Returns the absolute byte position of the Master File Table (MFT).
     ///
     /// This [`NtfsPosition`] is guaranteed to be nonzero.
+    #[must_use]
     pub fn mft_position(&self) -> NtfsPosition {
         self.mft_position
     }
 
-    /// Returns the absolute byte position of the MFT Mirror ($MFTMirr).
+    /// Returns the absolute byte position of the MFT Mirror ($`MFTMirr`).
     ///
     /// This [`NtfsPosition`] is guaranteed to be nonzero.
+    #[must_use]
     pub fn mft_mirror_position(&self) -> NtfsPosition {
         self.mft_mirror_position
     }
 
-    /// Validates the MFT Mirror ($MFTMirr) against the primary MFT.
+    /// Validates the MFT Mirror ($`MFTMirr`) against the primary MFT.
     ///
     /// Compares records 0-3 byte-for-byte (post-fixup) and returns
     /// per-record match/mismatch status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn mft_mirr_validation<T>(
         &self,
         fs: &mut T,
@@ -228,10 +281,14 @@ impl Ntfs {
         crate::analysis::validate_mft_mirror(self, fs)
     }
 
-    /// Reads the $UpCase file from the filesystem and stores it in this [`Ntfs`] object.
+    /// Reads the $`UpCase` file from the filesystem and stores it in this [`Ntfs`] object.
     ///
     /// This function only needs to be called if case-insensitive comparisons are later performed
     /// (i.e. finding files).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn read_upcase_table<T>(&mut self, fs: &mut T) -> Result<()>
     where
         T: Read + Seek,
@@ -242,24 +299,31 @@ impl Ntfs {
     }
 
     /// Returns the root directory of this NTFS volume as an [`NtfsFile`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn root_directory<'n, T>(&'n self, fs: &mut T) -> Result<NtfsFile<'n>>
     where
         T: Read + Seek,
     {
-        self.file(fs, KnownNtfsFileRecordNumber::RootDirectory as u64)
+        self.file(fs, KnownNtfsFileRecordNumber::RootDirectory.as_u64())
     }
 
     /// Returns the size of a single sector in bytes.
+    #[must_use]
     pub fn sector_size(&self) -> u16 {
         self.sector_size
     }
 
     /// Returns the 64-bit serial number of this NTFS volume.
+    #[must_use]
     pub fn serial_number(&self) -> u64 {
         self.serial_number
     }
 
     /// Returns the partition size in bytes.
+    #[must_use]
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -294,11 +358,15 @@ impl Ntfs {
 
     /// Returns an [`NtfsVolumeInformation`] containing general information about
     /// the volume, like the NTFS version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required NTFS metadata is malformed or cannot be read from the underlying stream.
     pub fn volume_info<T>(&self, fs: &mut T) -> Result<NtfsVolumeInformation>
     where
         T: Read + Seek,
     {
-        let volume_file = self.file(fs, KnownNtfsFileRecordNumber::Volume as u64)?;
+        let volume_file = self.file(fs, KnownNtfsFileRecordNumber::Volume.as_u64())?;
         volume_file.find_resident_attribute_structured_value::<NtfsVolumeInformation>(None)
     }
 
@@ -311,7 +379,7 @@ impl Ntfs {
     where
         T: Read + Seek,
     {
-        let volume_file = iter_try!(self.file(fs, KnownNtfsFileRecordNumber::Volume as u64));
+        let volume_file = iter_try!(self.file(fs, KnownNtfsFileRecordNumber::Volume.as_u64()));
 
         match volume_file.find_resident_attribute_structured_value::<NtfsVolumeName>(None) {
             Ok(volume_name) => Some(Ok(volume_name)),
@@ -334,7 +402,7 @@ mod tests {
         assert_eq!(ntfs.cluster_size(), 512);
         assert_eq!(ntfs.sector_size(), 512);
         // 8MB filesystem: 8388608 bytes total, 8388096 bytes usable (minus boot sector backup)
-        assert_eq!(ntfs.size(), 8388096);
+        assert_eq!(ntfs.size(), 8_388_096);
     }
 
     #[test]
@@ -364,9 +432,9 @@ mod tests {
     ///
     /// Byte offsets (BPB/EBPB per fs-common::boot_sector):
     ///   0x00 jump, 0x03 "NTFS    " OEM ID
-    ///   0x0B bytes_per_sector (u16), 0x0D sectors_per_cluster (u8)
-    ///   0x28 total_sectors (u64), 0x30 mft_lcn (u64), 0x38 mft_mirror_lcn (u64)
-    ///   0x40 clusters_per_mft_record (i8), 0x48 volume_serial_number (u64)
+    ///   0x0B `bytes_per_sector` (u16), 0x0D `sectors_per_cluster` (u8)
+    ///   0x28 `total_sectors` (u64), 0x30 `mft_lcn` (u64), 0x38 `mft_mirror_lcn` (u64)
+    ///   0x40 `clusters_per_mft_record` (i8), 0x48 `volume_serial_number` (u64)
     ///   0x1FE boot signature (0xAA55)
     fn build_ntfs_fs() -> std::io::Cursor<std::vec::Vec<u8>> {
         let mut buf = std::vec![0u8; 512];
@@ -377,7 +445,7 @@ mod tests {
         buf[0x28..0x30].copy_from_slice(&2048u64.to_le_bytes()); // total_sectors
         buf[0x30..0x38].copy_from_slice(&4u64.to_le_bytes()); // mft_lcn
         buf[0x38..0x40].copy_from_slice(&8u64.to_le_bytes()); // mft_mirror_lcn
-        buf[0x40] = (-10i8) as u8; // clusters_per_mft_record -> 1024-byte records
+        buf[0x40] = (-10i8).cast_unsigned(); // clusters_per_mft_record -> 1024-byte records
         buf[0x48..0x50].copy_from_slice(&0x0123_4567_89AB_CDEFu64.to_le_bytes()); // serial
         buf[510] = 0x55;
         buf[511] = 0xAA;

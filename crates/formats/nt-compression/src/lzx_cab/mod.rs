@@ -7,22 +7,31 @@ pub use decompress::{decompress, decompress_lenient};
 /// Must be a power of 2 from 2^15 (32 KB) to 2^21 (2 MB).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowSize {
+    /// 32 KiB window.
     KB32 = 15,
+    /// 64 KiB window.
     KB64 = 16,
+    /// 128 KiB window.
     KB128 = 17,
+    /// 256 KiB window.
     KB256 = 18,
+    /// 512 KiB window.
     KB512 = 19,
+    /// 1 MiB window.
     MB1 = 20,
+    /// 2 MiB window.
     MB2 = 21,
 }
 
 impl WindowSize {
     /// Window size in bytes.
+    #[must_use]
     pub fn bytes(self) -> usize {
         1 << (self as u32)
     }
 
     /// Number of position slots for this window size.
+    #[must_use]
     pub fn position_slots(self) -> usize {
         match self {
             Self::KB32 => 30,
@@ -36,6 +45,7 @@ impl WindowSize {
     }
 
     /// The power-of-two exponent (15..=21).
+    #[must_use]
     pub fn bits(self) -> u32 {
         self as u32
     }
@@ -128,11 +138,15 @@ const MAX_POSITION_SLOTS: usize = 50;
 /// Compute footer bits for a position slot.
 ///
 /// Slots 0-1: 0 bits. Slots 2-37: `slot / 2 - 1`. Slots 38+: 17.
-const fn footer_bits_for_slot(slot: usize) -> u32 {
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "only slots 2 through 37 reach the cast, so slot / 2 - 1 is at most 17"
+)]
+const fn footer_bits_for_slot(slot: usize) -> u8 {
     if slot < 2 {
         0
     } else if slot < 38 {
-        (slot as u32) / 2 - 1
+        (slot / 2 - 1) as u8
     } else {
         17
     }
@@ -152,7 +166,7 @@ impl SlotTables {
         let mut footer_bits = [0u8; MAX_POSITION_SLOTS];
 
         for (i, fb) in footer_bits[..num_slots].iter_mut().enumerate() {
-            *fb = footer_bits_for_slot(i) as u8;
+            *fb = footer_bits_for_slot(i);
         }
         for i in 1..num_slots {
             base_position[i] = base_position[i - 1] + (1u32 << footer_bits_for_slot(i - 1));

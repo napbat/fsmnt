@@ -1,4 +1,6 @@
-mod common;
+//! Integration tests for recursive ext directory traversal.
+
+mod support;
 
 use std::collections::BTreeSet;
 
@@ -8,7 +10,7 @@ use fs_ext::ExtRawDirectoryIter;
 
 #[test]
 fn list_root_directory_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     let mut names = Vec::new();
@@ -24,7 +26,7 @@ fn list_root_directory_ext4() {
 
 #[test]
 fn list_root_directory_ext2() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     let mut names = Vec::new();
@@ -41,7 +43,7 @@ fn list_root_directory_ext2() {
 
 #[test]
 fn list_root_directory_ext3() {
-    let (ext, mut fs) = common::open_ext("ext3.img");
+    let (ext, mut fs) = support::open_ext("ext3.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     let mut names = Vec::new();
@@ -60,7 +62,7 @@ fn list_root_directory_ext3() {
 
 #[test]
 fn walk_dir_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut seen = BTreeSet::<FsId>::new();
     let mut file_count = 0u32;
@@ -82,7 +84,7 @@ fn walk_dir_ext4() {
 
 #[test]
 fn walk_dir_ext2() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let mut root = ext.root_directory();
     let mut seen = BTreeSet::<FsId>::new();
     let mut count = 0u32;
@@ -95,7 +97,7 @@ fn walk_dir_ext2() {
 
 #[test]
 fn walk_dir_ext3() {
-    let (ext, mut fs) = common::open_ext("ext3.img");
+    let (ext, mut fs) = support::open_ext("ext3.img");
     let mut root = ext.root_directory();
     let mut seen = BTreeSet::<FsId>::new();
     let mut count = 0u32;
@@ -108,7 +110,7 @@ fn walk_dir_ext3() {
 
 #[test]
 fn entry_kind_file_vs_directory_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     let mut found_file = false;
@@ -130,7 +132,7 @@ fn entry_kind_file_vs_directory_ext4() {
 
 #[test]
 fn entry_kind_file_vs_directory_ext2() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     let mut found_file = false;
@@ -152,7 +154,7 @@ fn entry_kind_file_vs_directory_ext2() {
 
 #[test]
 fn walk_dir_finds_nested_files() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut seen = BTreeSet::<FsId>::new();
     let mut names = Vec::new();
@@ -172,7 +174,7 @@ fn walk_dir_finds_nested_files() {
 
 #[test]
 fn entry_id_is_nonzero_for_real_entries() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     while let Some(entry) = iter.try_next(&mut fs).unwrap() {
@@ -184,7 +186,7 @@ fn entry_id_is_nonzero_for_real_entries() {
 
 #[test]
 fn open_dir_returns_none_for_file() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     while let Some(entry) = iter.try_next(&mut fs).unwrap() {
@@ -200,7 +202,7 @@ fn open_dir_returns_none_for_file() {
 
 #[test]
 fn open_dir_returns_some_for_directory() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let mut iter = root.entries(&mut fs).unwrap();
     while let Some(entry) = iter.try_next(&mut fs).unwrap() {
@@ -217,7 +219,7 @@ fn open_dir_returns_some_for_directory() {
 #[test]
 fn root_directory_id_is_inode_2() {
     let ext = {
-        let mut fs = common::load_image("ext4.img");
+        let mut fs = support::load_image("ext4.img");
         fs_ext::Ext::new(&mut fs).unwrap()
     };
     let root = ext.root_directory();
@@ -227,7 +229,7 @@ fn root_directory_id_is_inode_2() {
 
 #[test]
 fn walk_dir_ext2_finds_nested() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let mut root = ext.root_directory();
     let mut seen = BTreeSet::<FsId>::new();
     let mut names = Vec::new();
@@ -247,7 +249,7 @@ fn walk_dir_ext2_finds_nested() {
 
 #[test]
 fn raw_entries_yields_same_structural_info_as_entries_on_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
 
     // Collect from entries() (kind-resolved).
     let mut kind_entries: Vec<(Vec<u8>, u32)> = Vec::new();

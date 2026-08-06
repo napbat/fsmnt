@@ -9,6 +9,10 @@ use zerocopy::{FromBytes, I64, Immutable, KnownLayout, U64, Unaligned};
 use crate::error::{NtfsError, Result};
 use crate::ntfs::Ntfs;
 
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).expect("supported Rust targets have at most 64-bit pointers")
+}
+
 /// An absolute nonzero byte position on the NTFS filesystem.
 /// Can be used to seek, but even more often in [`NtfsError`] variants to assist with debugging.
 ///
@@ -28,11 +32,13 @@ impl NtfsPosition {
     }
 
     /// Returns a position with no value, indicating the byte offset is unknown.
+    #[must_use]
     pub const fn none() -> Self {
         Self(None)
     }
 
     /// Returns the stored position, or `None` if there is no valid position.
+    #[must_use]
     pub const fn value(&self) -> Option<NonZeroU64> {
         self.0
     }
@@ -42,7 +48,7 @@ impl Add<u16> for NtfsPosition {
     type Output = Self;
 
     fn add(self, other: u16) -> Self {
-        self + other as u64
+        self + u64::from(other)
     }
 }
 
@@ -61,7 +67,7 @@ impl Add<usize> for NtfsPosition {
     type Output = Self;
 
     fn add(self, other: usize) -> Self {
-        self + other as u64
+        self + usize_to_u64(other)
     }
 }
 
@@ -162,27 +168,30 @@ pub struct Lcn(U64<LittleEndian>);
 impl Lcn {
     /// Performs a checked addition of the given Virtual Cluster Number (VCN), returning a new LCN.
     pub fn checked_add(&self, vcn: Vcn) -> Option<Lcn> {
+        let offset = vcn.0.get().unsigned_abs();
         if vcn.0 >= 0 {
-            self.0.get().checked_add(vcn.0.get() as u64).map(Into::into)
+            self.0.get().checked_add(offset).map(Into::into)
         } else {
-            self.0
-                .get()
-                .checked_sub(vcn.0.get().wrapping_neg() as u64)
-                .map(Into::into)
+            self.0.get().checked_sub(offset).map(Into::into)
         }
     }
 
     /// Returns the absolute byte position of this LCN within the filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cluster offset cannot be represented without overflow.
     pub fn position(&self, ntfs: &Ntfs) -> Result<NtfsPosition> {
         let value = self
             .0
             .get()
-            .checked_mul(ntfs.cluster_size() as u64)
+            .checked_mul(u64::from(ntfs.cluster_size()))
             .ok_or(NtfsError::LcnTooBig { lcn: *self })?;
         Ok(NtfsPosition::new(value))
     }
 
     /// Returns the stored Logical Cluster Number.
+    #[must_use]
     pub fn value(&self) -> u64 {
         self.0.get()
     }
@@ -229,14 +238,19 @@ pub struct Vcn(I64<LittleEndian>);
 
 impl Vcn {
     /// Converts this VCN into a byte offset (with respect to the cluster size of the provided [`Ntfs`] filesystem).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cluster offset cannot be represented without overflow.
     pub fn offset(&self, ntfs: &Ntfs) -> Result<i64> {
         self.0
             .get()
-            .checked_mul(ntfs.cluster_size() as i64)
+            .checked_mul(i64::from(ntfs.cluster_size()))
             .ok_or(NtfsError::VcnTooBig { vcn: *self })
     }
 
     /// Returns the stored Virtual Cluster Number.
+    #[must_use]
     pub fn value(&self) -> i64 {
         self.0.get()
     }
@@ -392,7 +406,7 @@ mod tests {
         let lcn = Lcn::from(1);
         let pos = lcn.position(&ntfs).unwrap();
         // LCN 1 * cluster_size should give us the position.
-        assert_eq!(pos.value().unwrap().get(), ntfs.cluster_size() as u64);
+        assert_eq!(pos.value().unwrap().get(), u64::from(ntfs.cluster_size()));
     }
 
     #[test]
@@ -435,7 +449,7 @@ mod tests {
 
         let vcn = Vcn::from(2i64);
         let offset = vcn.offset(&ntfs).unwrap();
-        assert_eq!(offset, 2 * ntfs.cluster_size() as i64);
+        assert_eq!(offset, 2 * i64::from(ntfs.cluster_size()));
     }
 
     /// Build a minimal in-memory NTFS image whose boot sector yields a
@@ -453,7 +467,7 @@ mod tests {
         buf[0x28..0x30].copy_from_slice(&0x1000u64.to_le_bytes()); // total_sectors
         buf[0x30..0x38].copy_from_slice(&1u64.to_le_bytes()); // mft_lcn
         buf[0x38..0x40].copy_from_slice(&1u64.to_le_bytes()); // mft_mirror_lcn
-        buf[0x40] = (-10i8) as u8; // clusters_per_mft_record
+        buf[0x40] = (-10i8).cast_unsigned(); // clusters_per_mft_record
         buf[510] = 0x55;
         buf[511] = 0xAA;
         buf

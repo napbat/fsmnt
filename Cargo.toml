@@ -25,9 +25,9 @@ fsmnt-device-windows = { path = "crates/fsmnt-device-windows" }
 fsmnt-dokan = { path = "crates/fsmnt-dokan" }
 fsmnt-drivers = { path = "crates/fsmnt-drivers" }
 fsmnt-fuse = { path = "crates/fsmnt-fuse" }
+fsmnt-testkit = { path = "crates/fsmnt-testkit" }
 
-# Vendored filesystem-format crates (crates/formats/). These are copied
-# verbatim from upstream and deliberately not refactored; their manifests
+# Vendored filesystem-format crates (crates/formats/). Their manifests
 # reference these entries with `<name> = { workspace = true }`.
 # These parsers are no_std-capable and must stay that way: every entry
 # takes `default-features = false` so nothing pulls `std` in implicitly.
@@ -46,35 +46,43 @@ nt-bitlocker = { path = "crates/formats/nt-bitlocker" }
 # All external dependencies are declared here. Member crates import them
 # with `<name> = { workspace = true }` — never with a version of their own.
 bitflags = "2.11"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
-thiserror = "2"
+thiserror = { version = "2", default-features = false }
 time = { version = "0.3", default-features = false }
-zerocopy = "0.8"
+zerocopy = { version = "0.8", default-features = false }
 
 # Windows device access
 windows = "0.62"
 
 # --- Dependencies of the vendored crates/formats/ crates ---
 anyhow = "1.0"
-arbitrary = { version = "1", features = ["derive"] }
+arbitrary = { version = "1", default-features = false }
 arrayvec = { version = "0.7", default-features = false }
 cpufeatures = "0.3"
+crc32c = { version = "0.6", default-features = false }
 crc32fast = { version = "1.4", default-features = false }
 derive_more = { version = "2.1", default-features = false }
+divan = "0.1"
+embed-resource = "3.0"
 enumn = "0.1"
+libloading = "0.9"
 memoffset = "0.9"
+mutants = "0.0.4"
 nt-string = { version = "0.1", default-features = false }
+proptest = "1"
 strum_macros = "0.28"
 # NFD normalization for APFS directory-name hashing. no_std via
 # default-features = false; canonical decomposition is frozen by
 # Unicode's stability policy, so it matches Apple's Unicode-10 NFD.
 unicode-normalization = { version = "0.1", default-features = false }
+unicode-casefold = "0.2"
 
 # Crypto stack (ext4 fscrypt, BitLocker). The majors below are pinned and
 # must be bumped in lockstep — see the individual comments.
 aes = { version = "0.8", default-features = false }
+ccm = { version = "0.5", default-features = false }
 chacha20 = { version = "0.9", default-features = false, features = ["zeroize"] }
 hkdf = { version = "0.12", default-features = false }
 hmac = { version = "0.12", default-features = false }
@@ -89,7 +97,8 @@ polyval = { version = "0.6", default-features = false }
 # the aes 0.8 / cipher 0.4 ecosystem that nt-bitlocker still depends
 # on (xts-mode 0.5, ccm 0.5). Bump in lockstep with aes when xts-mode
 # and ccm release against cipher 0.5.
-sha2 = "0.10"
+secrecy = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 siphasher = { version = "1.0", default-features = false }
 # Pinned to 0.5 — sm4 0.6 requires Rust 1.85 and the cipher 0.5 / digest
 # 0.11 generation, same conflict.

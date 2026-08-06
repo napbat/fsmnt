@@ -14,7 +14,10 @@ pub struct AesXtsDecryptor {
     raw_key: Vec<u8>,
 }
 
-#[expect(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "expanded XTS schedules remain inline to avoid heap allocation in sector decryption"
+)]
 enum XtsInner {
     Aes128(xts_mode::Xts128<aes::Aes128>),
     Aes256(xts_mode::Xts128<aes::Aes256>),
@@ -94,7 +97,6 @@ impl SectorDecryptor for AesXtsDecryptor {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 

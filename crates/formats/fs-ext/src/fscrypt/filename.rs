@@ -217,7 +217,7 @@ pub(crate) fn build_filename_cipher_for_inode(
     policy::validate_supported(
         p,
         inode_number,
-        ext.block_size.trailing_zeros() as u8,
+        (ext.block_size.trailing_zeros()).to_le_bytes()[0],
         ext.compat
             .contains(crate::feature_flags::CompatFeatures::STABLE_INODES),
     )?;
@@ -278,7 +278,7 @@ pub(crate) fn build_filename_cipher_for_inode(
             match p.kind {
                 FscryptPolicyKind::V1 => {
                     let desc = p.key_descriptor.expect("v1 policy carries descriptor");
-                    let mk = ext.fscrypt_keys.get_v1(&desc).ok_or_else(|| {
+                    let mk = ext.fscrypt_keys.get_v1(desc).ok_or_else(|| {
                         ExtError::MissingFscryptKey {
                             inode: inode_number,
                             policy_kind: alloc::format!("{:?}", p.kind),

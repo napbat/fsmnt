@@ -19,7 +19,11 @@ pub(crate) const TAG_FLAG_DELETED: u32 = 0x4;
 /// Tag flag: last tag in the descriptor.
 pub(crate) const TAG_FLAG_LAST: u32 = 0x8;
 
-/// v3 (CSUM_V3) tag: 16-byte body + optional 16-byte UUID.
+/// v3 (`CSUM_V3`) tag: 16-byte body + optional 16-byte UUID.
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical jbd2 t_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct JbdBlockTagV3 {
@@ -29,8 +33,12 @@ pub(crate) struct JbdBlockTagV3 {
     pub t_checksum: U32<BE>,
 }
 
-/// Pre-v3 (CSUM_V2 or legacy) tag: 8-byte body, optional 4-byte blocknr_high,
+/// Pre-v3 (`CSUM_V2` or legacy) tag: 8-byte body, optional 4-byte `blocknr_high`,
 /// optional 16-byte UUID.
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical jbd2 t_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct JbdBlockTagLegacy {
@@ -39,7 +47,7 @@ pub(crate) struct JbdBlockTagLegacy {
     pub t_flags: [u8; 2],
 }
 
-/// v3 descriptor body length = 16 + (16 if !SAME_UUID).
+/// v3 descriptor body length = 16 + (16 if !`SAME_UUID`).
 pub(crate) fn tag_len_v3(flags: u32) -> usize {
     if flags & TAG_FLAG_SAME_UUID != 0 {
         16
@@ -48,7 +56,7 @@ pub(crate) fn tag_len_v3(flags: u32) -> usize {
     }
 }
 
-/// Legacy descriptor body length = 8 + (4 if 64BIT) + (16 if !SAME_UUID).
+/// Legacy descriptor body length = 8 + (4 if 64BIT) + (16 if !`SAME_UUID`).
 pub(crate) fn tag_len_legacy(flags: u32, is_64bit: bool) -> usize {
     let base = if is_64bit { 12 } else { 8 };
     base + if flags & TAG_FLAG_SAME_UUID != 0 {
@@ -81,7 +89,7 @@ pub(crate) struct DescriptorTagIter<'a> {
     done: bool,
 }
 
-impl<'a> Iterator for DescriptorTagIter<'a> {
+impl Iterator for DescriptorTagIter<'_> {
     type Item = Result<ParsedTag>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -94,73 +102,68 @@ impl<'a> Iterator for DescriptorTagIter<'a> {
                 reason: "descriptor ended without LAST_TAG",
             }));
         }
-        let (tag, advance) = match self.mode {
-            JournalChecksumMode::V3Crc32c => {
-                if self.body.len() < 16 {
-                    self.done = true;
-                    return Some(Err(ExtError::InvalidJournalSuperblock {
-                        reason: "descriptor body truncated",
-                    }));
-                }
-                let raw = JbdBlockTagV3::ref_from_bytes(&self.body[..16]).expect("length checked");
-                let flags = raw.t_flags.get();
-                let fs_block =
-                    (u64::from(raw.t_blocknr_high.get()) << 32) | u64::from(raw.t_blocknr.get());
-                let parsed = ParsedTag {
-                    fs_block,
-                    escape: flags & TAG_FLAG_ESCAPE != 0,
-                    last: flags & TAG_FLAG_LAST != 0,
-                    checksum: raw.t_checksum.get(),
-                };
-                let len = tag_len_v3(flags);
-                if self.body.len() < len {
-                    self.done = true;
-                    return Some(Err(ExtError::InvalidJournalSuperblock {
-                        reason: "descriptor UUID truncated",
-                    }));
-                }
-                (parsed, len)
+        let (tag, advance) = if self.mode == JournalChecksumMode::V3Crc32c {
+            if self.body.len() < 16 {
+                self.done = true;
+                return Some(Err(ExtError::InvalidJournalSuperblock {
+                    reason: "descriptor body truncated",
+                }));
             }
-            _ => {
-                if self.body.len() < 8 {
-                    self.done = true;
-                    return Some(Err(ExtError::InvalidJournalSuperblock {
-                        reason: "descriptor body truncated",
-                    }));
-                }
-                let raw =
-                    JbdBlockTagLegacy::ref_from_bytes(&self.body[..8]).expect("length checked");
-                let flags = u32::from(u16::from_be_bytes(raw.t_flags));
-                let checksum_16 = u16::from_be_bytes(raw.t_checksum);
-                let mut fs_block = u64::from(raw.t_blocknr.get());
-                let mut consumed = 8usize;
-                if self.is_64bit {
-                    if self.body.len() < 12 {
-                        self.done = true;
-                        return Some(Err(ExtError::InvalidJournalSuperblock {
-                            reason: "descriptor 64BIT high half truncated",
-                        }));
-                    }
-                    let high =
-                        u32::from_be_bytes(self.body[8..12].try_into().expect("fixed slice"));
-                    fs_block |= u64::from(high) << 32;
-                    consumed = 12;
-                }
-                let parsed = ParsedTag {
-                    fs_block,
-                    escape: flags & TAG_FLAG_ESCAPE != 0,
-                    last: flags & TAG_FLAG_LAST != 0,
-                    checksum: u32::from(checksum_16),
-                };
-                let total = tag_len_legacy(flags, self.is_64bit);
-                if total < consumed || self.body.len() < total {
-                    self.done = true;
-                    return Some(Err(ExtError::InvalidJournalSuperblock {
-                        reason: "descriptor UUID truncated",
-                    }));
-                }
-                (parsed, total)
+            let raw = JbdBlockTagV3::ref_from_bytes(&self.body[..16]).expect("length checked");
+            let flags = raw.t_flags.get();
+            let fs_block =
+                (u64::from(raw.t_blocknr_high.get()) << 32) | u64::from(raw.t_blocknr.get());
+            let parsed = ParsedTag {
+                fs_block,
+                escape: flags & TAG_FLAG_ESCAPE != 0,
+                last: flags & TAG_FLAG_LAST != 0,
+                checksum: raw.t_checksum.get(),
+            };
+            let len = tag_len_v3(flags);
+            if self.body.len() < len {
+                self.done = true;
+                return Some(Err(ExtError::InvalidJournalSuperblock {
+                    reason: "descriptor UUID truncated",
+                }));
             }
+            (parsed, len)
+        } else {
+            if self.body.len() < 8 {
+                self.done = true;
+                return Some(Err(ExtError::InvalidJournalSuperblock {
+                    reason: "descriptor body truncated",
+                }));
+            }
+            let raw = JbdBlockTagLegacy::ref_from_bytes(&self.body[..8]).expect("length checked");
+            let flags = u32::from(u16::from_be_bytes(raw.t_flags));
+            let checksum_16 = u16::from_be_bytes(raw.t_checksum);
+            let mut fs_block = u64::from(raw.t_blocknr.get());
+            let mut consumed = 8usize;
+            if self.is_64bit {
+                if self.body.len() < 12 {
+                    self.done = true;
+                    return Some(Err(ExtError::InvalidJournalSuperblock {
+                        reason: "descriptor 64BIT high half truncated",
+                    }));
+                }
+                let high = u32::from_be_bytes(self.body[8..12].try_into().expect("fixed slice"));
+                fs_block |= u64::from(high) << 32;
+                consumed = 12;
+            }
+            let parsed = ParsedTag {
+                fs_block,
+                escape: flags & TAG_FLAG_ESCAPE != 0,
+                last: flags & TAG_FLAG_LAST != 0,
+                checksum: u32::from(checksum_16),
+            };
+            let total = tag_len_legacy(flags, self.is_64bit);
+            if total < consumed || self.body.len() < total {
+                self.done = true;
+                return Some(Err(ExtError::InvalidJournalSuperblock {
+                    reason: "descriptor UUID truncated",
+                }));
+            }
+            (parsed, total)
         };
         self.body = &self.body[advance..];
         if tag.last {
@@ -170,7 +173,7 @@ impl<'a> Iterator for DescriptorTagIter<'a> {
     }
 }
 
-/// Iterate tag bytes (exclusive of journal_header and, when CSUM enabled,
+/// Iterate tag bytes (exclusive of `journal_header` and, when CSUM enabled,
 /// exclusive of the 4-byte descriptor tail) without allocating an owned
 /// tag vector on the hot path.
 pub(crate) fn parse_descriptor_tags(
@@ -271,7 +274,8 @@ mod tests {
         let off1 = 12 + 8 + 16;
         buf[off1..off1 + 4].copy_from_slice(&7u32.to_be_bytes());
         buf[off1 + 4..off1 + 6].copy_from_slice(&0u16.to_be_bytes());
-        let flags = (TAG_FLAG_SAME_UUID | TAG_FLAG_LAST) as u16;
+        let flags = u16::try_from(TAG_FLAG_SAME_UUID | TAG_FLAG_LAST)
+            .expect("the test fixture value fits in u16");
         buf[off1 + 6..off1 + 8].copy_from_slice(&flags.to_be_bytes());
 
         let tags = collect_tags(

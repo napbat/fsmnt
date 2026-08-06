@@ -2,6 +2,8 @@ use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use fs_common::error::IoError;
+use fs_common::io::FsReadSeek;
 use memoffset::offset_of;
 
 use crate::attribute_value::NtfsAttributeValue;
@@ -12,10 +14,21 @@ use crate::io::{Read, Seek};
 use crate::record::Record;
 use crate::record::RecordHeader;
 use crate::types::{NtfsPosition, Vcn};
-use fs_common::io::FsReadSeek;
 
 /// Size of all [`IndexRecordHeader`] fields.
-const INDEX_RECORD_HEADER_SIZE: u32 = 24;
+const INDEX_RECORD_HEADER_SIZE: usize = 24;
+const INDEX_RECORD_HEADER_SIZE_U64: u64 = 24;
+
+fn validated_record_bytes<const N: usize>(data: &[u8], start: usize) -> [u8; N] {
+    data.get(start..)
+        .and_then(|bytes| bytes.first_chunk())
+        .copied()
+        .expect("index-record construction validates every fixed-width field")
+}
+
+fn validated_usize(value: u32) -> usize {
+    usize::try_from(value).expect("u32 index-record sizes fit usize on supported targets")
+}
 
 /// Maximum allowed index record size (256 KB).
 ///
@@ -73,12 +86,14 @@ impl NtfsIndexRecord {
         if index_record_size > MAX_INDEX_RECORD_SIZE {
             return Err(NtfsError::InvalidIndexAllocatedSize {
                 position: data_position,
-                expected: MAX_INDEX_RECORD_SIZE,
-                actual: index_record_size,
+                expected: u64::from(MAX_INDEX_RECORD_SIZE),
+                actual: u64::from(index_record_size),
             });
         }
 
-        let mut data = vec![0; index_record_size as usize];
+        let buffer_size =
+            usize::try_from(index_record_size).map_err(|_| IoError::invalid_input())?;
+        let mut data = vec![0; buffer_size];
         value.read_exact(fs, &mut data)?;
 
         Self::from_raw_data(data, data_position)
@@ -102,7 +117,11 @@ impl NtfsIndexRecord {
     /// Returns an iterator over all entries of this Index Record (cf. [`NtfsIndexEntry`]).
     ///
     /// [`NtfsIndexEntry`]: crate::NtfsIndexEntry
-    pub fn entries<'s, E>(&'s self) -> Result<NtfsIndexNodeEntries<'s, E>>
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index metadata is malformed or its allocation data cannot be read.
+    pub fn entries<E>(&self) -> Result<NtfsIndexNodeEntries<'_, E>>
     where
         E: NtfsIndexEntryType,
     {
@@ -113,8 +132,8 @@ impl NtfsIndexRecord {
     }
 
     fn entries_range_and_position(&self) -> (Range<usize>, NtfsPosition) {
-        let start = INDEX_RECORD_HEADER_SIZE as usize + self.index_entries_offset() as usize;
-        let end = INDEX_RECORD_HEADER_SIZE as usize + self.index_data_size() as usize;
+        let start = INDEX_RECORD_HEADER_SIZE + validated_usize(self.index_entries_offset());
+        let end = INDEX_RECORD_HEADER_SIZE + validated_usize(self.index_data_size());
         let position = self.record.position() + start;
 
         (start..end, position)
@@ -122,27 +141,30 @@ impl NtfsIndexRecord {
 
     /// Returns whether this index node has sub-nodes.
     /// Otherwise, this index node is a leaf node.
+    #[must_use]
     pub fn has_subnodes(&self) -> bool {
-        let start = INDEX_RECORD_HEADER_SIZE as usize + offset_of!(IndexNodeHeader, flags);
+        let start = INDEX_RECORD_HEADER_SIZE + offset_of!(IndexNodeHeader, flags);
         let flags = self.record.data()[start];
         (flags & HAS_SUBNODES_FLAG) != 0
     }
 
     /// Returns the allocated size of this NTFS Index Record, in bytes.
+    #[must_use]
     pub fn index_allocated_size(&self) -> u32 {
-        let start = INDEX_RECORD_HEADER_SIZE as usize + offset_of!(IndexNodeHeader, allocated_size);
-        u32::from_le_bytes(*self.record.data()[start..].first_chunk().unwrap())
+        let start = INDEX_RECORD_HEADER_SIZE + offset_of!(IndexNodeHeader, allocated_size);
+        u32::from_le_bytes(validated_record_bytes(self.record.data(), start))
     }
 
     /// Returns the size actually used by index data within this NTFS Index Record, in bytes.
+    #[must_use]
     pub fn index_data_size(&self) -> u32 {
-        let start = INDEX_RECORD_HEADER_SIZE as usize + offset_of!(IndexNodeHeader, index_size);
-        u32::from_le_bytes(*self.record.data()[start..].first_chunk().unwrap())
+        let start = INDEX_RECORD_HEADER_SIZE + offset_of!(IndexNodeHeader, index_size);
+        u32::from_le_bytes(validated_record_bytes(self.record.data(), start))
     }
 
     pub(crate) fn index_entries_offset(&self) -> u32 {
-        let start = INDEX_RECORD_HEADER_SIZE as usize + offset_of!(IndexNodeHeader, entries_offset);
-        u32::from_le_bytes(*self.record.data()[start..].first_chunk().unwrap())
+        let start = INDEX_RECORD_HEADER_SIZE + offset_of!(IndexNodeHeader, entries_offset);
+        u32::from_le_bytes(validated_record_bytes(self.record.data(), start))
     }
 
     pub(crate) fn into_entry_ranges<E>(self) -> IndexNodeEntryRanges<E>
@@ -169,29 +191,30 @@ impl NtfsIndexRecord {
     }
 
     fn validate_sizes(&self) -> Result<()> {
-        let index_record_size = self.record.len() as u64;
+        let index_record_size =
+            u64::try_from(self.record.len()).map_err(|_| IoError::invalid_input())?;
 
         // The total size allocated for this Index Record must not be larger than
         // the size defined for all index records of this index. Perform the
         // arithmetic in u64 to avoid overflow on malformed on-disk values.
         let total_allocated_size =
-            INDEX_RECORD_HEADER_SIZE as u64 + self.index_allocated_size() as u64;
+            INDEX_RECORD_HEADER_SIZE_U64 + u64::from(self.index_allocated_size());
         if total_allocated_size > index_record_size {
             return Err(NtfsError::InvalidIndexAllocatedSize {
                 position: self.record.position(),
-                expected: index_record_size.min(u32::MAX as u64) as u32,
-                actual: total_allocated_size.min(u32::MAX as u64) as u32,
+                expected: index_record_size,
+                actual: total_allocated_size,
             });
         }
 
         // Furthermore, the total used size for this Index Record must not be
         // larger than the total allocated size.
-        let total_data_size = INDEX_RECORD_HEADER_SIZE as u64 + self.index_data_size() as u64;
+        let total_data_size = INDEX_RECORD_HEADER_SIZE_U64 + u64::from(self.index_data_size());
         if total_data_size > total_allocated_size {
             return Err(NtfsError::InvalidIndexUsedSize {
                 position: self.record.position(),
-                expected: total_allocated_size.min(u32::MAX as u64) as u32,
-                actual: total_data_size.min(u32::MAX as u64) as u32,
+                expected: total_allocated_size,
+                actual: total_data_size,
             });
         }
 
@@ -203,10 +226,11 @@ impl NtfsIndexRecord {
     /// When files are deleted from a directory, their index entries are removed from the B-tree
     /// but the data is **not zeroed**. This slack space may contain recoverable file names,
     /// timestamps, and MFT references.
+    #[must_use]
     pub fn slack_data(&self) -> &[u8] {
         let data = self.record.data();
-        let start = INDEX_RECORD_HEADER_SIZE as usize + self.index_data_size() as usize;
-        let end = INDEX_RECORD_HEADER_SIZE as usize + self.index_allocated_size() as usize;
+        let start = INDEX_RECORD_HEADER_SIZE + validated_usize(self.index_data_size());
+        let end = INDEX_RECORD_HEADER_SIZE + validated_usize(self.index_allocated_size());
         let start = start.min(data.len());
         let end = end.min(data.len());
         if start >= end {
@@ -216,8 +240,9 @@ impl NtfsIndexRecord {
     }
 
     /// Byte position on disk where slack space starts.
+    #[must_use]
     pub fn slack_position(&self) -> NtfsPosition {
-        let start = INDEX_RECORD_HEADER_SIZE as usize + self.index_data_size() as usize;
+        let start = INDEX_RECORD_HEADER_SIZE + validated_usize(self.index_data_size());
         self.record.position() + start
     }
 
@@ -227,11 +252,13 @@ impl NtfsIndexRecord {
     /// [`NtfsIndexAllocation::record_from_vcn`] uses it for that purpose.
     ///
     /// [`NtfsIndexAllocation::record_from_vcn`]: crate::structured_values::NtfsIndexAllocation::record_from_vcn
+    #[must_use]
     pub fn vcn(&self) -> Vcn {
         let start = offset_of!(IndexRecordHeader, vcn);
-        Vcn::from(i64::from_le_bytes(
-            *self.record.data()[start..].first_chunk().unwrap(),
-        ))
+        Vcn::from(i64::from_le_bytes(validated_record_bytes(
+            self.record.data(),
+            start,
+        )))
     }
 }
 
@@ -249,14 +276,14 @@ mod tests {
     ///
     /// Field layout (little-endian) mirrors the on-disk structure:
     /// - 0..4   "INDX" signature
-    /// - 4..6   update_sequence_offset (= 40)
-    /// - 6..8   update_sequence_count  (= 2: one USN + one fixup entry)
-    /// - 8..16  logfile_sequence_number
+    /// - 4..6   `update_sequence_offset` (= 40)
+    /// - 6..8   `update_sequence_count`  (= 2: one USN + one fixup entry)
+    /// - 8..16  `logfile_sequence_number`
     /// - 16..24 VCN (`IndexRecordHeader::vcn`)
-    /// - 24..28 IndexNodeHeader::entries_offset
-    /// - 28..32 IndexNodeHeader::index_size (used data size)
-    /// - 32..36 IndexNodeHeader::allocated_size
-    /// - 36     IndexNodeHeader::flags
+    /// - 24..28 `IndexNodeHeader::entries_offset`
+    /// - 28..32 `IndexNodeHeader::index_size` (used data size)
+    /// - 32..36 `IndexNodeHeader::allocated_size`
+    /// - 36     `IndexNodeHeader::flags`
     /// - 40..42 Update Sequence Number (USN)
     /// - 42..44 fixup array entry 0 (replaces bytes at 510..512)
     /// - 510..512 the USN (pre-fixup), overwritten with the array entry
@@ -294,7 +321,9 @@ mod tests {
         data[0..4].copy_from_slice(b"INDX");
         data[4..6].copy_from_slice(&40u16.to_le_bytes()); // update_sequence_offset
         // update_sequence_count = sectors + 1 (one USN + one entry per sector).
-        data[6..8].copy_from_slice(&((sectors as u16) + 1).to_le_bytes());
+        data[6..8].copy_from_slice(
+            &(u16::try_from(sectors).expect("test value fits u16") + 1).to_le_bytes(),
+        );
         data[16..24].copy_from_slice(&vcn.to_le_bytes());
         data[24..28].copy_from_slice(&entries_offset.to_le_bytes());
         data[28..32].copy_from_slice(&index_data_size.to_le_bytes());
@@ -471,7 +500,7 @@ mod tests {
         let err = NtfsIndexRecord::new(&mut fs, value, MAX_INDEX_RECORD_SIZE + 1).unwrap_err();
         match err {
             NtfsError::InvalidIndexAllocatedSize { expected, .. } => {
-                assert_eq!(expected, MAX_INDEX_RECORD_SIZE);
+                assert_eq!(expected, u64::from(MAX_INDEX_RECORD_SIZE));
             }
             other => panic!("expected InvalidIndexAllocatedSize, got {other:?}"),
         }
@@ -528,7 +557,8 @@ mod tests {
             let slack_pos = record.slack_position();
 
             // Slack data size should be allocated - used
-            let expected_len = (record.index_allocated_size() - record.index_data_size()) as usize;
+            let expected_len =
+                validated_usize(record.index_allocated_size() - record.index_data_size());
             assert_eq!(slack.len(), expected_len);
 
             // slack_position should be valid (non-None) for on-disk records

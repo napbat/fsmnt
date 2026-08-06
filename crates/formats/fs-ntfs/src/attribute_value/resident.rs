@@ -5,11 +5,16 @@
 //! Further accesses to the record data can then happen via slices.
 
 use super::seek_contiguous;
+use fs_common::error::IoError;
 use fs_common::io::FsReadSeek;
 
 use crate::error::{NtfsError, Result};
 use crate::io::{Read, Seek, SeekFrom};
 use crate::types::NtfsPosition;
+
+fn slice_len_u64(data: &[u8]) -> u64 {
+    u64::try_from(data.len()).expect("supported Rust targets have at most 64-bit pointers")
+}
 
 /// Reader for a value of a resident NTFS Attribute (which is entirely contained in the NTFS File Record).
 #[derive(Clone, Debug)]
@@ -34,12 +39,14 @@ impl<'f> NtfsResidentAttributeValue<'f> {
     /// of the requested file.
     /// Hence, the fixed up File Record is entirely in memory at this stage and a slice
     /// to a resident attribute value can be obtained easily.
+    #[must_use]
     pub fn data(&self) -> &'f [u8] {
         self.data
     }
 
     /// Returns the absolute current data seek position within the filesystem, in bytes.
     /// This may be `None` if the current seek position is outside the valid range.
+    #[must_use]
     pub fn data_position(&self) -> NtfsPosition {
         if self.stream_position <= self.len() {
             self.position + self.stream_position
@@ -49,16 +56,19 @@ impl<'f> NtfsResidentAttributeValue<'f> {
     }
 
     /// Returns `true` if the resident attribute value contains no data.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the total length of the resident attribute value data, in bytes.
+    #[must_use]
     pub fn len(&self) -> u64 {
-        self.data.len() as u64
+        slice_len_u64(self.data)
     }
 
     /// Returns the current stream position within this value, in bytes.
+    #[must_use]
     pub fn stream_position(&self) -> u64 {
         self.stream_position
     }
@@ -76,14 +86,17 @@ impl<R: Read + Seek> FsReadSeek<R> for NtfsResidentAttributeValue<'_> {
             return Ok(0);
         }
 
-        let bytes_to_read = usize::min(buf.len(), self.remaining_len() as usize);
+        let remaining_len =
+            usize::try_from(self.remaining_len()).map_err(|_| IoError::invalid_input())?;
+        let bytes_to_read = usize::min(buf.len(), remaining_len);
         let work_slice = &mut buf[..bytes_to_read];
 
-        let start = self.stream_position as usize;
+        let start = usize::try_from(self.stream_position).map_err(|_| IoError::invalid_input())?;
         let end = start + bytes_to_read;
         work_slice.copy_from_slice(&self.data[start..end]);
 
-        self.stream_position += bytes_to_read as u64;
+        self.stream_position +=
+            u64::try_from(bytes_to_read).map_err(|_| IoError::invalid_input())?;
         Ok(bytes_to_read)
     }
 
@@ -97,7 +110,7 @@ impl<R: Read + Seek> FsReadSeek<R> for NtfsResidentAttributeValue<'_> {
     }
 
     fn len(&self) -> u64 {
-        self.data.len() as u64
+        slice_len_u64(self.data)
     }
 }
 

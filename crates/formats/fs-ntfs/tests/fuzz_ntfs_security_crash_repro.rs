@@ -1,11 +1,11 @@
-#![cfg(feature = "arbitrary")]
+//! Regression tests for malformed security-metadata fuzz artifacts.
 
-use std::fs;
-use std::path::Path;
+#![cfg(feature = "arbitrary")]
 
 use arbitrary::{Arbitrary, Unstructured};
 use fs_ntfs::structured_values::{NtfsAceType, NtfsAcl, NtfsSecurityDescriptor, NtfsSid};
 use fs_ntfs::types::NtfsPosition;
+use fsmnt_testkit::read_required_fixture;
 
 /// Regression harnesses for libFuzzer crashes found in `fuzz_ntfs_security`.
 ///
@@ -13,10 +13,19 @@ use fs_ntfs::types::NtfsPosition;
 /// security-descriptor parsing paths as the `fuzz_ntfs_security` fuzz target so
 /// you can debug it under `cargo test`.
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 struct FuzzInput {
     raw: Vec<u8>,
     sid: NtfsSid,
+}
+
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            raw: u.arbitrary()?,
+            sid: u.arbitrary()?,
+        })
+    }
 }
 
 fn exercise_acl(acl: &NtfsAcl<'_>) {
@@ -43,16 +52,11 @@ fn exercise_acl(acl: &NtfsAcl<'_>) {
 }
 
 fn run_fuzz_ntfs_security_artifact(file_name: &str) {
-    let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crashes/libfuzzer/fuzz_ntfs_security")
-        .join(file_name);
-
-    if !artifact_path.exists() {
-        panic!("Artifact not found at {}.", artifact_path.display());
-    }
-
-    let data =
-        fs::read(&artifact_path).expect("failed to read fuzz artifact for fuzz_ntfs_security");
+    let data = read_required_fixture(
+        env!("CARGO_MANIFEST_DIR"),
+        format!("../../crashes/libfuzzer/fuzz_ntfs_security/{file_name}"),
+        "Regenerate the fuzz_ntfs_security corpus with cargo-fuzz.",
+    );
 
     let mut u = Unstructured::new(&data);
     let Ok(input) = FuzzInput::arbitrary(&mut u) else {

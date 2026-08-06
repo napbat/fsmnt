@@ -200,9 +200,8 @@ pub fn salvage_block(block: &[u8], block_addr: u64) -> Result<Option<OrphanedNod
     {
         return Ok(None);
     }
-    let node = match BtreeNode::parse(block.to_vec()) {
-        Ok(node) => node,
-        Err(_) => return Ok(None),
+    let Ok(node) = BtreeNode::parse(block.to_vec()) else {
+        return Ok(None);
     };
     if !node.is_leaf() {
         return Ok(None);
@@ -313,6 +312,12 @@ impl RecoveredObject {
 /// inode's object id. Extents are therefore collected by stream id and
 /// joined to their inode's candidate through `private_id`, so a clone's
 /// content is not split into a separate, headerless candidate.
+///
+/// # Panics
+///
+/// Panics only if a candidate inserted into the function's local map cannot
+/// be retrieved immediately afterward, which would violate the map API's
+/// insertion guarantee.
 #[must_use]
 pub fn group_orphans(nodes: &[OrphanedNode]) -> Vec<RecoveredObject> {
     let mut candidates: BTreeMap<u64, RecoveredObject> = BTreeMap::new();
@@ -441,7 +446,7 @@ mod tests {
 
     /// Builds a variable-kv file-system-tree leaf node.
     ///
-    /// When `as_root` is set the node is also a root (carrying a btree_info
+    /// When `as_root` is set the node is also a root (carrying a `btree_info`
     /// trailer); the `obj_phys` type/subtype mark it as a catalog node.
     fn fs_leaf(records: &[(Vec<u8>, Vec<u8>)], as_root: bool, headered: bool) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
@@ -452,18 +457,42 @@ mod tests {
         }
         let flags: u16 = if as_root { 0x0003 } else { 0x0002 }; // LEAF (+ROOT)
         b[0x20..0x22].copy_from_slice(&flags.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -472,7 +501,7 @@ mod tests {
     }
 
     fn inode_record(obj_id: u64) -> (Vec<u8>, Vec<u8>) {
-        let key = (((JObjType::Inode.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let key = ((u64::from(JObjType::Inode.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         (key, vec![0u8; J_INODE_VAL_SIZE])
@@ -483,7 +512,15 @@ mod tests {
         image.extend(omap_tree(root_oid, 2));
         image.extend(fs_leaf(records, true, true));
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        (Catalog::new(Oid(root_oid), omap, BLK as u32, Xid(1)), image)
+        (
+            Catalog::new(
+                Oid(root_oid),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
+            image,
+        )
     }
 
     #[test]
@@ -561,7 +598,7 @@ mod tests {
         private_id: u64,
         xfields: &[u8],
     ) -> (Vec<u8>, Vec<u8>) {
-        let key = (((JObjType::Inode.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let key = ((u64::from(JObjType::Inode.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         let mut value = vec![0u8; J_INODE_VAL_SIZE];
@@ -588,10 +625,13 @@ mod tests {
 
     /// A legacy (unhashed) `DIR_REC` record naming `child`.
     fn drec(dir_id: u64, name: &str, child: u64, file_type: u16) -> (Vec<u8>, Vec<u8>) {
-        let mut key = (((JObjType::DirRec.as_value() as u64) << OBJ_TYPE_SHIFT) | dir_id)
+        let mut key = ((u64::from(JObjType::DirRec.as_value()) << OBJ_TYPE_SHIFT) | dir_id)
             .to_le_bytes()
             .to_vec();
-        key.extend_from_slice(&(name.len() as u16 + 1).to_le_bytes());
+        key.extend_from_slice(
+            &(u16::try_from(name.len()).expect("the test fixture value fits in u16") + 1)
+                .to_le_bytes(),
+        );
         key.extend_from_slice(name.as_bytes());
         key.push(0);
         let mut value = vec![0u8; 18];
@@ -602,7 +642,7 @@ mod tests {
 
     /// A `FILE_EXTENT` record mapping a logical offset to a physical block.
     fn file_extent_record(obj_id: u64, logical: u64, len: u64, phys: u64) -> (Vec<u8>, Vec<u8>) {
-        let mut key = (((JObjType::FileExtent.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let mut key = ((u64::from(JObjType::FileExtent.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         key.extend_from_slice(&logical.to_le_bytes());
@@ -628,8 +668,18 @@ mod tests {
         let live_omap = Omap::parse(&image[..BLK]).unwrap();
         let snap_omap = Omap::parse(&image[3 * BLK..4 * BLK]).unwrap();
         (
-            Catalog::new(Oid(100), live_omap, BLK as u32, Xid(1)),
-            Catalog::new(Oid(200), snap_omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(100),
+                live_omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
+            Catalog::new(
+                Oid(200),
+                snap_omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             image,
         )
     }
@@ -671,7 +721,13 @@ mod tests {
         let mut reader = Cursor::new(image);
 
         let deleted = diff_snapshot(&mut reader, &live, &snap, 1000).unwrap();
-        let recovered = read_deleted_content(&snap, &mut reader, &deleted[0], BLK as u32).unwrap();
+        let recovered = read_deleted_content(
+            &snap,
+            &mut reader,
+            &deleted[0],
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+        )
+        .unwrap();
         assert_eq!(recovered.len(), BLK);
         assert_eq!(recovered[0], 0x42);
         assert!(recovered[1..].iter().all(|&b| b == 0xD7));
@@ -775,16 +831,21 @@ mod tests {
     /// An xattr record with an embedded value, keyed off `obj_id`.
     fn xattr_record(obj_id: u64, name: &str, value: &[u8]) -> (Vec<u8>, Vec<u8>) {
         use crate::xattr::{J_XATTR_VAL_HEADER_SIZE, XattrFlags};
-        let mut key = (((JObjType::Xattr.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let mut key = ((u64::from(JObjType::Xattr.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
-        let name_with_nul_len = (name.len() + 1) as u16;
+        let name_with_nul_len =
+            u16::try_from(name.len() + 1).expect("the test fixture value fits in u16");
         key.extend_from_slice(&name_with_nul_len.to_le_bytes());
         key.extend_from_slice(name.as_bytes());
         key.push(0);
         let mut val = Vec::with_capacity(J_XATTR_VAL_HEADER_SIZE + value.len());
         val.extend_from_slice(&XattrFlags::DATA_EMBEDDED.bits().to_le_bytes());
-        val.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        val.extend_from_slice(
+            &u16::try_from(value.len())
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         val.extend_from_slice(value);
         (key, val)
     }
@@ -829,11 +890,19 @@ mod tests {
         let dev = SM_DEV_OFFSET;
         b[dev..dev + 8].copy_from_slice(&(chunk_count * u64::from(blocks_per_chunk)).to_le_bytes());
         b[dev + 8..dev + 16].copy_from_slice(&chunk_count.to_le_bytes());
-        b[dev + 16..dev + 20].copy_from_slice(&(cib_addrs.len() as u32).to_le_bytes());
+        b[dev + 16..dev + 20].copy_from_slice(
+            &u32::try_from(cib_addrs.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         let free = chunk_count * u64::from(blocks_per_chunk);
         b[dev + 24..dev + 32].copy_from_slice(&free.to_le_bytes());
         let addr_off = SM_DEV_OFFSET + SD_COUNT * SPACEMAN_DEVICE_SIZE;
-        b[dev + 32..dev + 36].copy_from_slice(&(addr_off as u32).to_le_bytes());
+        b[dev + 32..dev + 36].copy_from_slice(
+            &u32::try_from(addr_off)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         for (i, &addr) in cib_addrs.iter().enumerate() {
             b[addr_off + i * 8..addr_off + i * 8 + 8].copy_from_slice(&addr.to_le_bytes());
         }
@@ -863,7 +932,12 @@ mod tests {
         //     impossible when a valid orphan exists in the scanned range.
         //   * `>= with <` on the device-bound check — flipping the break
         //     condition would terminate the loop before any block is read.
-        let sm_block = spaceman_block(BLK as u32, 8, 1, &[1]);
+        let sm_block = spaceman_block(
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            8,
+            1,
+            &[1],
+        );
         let cib = cib_block(8, 8); // one uniformly-free chunk of 8 blocks
         let mut image = sm_block;
         image.extend(cib); // block 1: cib (only read on bitmap scans)

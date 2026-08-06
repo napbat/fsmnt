@@ -1,4 +1,5 @@
-//! Mostly imported from https://github.com/rust-lang/rust/blob/561364e4d5ccc506f610208a4989e91fdbdc8ca7/library/std/src/io/mod.rs
+//! Mostly imported from
+//! <https://github.com/rust-lang/rust/blob/561364e4d5ccc506f610208a4989e91fdbdc8ca7/library/std/src/io/mod.rs>.
 
 use super::Result;
 
@@ -7,9 +8,17 @@ use super::Result;
 /// See its documentation for more details.
 pub trait Seek {
     /// See [`std::io::Seek::seek`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the requested position is invalid.
     fn seek(&mut self, pos: SeekFrom) -> Result<u64>;
 
     /// See [`std::io::Seek::rewind`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when seeking to the start fails.
     //
     // Verbatim port of the upstream stdlib at rust-lang/rust@561364e4. Only
     // compiled in `no_std` builds; concrete fs-* readers seek directly
@@ -21,6 +30,10 @@ pub trait Seek {
     }
 
     /// See [`std::io::Seek::stream_position`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the current position cannot be queried.
     //
     // Verbatim port of the upstream stdlib at rust-lang/rust@561364e4. Only
     // compiled in `no_std` builds; concrete fs-* readers track stream

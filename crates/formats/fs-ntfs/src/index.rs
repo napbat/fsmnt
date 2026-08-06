@@ -4,6 +4,7 @@ use core::marker::PhantomData;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use fs_common::error::IoError;
 use fs_common::iter::{FsTryIterator, FsTryIteratorType};
 
 use crate::attribute::{NtfsAttributeItem, NtfsAttributeType};
@@ -77,17 +78,21 @@ where
     /// [`DataRunMap`]: crate::data_run_map::DataRunMap
     /// [`NtfsFile`]: crate::NtfsFile
     /// [`NtfsFile::directory_index`]: crate::NtfsFile::directory_index
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index metadata is malformed or its allocation data cannot be read.
     pub fn new<R: Read + Seek>(
         ntfs: &'n Ntfs,
-        index_root_item: NtfsAttributeItem<'n, '_>,
-        index_allocation_item: Option<NtfsAttributeItem<'n, '_>>,
+        index_root_item: &NtfsAttributeItem<'n, '_>,
+        index_allocation_item: Option<&NtfsAttributeItem<'n, '_>>,
         fs: &mut R,
     ) -> Result<Self> {
         let index_root_attribute = index_root_item.to_attribute()?;
         index_root_attribute.ensure_ty(NtfsAttributeType::IndexRoot)?;
         let index_root = index_root_attribute.resident_structured_value::<NtfsIndexRoot>()?;
 
-        let index_allocation = if let Some(item) = &index_allocation_item {
+        let index_allocation = if let Some(item) = index_allocation_item {
             let attribute = item.to_attribute()?;
             attribute.ensure_ty(NtfsAttributeType::IndexAllocation)?;
 
@@ -127,6 +132,7 @@ where
     ///
     /// The returned iterator borrows from this index via `'i`.
     /// For an owning variant, see [`into_entries`](Self::into_entries).
+    #[must_use]
     pub fn entries<'i>(&'i self) -> NtfsIndexEntries<'n, 'i, E> {
         NtfsIndexEntries::new(self)
     }
@@ -138,6 +144,7 @@ where
     /// method moves the index into the iterator, eliminating the `'i`
     /// lifetime.  This is useful when the iterator must outlive the
     /// scope that created the index (e.g. streaming directory traversal).
+    #[must_use]
     pub fn into_entries(self) -> NtfsOwnedIndexEntries<'n, E> {
         NtfsOwnedIndexEntries::new(self)
     }
@@ -153,6 +160,7 @@ where
     /// * `dir_ref` - File reference for this directory (used as the `.` entry).
     /// * `parent_ref` - File reference for the parent directory (used as the `..` entry).
     ///   For the root directory, this should point to itself.
+    #[must_use]
     pub fn entries_with_dots<'i>(
         &'i self,
         dir_ref: NtfsFileReference,
@@ -162,6 +170,7 @@ where
     }
 
     /// Returns an [`NtfsIndexFinder`] structure to efficiently find an entry in this index.
+    #[must_use]
     pub fn finder<'i>(&'i self) -> NtfsIndexFinder<'n, 'i, E> {
         NtfsIndexFinder::new(self)
     }
@@ -180,18 +189,23 @@ where
                 position: self.index_root_position,
             })?;
 
-        let vcn_byte_offset = vcn.offset(self.ntfs)?;
-        if vcn_byte_offset < 0 || vcn_byte_offset as u64 >= alloc.total_size {
+        let vcn_byte_offset = u64::try_from(vcn.offset(self.ntfs)?).map_err(|_| {
+            NtfsError::VcnOutOfBoundsInIndexAllocation {
+                position: alloc.data_position,
+                vcn,
+            }
+        })?;
+        if vcn_byte_offset >= alloc.total_size {
             return Err(NtfsError::VcnOutOfBoundsInIndexAllocation {
                 position: alloc.data_position,
                 vcn,
             });
         }
 
-        let mut buf = vec![0u8; self.index_record_size as usize];
-        let position = alloc
-            .data_run_map
-            .read_at(fs, vcn_byte_offset as u64, &mut buf)?;
+        let index_record_size =
+            usize::try_from(self.index_record_size).map_err(|_| IoError::invalid_input())?;
+        let mut buf = vec![0u8; index_record_size];
+        let position = alloc.data_run_map.read_at(fs, vcn_byte_offset, &mut buf)?;
 
         let record = NtfsIndexRecord::from_raw_data(buf, position)?;
 
@@ -212,8 +226,8 @@ where
 ///
 /// Returns the next entry from the in-order traversal.  The returned
 /// [`NtfsIndexEntry`] borrows from data owned by `inner_iterators`.
-fn btree_walk_next<'a, 'n, E, T>(
-    index: &NtfsIndex<'n, E>,
+fn btree_walk_next<'a, E, T>(
+    index: &NtfsIndex<'_, E>,
     inner_iterators: &'a mut Vec<IndexNodeEntryRanges<E>>,
     following_entries: &mut Vec<Option<IndexEntryRange<E>>>,
     fs: &mut T,
@@ -474,7 +488,7 @@ where
     }
 }
 
-impl<'n, 'i, E> FsTryIteratorType for NtfsIndexEntries<'n, 'i, E>
+impl<E> FsTryIteratorType for NtfsIndexEntries<'_, '_, E>
 where
     E: NtfsIndexEntryType,
 {
@@ -482,7 +496,7 @@ where
     type Item<'a> = NtfsIndexEntry<'a, E>;
 }
 
-impl<'n, 'i, E, R> FsTryIterator<R> for NtfsIndexEntries<'n, 'i, E>
+impl<E, R> FsTryIterator<R> for NtfsIndexEntries<'_, '_, E>
 where
     E: NtfsIndexEntryType,
     R: Read + Seek,
@@ -492,7 +506,7 @@ where
     }
 }
 
-impl<'n, E> FsTryIteratorType for NtfsOwnedIndexEntries<'n, E>
+impl<E> FsTryIteratorType for NtfsOwnedIndexEntries<'_, E>
 where
     E: NtfsIndexEntryType,
 {
@@ -500,7 +514,7 @@ where
     type Item<'a> = NtfsIndexEntry<'a, E>;
 }
 
-impl<'n, E, R> FsTryIterator<R> for NtfsOwnedIndexEntries<'n, E>
+impl<E, R> FsTryIterator<R> for NtfsOwnedIndexEntries<'_, E>
 where
     E: NtfsIndexEntryType,
     R: Read + Seek,
@@ -510,7 +524,7 @@ where
     }
 }
 
-impl<'n, 'i, E> FsTryIteratorType for NtfsDirEntries<'n, 'i, E>
+impl<E> FsTryIteratorType for NtfsDirEntries<'_, '_, E>
 where
     E: NtfsIndexEntryType,
 {
@@ -518,7 +532,7 @@ where
     type Item<'a> = NtfsDirEntry<'a, E>;
 }
 
-impl<'n, 'i, E, R> FsTryIterator<R> for NtfsDirEntries<'n, 'i, E>
+impl<E, R> FsTryIterator<R> for NtfsDirEntries<'_, '_, E>
 where
     E: NtfsIndexEntryType,
     R: Read + Seek,
@@ -623,370 +637,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::file::KnownNtfsFileRecordNumber;
-    use crate::indexes::NtfsFileNameIndex;
-    use crate::ntfs::Ntfs;
-    use fs_common::iter::FsTryIterator;
-
-    #[test]
-    fn test_index_find() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        // Find the "many_subdirs" subdirectory.
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut root_dir_finder = root_dir_index.finder();
-        let entry =
-            NtfsFileNameIndex::find(&mut root_dir_finder, &ntfs, &mut testfs1, "many_subdirs")
-                .unwrap()
-                .unwrap();
-        let subdir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Prove that we can find all 512 indexed subdirectories.
-        let subdir_index = subdir.directory_index(&mut testfs1).unwrap();
-        let mut subdir_finder = subdir_index.finder();
-
-        for i in 1..=512 {
-            let dir_name = format!("{i}");
-            let entry = NtfsFileNameIndex::find(&mut subdir_finder, &ntfs, &mut testfs1, &dir_name)
-                .unwrap()
-                .unwrap();
-            let entry_name = entry.key().unwrap().unwrap();
-            assert_eq!(entry_name.name(), dir_name.as_str());
-        }
-    }
-
-    #[test]
-    fn test_index_iter() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        // Find the "many_subdirs" subdirectory.
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut root_dir_finder = root_dir_index.finder();
-        let entry =
-            NtfsFileNameIndex::find(&mut root_dir_finder, &ntfs, &mut testfs1, "many_subdirs")
-                .unwrap()
-                .unwrap();
-        let subdir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Prove that we can iterate through all 512 indexed subdirectories in order.
-        // Keep in mind that subdirectories are ordered like "1", "10", "100", "101", ...
-        // We can create the same order by adding them to a vector and sorting that vector.
-        let mut dir_names = Vec::with_capacity(512);
-        for i in 1..=512 {
-            dir_names.push(format!("{i}"));
-        }
-
-        dir_names.sort_unstable();
-
-        let subdir_index = subdir.directory_index(&mut testfs1).unwrap();
-        let mut subdir_iter = subdir_index.entries();
-
-        for dir_name in dir_names {
-            let entry = subdir_iter.try_next(&mut testfs1).unwrap().unwrap();
-            let entry_name = entry.key().unwrap().unwrap();
-            assert_eq!(entry_name.name(), dir_name.as_str());
-        }
-
-        assert!(subdir_iter.try_next(&mut testfs1).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_unicode_filename() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        // Find the "edge-cases" subdirectory.
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut root_dir_finder = root_dir_index.finder();
-        let entry =
-            NtfsFileNameIndex::find(&mut root_dir_finder, &ntfs, &mut testfs1, "edge-cases")
-                .unwrap()
-                .unwrap();
-        let edge_cases_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Find the unicode filename.
-        let edge_cases_index = edge_cases_dir.directory_index(&mut testfs1).unwrap();
-        let mut edge_cases_finder = edge_cases_index.finder();
-        let entry = NtfsFileNameIndex::find(
-            &mut edge_cases_finder,
-            &ntfs,
-            &mut testfs1,
-            "unicode-名前-имя-🎉.txt",
-        )
-        .unwrap()
-        .unwrap();
-        let entry_name = entry.key().unwrap().unwrap();
-        assert_eq!(entry_name.name(), "unicode-名前-имя-🎉.txt");
-    }
-
-    #[test]
-    fn test_long_filename() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        // Find the "edge-cases" subdirectory.
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut root_dir_finder = root_dir_index.finder();
-        let entry =
-            NtfsFileNameIndex::find(&mut root_dir_finder, &ntfs, &mut testfs1, "edge-cases")
-                .unwrap()
-                .unwrap();
-        let edge_cases_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Find the long filename (200 'a' characters + .txt).
-        let long_name = "a".repeat(200) + ".txt";
-        let edge_cases_index = edge_cases_dir.directory_index(&mut testfs1).unwrap();
-        let mut edge_cases_finder = edge_cases_index.finder();
-        let entry =
-            NtfsFileNameIndex::find(&mut edge_cases_finder, &ntfs, &mut testfs1, &long_name)
-                .unwrap()
-                .unwrap();
-        let entry_name = entry.key().unwrap().unwrap();
-        // Verify the name matches (200 'a's + ".txt")
-        assert_eq!(entry_name.name(), long_name.as_str());
-    }
-
-    #[test]
-    fn test_empty_directory() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        // Find the "edge-cases" subdirectory.
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut root_dir_finder = root_dir_index.finder();
-        let entry =
-            NtfsFileNameIndex::find(&mut root_dir_finder, &ntfs, &mut testfs1, "edge-cases")
-                .unwrap()
-                .unwrap();
-        let edge_cases_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Find the empty directory.
-        let edge_cases_index = edge_cases_dir.directory_index(&mut testfs1).unwrap();
-        let mut edge_cases_finder = edge_cases_index.finder();
-        let entry = NtfsFileNameIndex::find(
-            &mut edge_cases_finder,
-            &ntfs,
-            &mut testfs1,
-            "empty-directory",
-        )
-        .unwrap()
-        .unwrap();
-        let empty_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Verify it's a directory and is empty.
-        assert!(empty_dir.is_directory());
-        let empty_dir_index = empty_dir.directory_index(&mut testfs1).unwrap();
-        let mut empty_dir_iter = empty_dir_index.entries();
-        assert!(empty_dir_iter.try_next(&mut testfs1).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_deep_nesting() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        // Navigate through edge-cases/level1/level2/.../level10/deep-file.txt
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut finder = root_dir_index.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut testfs1, "edge-cases")
-            .unwrap()
-            .unwrap();
-        let mut current_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        // Navigate through 10 levels of nesting.
-        for level in 1..=10 {
-            let dir_name = format!("level{}", level);
-            let dir_index = current_dir.directory_index(&mut testfs1).unwrap();
-            let mut dir_finder = dir_index.finder();
-            let entry = NtfsFileNameIndex::find(&mut dir_finder, &ntfs, &mut testfs1, &dir_name)
-                .unwrap()
-                .unwrap();
-            current_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-        }
-
-        // Find the deep file at level 10.
-        let dir_index = current_dir.directory_index(&mut testfs1).unwrap();
-        let mut dir_finder = dir_index.finder();
-        let entry = NtfsFileNameIndex::find(&mut dir_finder, &ntfs, &mut testfs1, "deep-file.txt")
-            .unwrap()
-            .unwrap();
-        let entry_name = entry.key().unwrap().unwrap();
-        assert_eq!(entry_name.name(), "deep-file.txt");
-    }
-
-    #[test]
-    fn test_entries_with_dots_root_directory() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-
-        let dir_ref = NtfsFileReference::from_parts(
-            root_dir.file_record_number(),
-            root_dir.sequence_number(),
-        );
-        // Root directory's parent is itself.
-        let parent_ref = root_dir.parent_reference(&mut testfs1).unwrap();
-
-        let index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut iter = index.entries_with_dots(dir_ref, parent_ref);
-
-        // First entry should be "." pointing to the root directory.
-        let entry = iter.try_next(&mut testfs1).unwrap().unwrap();
-        match entry {
-            NtfsDirEntry::CurrentDirectory(r) => {
-                assert_eq!(
-                    r.file_record_number(),
-                    KnownNtfsFileRecordNumber::RootDirectory as u64
-                );
-            }
-            _ => panic!("expected CurrentDirectory"),
-        }
-
-        // Second entry should be ".." also pointing to root (for root dir).
-        let entry = iter.try_next(&mut testfs1).unwrap().unwrap();
-        match entry {
-            NtfsDirEntry::ParentDirectory(r) => {
-                assert_eq!(
-                    r.file_record_number(),
-                    KnownNtfsFileRecordNumber::RootDirectory as u64
-                );
-            }
-            _ => panic!("expected ParentDirectory"),
-        }
-
-        // Remaining entries should be real index entries.
-        let mut real_count = 0;
-        while let Some(entry) = iter.try_next(&mut testfs1).unwrap() {
-            assert!(matches!(entry, NtfsDirEntry::IndexEntry(_)));
-            real_count += 1;
-        }
-        assert!(real_count > 0, "root directory should have children");
-    }
-
-    #[test]
-    fn test_entries_with_dots_subdirectory() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-
-        // Navigate to "edge-cases" subdirectory.
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut finder = root_dir_index.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut testfs1, "edge-cases")
-            .unwrap()
-            .unwrap();
-        let subdir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        let dir_ref =
-            NtfsFileReference::from_parts(subdir.file_record_number(), subdir.sequence_number());
-        let parent_ref = subdir.parent_reference(&mut testfs1).unwrap();
-
-        let subdir_index = subdir.directory_index(&mut testfs1).unwrap();
-        let mut iter = subdir_index.entries_with_dots(dir_ref, parent_ref);
-
-        // "." should point to the subdirectory itself.
-        let dot = iter.try_next(&mut testfs1).unwrap().unwrap();
-        assert_eq!(
-            dot.file_reference().file_record_number(),
-            subdir.file_record_number()
-        );
-
-        // ".." should point to root (MFT 5).
-        let dotdot = iter.try_next(&mut testfs1).unwrap().unwrap();
-        assert_eq!(
-            dotdot.file_reference().file_record_number(),
-            KnownNtfsFileRecordNumber::RootDirectory as u64
-        );
-
-        // Count real entries match entries() count.
-        let mut dots_real_count = 0;
-        while let Some(_entry) = iter.try_next(&mut testfs1).unwrap() {
-            dots_real_count += 1;
-        }
-
-        let mut plain_iter = subdir_index.entries();
-        let mut plain_count = 0;
-        while let Some(_entry) = plain_iter.try_next(&mut testfs1).unwrap() {
-            plain_count += 1;
-        }
-
-        assert_eq!(dots_real_count, plain_count);
-    }
-
-    #[test]
-    fn test_entries_with_dots_empty_directory() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-
-        // Navigate to edge-cases/empty-directory.
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut finder = root_dir_index.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut testfs1, "edge-cases")
-            .unwrap()
-            .unwrap();
-        let edge_cases_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        let edge_cases_index = edge_cases_dir.directory_index(&mut testfs1).unwrap();
-        let mut finder = edge_cases_index.finder();
-        let entry = NtfsFileNameIndex::find(&mut finder, &ntfs, &mut testfs1, "empty-directory")
-            .unwrap()
-            .unwrap();
-        let empty_dir = entry.to_file(&ntfs, &mut testfs1).unwrap();
-
-        let dir_ref = NtfsFileReference::from_parts(
-            empty_dir.file_record_number(),
-            empty_dir.sequence_number(),
-        );
-        let parent_ref = empty_dir.parent_reference(&mut testfs1).unwrap();
-
-        let empty_index = empty_dir.directory_index(&mut testfs1).unwrap();
-        let mut iter = empty_index.entries_with_dots(dir_ref, parent_ref);
-
-        // Should still get "." and ".." even for an empty directory.
-        let dot = iter.try_next(&mut testfs1).unwrap().unwrap();
-        assert!(matches!(dot, NtfsDirEntry::CurrentDirectory(_)));
-
-        let dotdot = iter.try_next(&mut testfs1).unwrap().unwrap();
-        assert!(matches!(dotdot, NtfsDirEntry::ParentDirectory(_)));
-
-        // No more entries.
-        assert!(iter.try_next(&mut testfs1).unwrap().is_none());
-    }
-}
+#[path = "index_tests/mod.rs"]
+mod tests;

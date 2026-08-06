@@ -1,3 +1,11 @@
+//! Read-only parsing, traversal, and recovery support for ext2, ext3, and ext4
+//! filesystems.
+//!
+//! The crate can inspect filesystem metadata and file contents directly from a
+//! seekable byte source. Optional features add fscrypt decryption and fs-verity
+//! verification. Journal and orphan replay produce overlays rather than
+//! mutating the source image.
+
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Upstream gated `OnceCell::get_or_try_init` behind
@@ -28,9 +36,13 @@ mod time;
 mod verity;
 mod xattr;
 
+/// Error and result types returned by the parser.
 pub mod error;
+/// Filesystem opening, feature inspection, and top-level accessors.
 pub mod ext;
+/// File-content readers for regular files and symlinks.
 pub mod file;
+/// Parsed inode metadata and inode-type helpers.
 pub mod inode;
 pub mod quota;
 pub mod traverse;
@@ -83,6 +95,7 @@ pub use xattr::{Xattr, XattrBlockHashReport, XattrEntryHashStatus, verify_xattr_
 /// Apply this check only when both [`Ext::has_strict_encoding`]
 /// returns `true` and the parent directory's
 /// [`ExtInode::is_casefolded`] is `true`.
+#[must_use]
 pub fn is_strict_encoding_valid_name(name: &[u8]) -> bool {
     core::str::from_utf8(name).is_ok()
 }

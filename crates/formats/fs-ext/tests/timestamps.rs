@@ -1,10 +1,12 @@
-mod common;
+//! Integration tests for ext inode timestamp decoding.
+
+mod support;
 
 // ── ext2: 128-byte inodes, no extended timestamps ───────────────────
 
 #[test]
 fn ext2_root_has_no_crtime() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     assert!(
         root.crtime().is_none(),
@@ -14,7 +16,7 @@ fn ext2_root_has_no_crtime() {
 
 #[test]
 fn ext2_timestamps_have_zero_nanoseconds() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     assert_eq!(root.atime().nanoseconds, 0);
     assert_eq!(root.ctime().nanoseconds, 0);
@@ -24,7 +26,7 @@ fn ext2_timestamps_have_zero_nanoseconds() {
 
 #[test]
 fn ext2_base_timestamps_are_correct() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     // Fixture created with E2FSPROGS_FAKE_TIME=1700000000
     assert_eq!(root.ctime().seconds, 1_700_000_000);
@@ -36,7 +38,7 @@ fn ext2_base_timestamps_are_correct() {
 
 #[test]
 fn ext4_root_has_crtime() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     let crtime = root
         .crtime()
@@ -47,7 +49,7 @@ fn ext4_root_has_crtime() {
 
 #[test]
 fn ext4_extended_timestamps_use_extra_fields() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     // With extended fields present, the decode path runs through
     // decode_extended_timestamp(). The fixture has extra=0 for all
@@ -63,7 +65,7 @@ fn ext4_extended_timestamps_use_extra_fields() {
 
 #[test]
 fn ext4_dtime_remains_base_only() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     // dtime has no extended field, always base-only
     let dtime = root.dtime();
@@ -73,7 +75,7 @@ fn ext4_dtime_remains_base_only() {
 
 #[test]
 fn ext4_crtime_equals_ctime_for_fixture() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     let crtime = root.crtime().unwrap();
     // In a freshly-created fixture, creation time equals change time
@@ -84,7 +86,7 @@ fn ext4_crtime_equals_ctime_for_fixture() {
 
 #[test]
 fn ext3_has_crtime() {
-    let (ext, mut fs) = common::open_ext("ext3.img");
+    let (ext, mut fs) = support::open_ext("ext3.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     // ext3 fixture has inode_size=256, i_extra_isize=32 which covers
     // all extended timestamp fields including crtime
@@ -96,7 +98,7 @@ fn ext3_has_crtime() {
 
 #[test]
 fn ext3_extended_timestamps_present() {
-    let (ext, mut fs) = common::open_ext("ext3.img");
+    let (ext, mut fs) = support::open_ext("ext3.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     // ext3 has extended inodes, so the decode path uses extras
     assert_eq!(root.ctime().seconds, 1_700_000_000);
@@ -108,7 +110,7 @@ fn ext3_extended_timestamps_present() {
 
 #[test]
 fn timestamps_monotonic_sanity_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let root = ext.inode(&mut fs, 2).unwrap();
     let crtime = root.crtime().unwrap();
     // Creation time should be <= change time (ctime is updated on
@@ -123,7 +125,7 @@ fn timestamps_monotonic_sanity_ext4() {
 
 #[test]
 fn file_inode_has_crtime_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     // Inode 12 is the first file-like inode in ext4 fixture
     let inode = ext.inode(&mut fs, 12).unwrap();
     let crtime = inode.crtime().expect("ext4 file inode should have crtime");

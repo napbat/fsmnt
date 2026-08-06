@@ -1,7 +1,7 @@
 //! Cloud Files reparse point metadata.
 //!
 //! Cloud reparse points (tags `0x9000_001A` through `0x9000_F01A`) are used
-//! by OneDrive, Azure File Sync, and other cloud storage providers on
+//! by `OneDrive`, Azure File Sync, and other cloud storage providers on
 //! Windows 10/11. The 16 tag variants encode a 4-bit sub-variant in
 //! bits 12-15 of the reparse tag.
 //!
@@ -94,6 +94,7 @@ impl CloudVariant {
     /// Creates a `CloudVariant` from a raw 4-bit nibble value (0-15).
     ///
     /// Returns `None` if the value is out of range (>15).
+    #[must_use]
     pub fn from_nibble(nibble: u8) -> Option<Self> {
         match nibble {
             0 => Some(Self::V0),
@@ -117,8 +118,26 @@ impl CloudVariant {
     }
 
     /// Returns the raw 4-bit nibble value (0-15).
+    #[must_use]
     pub fn as_nibble(self) -> u8 {
-        self as u8
+        match self {
+            Self::V0 => 0,
+            Self::V1 => 1,
+            Self::V2 => 2,
+            Self::V3 => 3,
+            Self::V4 => 4,
+            Self::V5 => 5,
+            Self::V6 => 6,
+            Self::V7 => 7,
+            Self::V8 => 8,
+            Self::V9 => 9,
+            Self::V10 => 10,
+            Self::V11 => 11,
+            Self::V12 => 12,
+            Self::V13 => 13,
+            Self::V14 => 14,
+            Self::V15 => 15,
+        }
     }
 }
 
@@ -152,7 +171,7 @@ fn is_cloud_tag(raw_tag: u32) -> bool {
 ///
 /// Caller must ensure `raw_tag` is a Cloud family tag.
 fn extract_variant(raw_tag: u32) -> CloudVariant {
-    let nibble = ((raw_tag >> CLOUD_VARIANT_SHIFT) & 0xF) as u8;
+    let nibble = ((raw_tag >> CLOUD_VARIANT_SHIFT) & 0xF).to_le_bytes()[0];
     // Nibble is masked to 4 bits, so from_nibble always returns Some.
     match CloudVariant::from_nibble(nibble) {
         Some(v) => v,
@@ -167,6 +186,7 @@ impl NtfsReparsePoint {
     /// (`0x9000_X01A` where `X` is 0-F).
     /// This method never fails — Cloud metadata is derived entirely
     /// from the tag value, not from the reparse data buffer.
+    #[must_use]
     pub fn cloud_info(&self) -> Option<CloudInfo> {
         let raw_tag = self.tag();
         if !is_cloud_tag(raw_tag) {
@@ -179,6 +199,7 @@ impl NtfsReparsePoint {
     }
 
     /// Returns `true` if this is a Cloud Files reparse point.
+    #[must_use]
     pub fn is_cloud(&self) -> bool {
         is_cloud_tag(self.tag())
     }
@@ -186,6 +207,7 @@ impl NtfsReparsePoint {
     /// Returns the cloud variant, if this is a Cloud Files reparse point.
     ///
     /// Convenience for `self.cloud_info().map(|c| c.variant)`.
+    #[must_use]
     pub fn cloud_variant(&self) -> Option<CloudVariant> {
         if is_cloud_tag(self.tag()) {
             Some(extract_variant(self.tag()))
@@ -203,7 +225,9 @@ mod tests {
     /// Build raw reparse point bytes (header + data) for a given tag.
     fn make_reparse_bytes(tag: u32, reparse_data: &[u8]) -> alloc::vec::Vec<u8> {
         let tag_bytes = tag.to_le_bytes();
-        let data_len = (reparse_data.len() as u16).to_le_bytes();
+        let data_len = u16::try_from(reparse_data.len())
+            .expect("test value fits u16")
+            .to_le_bytes();
         let reserved = [0u8; 2];
 
         let mut buf = alloc::vec::Vec::new();

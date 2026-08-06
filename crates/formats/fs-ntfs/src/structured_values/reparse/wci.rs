@@ -1,8 +1,8 @@
 //! Windows Container Isolation (WCI) reparse point parsing.
 //!
 //! WCI reparse points are used by Docker on Windows, Windows Sandbox, and
-//! MSIX to implement filesystem layering. Four tags (WCI, WCI_1, WCI_LINK,
-//! WCI_LINK_1) share a common payload layout; WCI_TOMBSTONE has no
+//! MSIX to implement filesystem layering. Four tags (WCI, `WCI_1`, `WCI_LINK`,
+//! `WCI_LINK_1`) share a common payload layout; `WCI_TOMBSTONE` has no
 //! documented payload format.
 //!
 //! The payload layout (de-facto standard from multiple independent sources):
@@ -60,6 +60,7 @@ impl WciTag {
     ///
     /// Returns `None` for `WCI_TOMBSTONE` (no parseable payload) and
     /// any non-WCI tag.
+    #[must_use]
     pub fn from_raw(raw_tag: u32) -> Option<Self> {
         match raw_tag {
             reparse_tags::WCI => Some(Self::Wci),
@@ -71,6 +72,7 @@ impl WciTag {
     }
 
     /// Returns the raw reparse tag value for this variant.
+    #[must_use]
     pub fn as_u32(self) -> u32 {
         match self {
             Self::Wci => reparse_tags::WCI,
@@ -126,8 +128,10 @@ impl NtfsWciReparsePoint {
         })?;
 
         let path_len_offset = guid_end;
-        let path_len =
-            u16::from_le_bytes([data[path_len_offset], data[path_len_offset + 1]]) as usize;
+        let path_len = usize::from(u16::from_le_bytes([
+            data[path_len_offset],
+            data[path_len_offset + 1],
+        ]));
 
         if !path_len.is_multiple_of(2) {
             return Err(NtfsError::InvalidReparsePointData {
@@ -161,31 +165,40 @@ impl NtfsWciReparsePoint {
     }
 
     /// Returns which WCI tag variant this reparse point uses.
+    #[must_use]
     pub fn tag(&self) -> WciTag {
         self.tag
     }
 
     /// Returns the version field from the WCI header.
+    #[must_use]
     pub fn version(&self) -> u32 {
         self.version
     }
 
     /// Returns the reserved field from the WCI header.
+    #[must_use]
     pub fn reserved(&self) -> u32 {
         self.reserved
     }
 
     /// Returns the lookup GUID used for layer resolution.
+    #[must_use]
     pub fn lookup_guid(&self) -> &NtfsGuid {
         &self.lookup_guid
     }
 
     /// Returns the raw UTF-16LE path bytes.
+    #[must_use]
     pub fn path_bytes(&self) -> &[u8] {
         &self.path
     }
 
     /// Decodes the path as a UTF-16LE string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path contains malformed UTF-16.
     pub fn path(&self) -> Result<alloc::string::String> {
         decode_utf16le(&self.path)
     }
@@ -195,15 +208,20 @@ impl NtfsReparsePoint {
     /// Attempts to parse as a Windows Container Isolation reparse point.
     ///
     /// Returns an error if the reparse tag is not one of the four
-    /// parseable WCI tags (WCI, WCI_1, WCI_LINK, WCI_LINK_1).
+    /// parseable WCI tags (WCI, `WCI_1`, `WCI_LINK`, `WCI_LINK_1`).
     /// Use [`is_wci_tombstone`](Self::is_wci_tombstone) to check for
     /// tombstone tags, which have no documented payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported WCI tag or malformed WCI payload.
     pub fn as_wci(&self) -> Result<NtfsWciReparsePoint> {
         NtfsWciReparsePoint::from_reparse_point(self)
     }
 
     /// Returns `true` if this is any WCI-family reparse point,
     /// including tombstone.
+    #[must_use]
     pub fn is_wci(&self) -> bool {
         matches!(
             self.tag(),
@@ -216,6 +234,7 @@ impl NtfsReparsePoint {
     }
 
     /// Returns `true` if this is a WCI tombstone reparse point.
+    #[must_use]
     pub fn is_wci_tombstone(&self) -> bool {
         self.tag() == reparse_tags::WCI_TOMBSTONE
     }
@@ -228,7 +247,9 @@ mod tests {
 
     fn make_reparse_bytes(tag: u32, reparse_data: &[u8]) -> alloc::vec::Vec<u8> {
         let tag_bytes = tag.to_le_bytes();
-        let data_len = (reparse_data.len() as u16).to_le_bytes();
+        let data_len = u16::try_from(reparse_data.len())
+            .expect("test value fits u16")
+            .to_le_bytes();
         let reserved = [0u8; 2];
         let mut buf = alloc::vec::Vec::new();
         buf.extend_from_slice(&tag_bytes);
@@ -238,7 +259,7 @@ mod tests {
         buf
     }
 
-    /// Real WCI_1 payload from Check Point Research:
+    /// Real `WCI_1` payload from Check Point Research:
     /// Windows\System32\kernel32.dll
     fn wci1_test_vector_payload() -> [u8; 84] {
         [

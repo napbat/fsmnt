@@ -19,442 +19,743 @@ pub enum NtfsError {
     #[error(
         "The NTFS file at byte position {position:#x} has no attribute of type {ty:?}, but it was expected"
     )]
+    #[doc = "Reports that the requested attribute could not be located."]
     AttributeNotFound {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "NTFS attribute type involved in the failure."]
         ty: NtfsAttributeType,
     },
     #[error(
         "The NTFS Attribute at byte position {position:#x} should have type {expected:?}, but it actually has type {actual:?}"
     )]
+    #[doc = "Reports the attribute of different type condition encountered while reading NTFS data."]
     AttributeOfDifferentType {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: NtfsAttributeType,
+        #[doc = "Value or size observed in the input."]
         actual: NtfsAttributeType,
     },
     #[error(
         "The given buffer should have at least {expected} bytes, but it only has {actual} bytes"
     )]
-    BufferTooSmall { expected: usize, actual: usize },
+    #[doc = "Reports that the buffer does not contain the bytes required by the NTFS format."]
+    BufferTooSmall {
+        #[doc = "Diagnostic `BufferTooSmall` value retained from the affected on-disk structure."]
+        expected: usize,
+        #[doc = "Diagnostic `BufferTooSmall` value retained from the affected on-disk structure."]
+        actual: usize,
+    },
     #[error(
         "The NTFS Record at byte position {position:#x} is too small: expected at least {expected} bytes for the header, but only has {actual} bytes"
     )]
+    #[doc = "Reports that the record does not contain the bytes required by the NTFS format."]
     RecordTooSmall {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: usize,
+        #[doc = "Value or size observed in the input."]
         actual: usize,
     },
     #[error(
         "The NTFS Attribute at byte position {position:#x} has a length of {expected} bytes, but only {actual} bytes are left in the record"
     )]
+    #[doc = "Reports malformed or inconsistent attribute length metadata."]
     InvalidAttributeLength {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: usize,
+        #[doc = "Value or size observed in the input."]
         actual: usize,
     },
     #[error(
         "The NTFS Attribute at byte position {position:#x} indicates a name length up to offset {expected}, but the attribute only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent attribute name length metadata."]
     InvalidAttributeNameLength {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: usize,
+        #[doc = "Value or size observed in the input."]
         actual: u32,
     },
     #[error(
         "The NTFS Attribute at byte position {position:#x} indicates that its name starts at offset {expected}, but the attribute only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent attribute name offset metadata."]
     InvalidAttributeNameOffset {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: u16,
+        #[doc = "Value or size observed in the input."]
         actual: u32,
     },
     #[error(
         "The NTFS Data Run header at byte position {position:#x} indicates a maximum byte count of {expected}, but {actual} is the limit"
     )]
+    #[doc = "Reports malformed or inconsistent byte count in data run header metadata."]
     InvalidByteCountInDataRunHeader {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: u8,
+        #[doc = "Value or size observed in the input."]
         actual: u8,
     },
     #[error(
         "The cluster count {cluster_count} read from the NTFS Data Run header at byte position {position:#x} is invalid"
     )]
+    #[doc = "Reports malformed or inconsistent cluster count in data run header metadata."]
     InvalidClusterCountInDataRunHeader {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Cluster count decoded from the data-run header."]
         cluster_count: u64,
     },
     #[error(
         "The NTFS File Record at byte position {position:#x} indicates an allocated size of {expected} bytes, but the record only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent file allocated size metadata."]
     InvalidFileAllocatedSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
-        expected: u32,
-        actual: u32,
+        #[doc = "Value or size required by the NTFS format."]
+        expected: usize,
+        #[doc = "Value or size observed in the input."]
+        actual: usize,
     },
     #[error("The requested NTFS File Record Number {file_record_number} is invalid")]
-    InvalidFileRecordNumber { file_record_number: u64 },
+    #[doc = "Reports malformed or inconsistent file record number metadata."]
+    InvalidFileRecordNumber {
+        #[doc = "Diagnostic `InvalidFileRecordNumber` value retained from the affected on-disk structure."]
+        file_record_number: u64,
+    },
     #[error(
         "The NTFS File Record at byte position {position:#x} should have signature {expected:?}, but it has signature {actual:?}"
     )]
+    #[doc = "Reports malformed or inconsistent file signature metadata."]
     InvalidFileSignature {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: &'static [u8],
+        #[doc = "Value or size observed in the input."]
         actual: [u8; 4],
     },
     #[error(
         "The NTFS File Record at byte position {position:#x} indicates a used size of {expected} bytes, but only {actual} bytes are allocated"
     )]
+    #[doc = "Reports malformed or inconsistent file used size metadata."]
     InvalidFileUsedSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: u32,
+        #[doc = "Value or size observed in the input."]
         actual: u32,
     },
     #[error(
         "The NTFS Index Record at byte position {position:#x} indicates an allocated size of {expected} bytes, but the record only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent index allocated size metadata."]
     InvalidIndexAllocatedSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
-        expected: u32,
-        actual: u32,
+        #[doc = "Value or size required by the NTFS format."]
+        expected: u64,
+        #[doc = "Value or size observed in the input."]
+        actual: u64,
     },
     #[error(
         "The NTFS Index Entry at byte position {position:#x} references a data field in the range {range:?}, but the entry only has a size of {size} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent index entry data range metadata."]
     InvalidIndexEntryDataRange {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Byte range referenced by the malformed structure."]
         range: Range<usize>,
-        size: u16,
+        #[doc = "Encoded or computed size involved in the failure."]
+        size: usize,
     },
     #[error(
         "The NTFS Index Entry at byte position {position:#x} reports a size of {expected} bytes, but it only has {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent index entry size metadata."]
     InvalidIndexEntrySize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
-        expected: u16,
-        actual: u16,
+        #[doc = "Value or size required by the NTFS format."]
+        expected: usize,
+        #[doc = "Value or size observed in the input."]
+        actual: usize,
     },
     #[error(
         "The NTFS index root at byte position {position:#x} indicates that its entries start at offset {expected}, but the index root only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent index root entries offset metadata."]
     InvalidIndexRootEntriesOffset {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: usize,
+        #[doc = "Value or size observed in the input."]
         actual: usize,
     },
     #[error(
         "The NTFS index root at byte position {position:#x} indicates a used size up to offset {expected}, but the index root only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent index root used size metadata."]
     InvalidIndexRootUsedSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: usize,
+        #[doc = "Value or size observed in the input."]
         actual: usize,
     },
     #[error(
         "The NTFS index root at byte position {position:#x} has an invalid entries range: entries start at offset {start}, but the index data ends at offset {end}"
     )]
+    #[doc = "Reports malformed or inconsistent index root entries range metadata."]
     InvalidIndexRootEntriesRange {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Starting byte offset of the invalid range."]
         start: usize,
+        #[doc = "Ending byte offset of the invalid range."]
         end: usize,
     },
     #[error(
         "The NTFS Index Record at byte position {position:#x} should have signature {expected:?}, but it has signature {actual:?}"
     )]
+    #[doc = "Reports malformed or inconsistent index signature metadata."]
     InvalidIndexSignature {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: &'static [u8],
+        #[doc = "Value or size observed in the input."]
         actual: [u8; 4],
     },
     #[error(
         "The NTFS Index Record at byte position {position:#x} indicates a used size of {expected} bytes, but only {actual} bytes are allocated"
     )]
+    #[doc = "Reports malformed or inconsistent index used size metadata."]
     InvalidIndexUsedSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
-        expected: u32,
-        actual: u32,
+        #[doc = "Value or size required by the NTFS format."]
+        expected: u64,
+        #[doc = "Value or size observed in the input."]
+        actual: u64,
     },
     #[error("The MFT LCN in the BIOS Parameter Block of the NTFS filesystem is invalid.")]
+    #[doc = "Reports malformed or inconsistent mft lcn metadata."]
     InvalidMftLcn,
     #[error("The MFT Mirror LCN in the BIOS Parameter Block of the NTFS filesystem is invalid.")]
+    #[doc = "Reports malformed or inconsistent mft mirr lcn metadata."]
     InvalidMftMirrLcn,
     #[error(
         "The NTFS Non Resident Value Data at byte position {position:#x} references a data field in the range {range:?}, but the entry only has a size of {size} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent non resident value data range metadata."]
     InvalidNonResidentValueDataRange {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Byte range referenced by the malformed structure."]
         range: Range<usize>,
+        #[doc = "Encoded or computed size involved in the failure."]
         size: usize,
     },
     #[error(
         "The resident NTFS Attribute at byte position {position:#x} indicates a value length of {length} starting at offset {offset}, but the attribute only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent resident attribute value length metadata."]
     InvalidResidentAttributeValueLength {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Encoded length that failed validation."]
         length: u32,
+        #[doc = "Encoded byte offset that failed validation."]
         offset: u16,
+        #[doc = "Value or size observed in the input."]
         actual: u32,
     },
     #[error(
         "The resident NTFS Attribute at byte position {position:#x} indicates that its value starts at offset {expected}, but the attribute only has a size of {actual} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent resident attribute value offset metadata."]
     InvalidResidentAttributeValueOffset {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: u16,
+        #[doc = "Value or size observed in the input."]
         actual: u32,
     },
     #[error(
         "A record size field in the BIOS Parameter Block denotes {size_info}, which is invalid considering the cluster size of {cluster_size} bytes"
     )]
-    InvalidRecordSizeInfo { size_info: i8, cluster_size: u32 },
+    #[doc = "Reports malformed or inconsistent record size info metadata."]
+    InvalidRecordSizeInfo {
+        #[doc = "Diagnostic `InvalidRecordSizeInfo` value retained from the affected on-disk structure."]
+        size_info: i8,
+        #[doc = "Diagnostic `InvalidRecordSizeInfo` value retained from the affected on-disk structure."]
+        cluster_size: u32,
+    },
     #[error(
         "The sectors per cluster field in the BIOS Parameter Block denotes {sectors_per_cluster:#04x}, which is invalid"
     )]
-    InvalidSectorsPerCluster { sectors_per_cluster: u8 },
+    #[doc = "Reports malformed or inconsistent sectors per cluster metadata."]
+    InvalidSectorsPerCluster {
+        #[doc = "Diagnostic `InvalidSectorsPerCluster` value retained from the affected on-disk structure."]
+        sectors_per_cluster: u8,
+    },
     #[error(
         "The NTFS structured value at byte position {position:#x} of type {ty:?} has {actual} bytes where {expected} bytes were expected"
     )]
+    #[doc = "Reports malformed or inconsistent structured value size metadata."]
     InvalidStructuredValueSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "NTFS attribute type involved in the failure."]
         ty: NtfsAttributeType,
+        #[doc = "Value or size required by the NTFS format."]
         expected: u64,
+        #[doc = "Value or size observed in the input."]
         actual: u64,
     },
     #[error("The given time cannot be represented as the target type")]
+    #[doc = "Reports malformed or inconsistent time metadata."]
     InvalidTime,
     #[error(
         "The 2-byte signature field at byte position {position:#x} should contain {expected:?}, but it contains {actual:?}"
     )]
+    #[doc = "Reports malformed or inconsistent two byte signature metadata."]
     InvalidTwoByteSignature {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: &'static [u8],
+        #[doc = "Value or size observed in the input."]
         actual: [u8; 2],
     },
     #[error(
         "The OEM ID at byte position {position:#x} should be {expected:?}, but it is {actual:?}"
     )]
+    #[doc = "Reports malformed or inconsistent oem id metadata."]
     InvalidOemId {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: &'static [u8; 8],
+        #[doc = "Value or size observed in the input."]
         actual: [u8; 8],
     },
     #[error(
         "The volume at byte position {position:#x} is BitLocker-encrypted (OEM ID: {oem_id:?}). Decrypt the volume before parsing as NTFS."
     )]
+    #[doc = "Reports the bit locker encrypted condition encountered while reading NTFS data."]
     BitLockerEncrypted {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic oem id value retained from the affected on-disk structure."]
         oem_id: [u8; 8],
     },
     #[error("The Upcase Table should have a size of {expected} bytes, but it has {actual} bytes")]
-    InvalidUpcaseTableSize { expected: u64, actual: u64 },
+    #[doc = "Reports malformed or inconsistent upcase table size metadata."]
+    InvalidUpcaseTableSize {
+        #[doc = "Diagnostic `InvalidUpcaseTableSize` value retained from the affected on-disk structure."]
+        expected: u64,
+        #[doc = "Diagnostic `InvalidUpcaseTableSize` value retained from the affected on-disk structure."]
+        actual: u64,
+    },
     #[error(
         "The NTFS Update Sequence Count of the record at byte position {position:#x} has the invalid value {update_sequence_count}"
     )]
+    #[doc = "Reports malformed or inconsistent update sequence count metadata."]
     InvalidUpdateSequenceCount {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic update sequence count value retained from the affected on-disk structure."]
         update_sequence_count: u16,
     },
     #[error(
         "The NTFS Update Sequence Number of the record at byte position {position:#x} references a data field in the range {range:?}, but the entry only has a size of {size} bytes"
     )]
+    #[doc = "Reports malformed or inconsistent update sequence number range metadata."]
     InvalidUpdateSequenceNumberRange {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Byte range referenced by the malformed structure."]
         range: Range<usize>,
+        #[doc = "Encoded or computed size involved in the failure."]
         size: usize,
     },
     #[error(
         "The VCN {vcn} read from the NTFS Data Run header at byte position {position:#x} cannot be added to the LCN {previous_lcn} calculated from previous data runs"
     )]
+    #[doc = "Reports malformed or inconsistent vcn in data run header metadata."]
     InvalidVcnInDataRunHeader {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic vcn value retained from the affected on-disk structure."]
         vcn: Vcn,
+        #[doc = "Diagnostic previous lcn value retained from the affected on-disk structure."]
         previous_lcn: Lcn,
     },
     #[error("I/O error: {0:?}")]
+    #[doc = "Reports the io condition encountered while reading NTFS data."]
     Io(io::Error),
     #[error(
         "The Logical Cluster Number (LCN) {lcn} is too big to be multiplied by the cluster size"
     )]
-    LcnTooBig { lcn: Lcn },
+    #[doc = "Reports the lcn too big condition encountered while reading NTFS data."]
+    LcnTooBig {
+        #[doc = "Diagnostic `LcnTooBig` value retained from the affected on-disk structure."]
+        lcn: Lcn,
+    },
     #[error(
         "The index root at byte position {position:#x} is a large index, but no matching index allocation attribute was provided"
     )]
-    MissingIndexAllocation { position: NtfsPosition },
+    #[doc = "Reports the missing index allocation condition encountered while reading NTFS data."]
+    MissingIndexAllocation {
+        #[doc = "Diagnostic `MissingIndexAllocation` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+    },
     #[error("The NTFS file at byte position {position:#x} is not a directory")]
-    NotADirectory { position: NtfsPosition },
+    #[doc = "Reports the not a directory condition encountered while reading NTFS data."]
+    NotADirectory {
+        #[doc = "Diagnostic `NotADirectory` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+    },
     #[error(
         "The total sector count {total_sectors} is too big to be multiplied by the sector size"
     )]
-    TotalSectorsTooBig { total_sectors: u64 },
+    #[doc = "Reports the total sectors too big condition encountered while reading NTFS data."]
+    TotalSectorsTooBig {
+        #[doc = "Diagnostic `TotalSectorsTooBig` value retained from the affected on-disk structure."]
+        total_sectors: u64,
+    },
     #[error(
         "The NTFS Attribute at byte position {position:#x} should not belong to an Attribute List, but it does"
     )]
-    UnexpectedAttributeListAttribute { position: NtfsPosition },
+    #[doc = "Reports the unexpected attribute list attribute condition encountered while reading NTFS data."]
+    UnexpectedAttributeListAttribute {
+        #[doc = "Diagnostic `UnexpectedAttributeListAttribute` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+    },
     #[error(
         "The NTFS Attribute at byte position {position:#x} should be resident, but it is non-resident"
     )]
-    UnexpectedNonResidentAttribute { position: NtfsPosition },
+    #[doc = "Reports the unexpected non resident attribute condition encountered while reading NTFS data."]
+    UnexpectedNonResidentAttribute {
+        #[doc = "Diagnostic `UnexpectedNonResidentAttribute` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+    },
     #[error(
         "The NTFS Attribute at byte position {position:#x} should be non-resident, but it is resident"
     )]
-    UnexpectedResidentAttribute { position: NtfsPosition },
+    #[doc = "Reports the unexpected resident attribute condition encountered while reading NTFS data."]
+    UnexpectedResidentAttribute {
+        #[doc = "Diagnostic `UnexpectedResidentAttribute` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+    },
     #[error(
         "The type of the NTFS Attribute at byte position {position:#x} is {actual:#010x}, which is not supported"
     )]
-    UnsupportedAttributeType { position: NtfsPosition, actual: u32 },
+    #[doc = "Reports an unsupported attribute type value or feature."]
+    UnsupportedAttributeType {
+        #[doc = "Diagnostic `UnsupportedAttributeType` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+        #[doc = "Diagnostic `UnsupportedAttributeType` value retained from the affected on-disk structure."]
+        actual: u32,
+    },
     #[error("The cluster size is {actual} bytes, but it needs to be between {min} and {max}")]
-    UnsupportedClusterSize { min: u32, max: u32, actual: u32 },
+    #[doc = "Reports an unsupported cluster size value or feature."]
+    UnsupportedClusterSize {
+        #[doc = "Diagnostic `UnsupportedClusterSize` value retained from the affected on-disk structure."]
+        min: u32,
+        #[doc = "Diagnostic `UnsupportedClusterSize` value retained from the affected on-disk structure."]
+        max: u32,
+        #[doc = "Diagnostic `UnsupportedClusterSize` value retained from the affected on-disk structure."]
+        actual: u32,
+    },
     #[error(
         "The namespace of the NTFS file name starting at byte position {position:#x} is {actual}, which is not supported"
     )]
-    UnsupportedFileNamespace { position: NtfsPosition, actual: u8 },
+    #[doc = "Reports an unsupported file namespace value or feature."]
+    UnsupportedFileNamespace {
+        #[doc = "Diagnostic `UnsupportedFileNamespace` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+        #[doc = "Diagnostic `UnsupportedFileNamespace` value retained from the affected on-disk structure."]
+        actual: u8,
+    },
     #[error("The sector size is {actual} bytes, but it needs to be between {min} and {max}")]
-    UnsupportedSectorSize { min: u16, max: u16, actual: u16 },
+    #[doc = "Reports an unsupported sector size value or feature."]
+    UnsupportedSectorSize {
+        #[doc = "Diagnostic `UnsupportedSectorSize` value retained from the affected on-disk structure."]
+        min: u16,
+        #[doc = "Diagnostic `UnsupportedSectorSize` value retained from the affected on-disk structure."]
+        max: u16,
+        #[doc = "Diagnostic `UnsupportedSectorSize` value retained from the affected on-disk structure."]
+        actual: u16,
+    },
     #[error(
         "The Update Sequence Array (USA) of the record at byte position {position:#x} has entries for {array_count} blocks of 512 bytes, but the record is only {record_size} bytes long"
     )]
+    #[doc = "Reports the update sequence array exceeds record size condition encountered while reading NTFS data."]
     UpdateSequenceArrayExceedsRecordSize {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic array count value retained from the affected on-disk structure."]
         array_count: u16,
+        #[doc = "Diagnostic record size value retained from the affected on-disk structure."]
         record_size: usize,
     },
     #[error(
         "Sector corruption: The 2 bytes at byte position {position:#x} should match the Update Sequence Number (USN) {expected:?}, but they are {actual:?}"
     )]
+    #[doc = "Reports the update sequence number mismatch condition encountered while reading NTFS data."]
     UpdateSequenceNumberMismatch {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: [u8; 2],
+        #[doc = "Value or size observed in the input."]
         actual: [u8; 2],
     },
     #[error(
         "The index allocation at byte position {position:#x} references a Virtual Cluster Number (VCN) {expected}, but a record with VCN {actual} is found at that offset"
     )]
+    #[doc = "Reports the vcn mismatch in index allocation condition encountered while reading NTFS data."]
     VcnMismatchInIndexAllocation {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: Vcn,
+        #[doc = "Value or size observed in the input."]
         actual: Vcn,
     },
     #[error(
         "The index allocation at byte position {position:#x} references a Virtual Cluster Number (VCN) {vcn}, but this VCN exceeds the boundaries of the filesystem"
     )]
-    VcnOutOfBoundsInIndexAllocation { position: NtfsPosition, vcn: Vcn },
+    #[doc = "Reports the vcn out of bounds in index allocation condition encountered while reading NTFS data."]
+    VcnOutOfBoundsInIndexAllocation {
+        #[doc = "Diagnostic `VcnOutOfBoundsInIndexAllocation` value retained from the affected on-disk structure."]
+        position: NtfsPosition,
+        #[doc = "Diagnostic `VcnOutOfBoundsInIndexAllocation` value retained from the affected on-disk structure."]
+        vcn: Vcn,
+    },
     #[error(
         "The Virtual Cluster Number (VCN) {vcn} is too big to be multiplied by the cluster size"
     )]
-    VcnTooBig { vcn: Vcn },
+    #[doc = "Reports the vcn too big condition encountered while reading NTFS data."]
+    VcnTooBig {
+        #[doc = "Diagnostic `VcnTooBig` value retained from the affected on-disk structure."]
+        vcn: Vcn,
+    },
     #[error("Cluster {cluster} is out of range (filesystem has {total} clusters)")]
-    ClusterOutOfRange { cluster: u64, total: u64 },
+    #[doc = "Reports the cluster out of range condition encountered while reading NTFS data."]
+    ClusterOutOfRange {
+        #[doc = "Diagnostic `ClusterOutOfRange` value retained from the affected on-disk structure."]
+        cluster: u64,
+        #[doc = "Diagnostic `ClusterOutOfRange` value retained from the affected on-disk structure."]
+        total: u64,
+    },
     #[error("Invalid USN record at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent usn record metadata."]
     InvalidUsnRecord {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Decompression failed: {message}")]
-    DecompressionError { message: alloc::string::String },
+    #[doc = "Reports the decompression error condition encountered while reading NTFS data."]
+    DecompressionError {
+        #[doc = "Diagnostic `DecompressionError` value retained from the affected on-disk structure."]
+        message: alloc::string::String,
+    },
     #[error("Invalid WOF compressed data: {reason}")]
-    InvalidWofData { reason: &'static str },
+    #[doc = "Reports malformed or inconsistent wof data metadata."]
+    InvalidWofData {
+        #[doc = "Diagnostic `InvalidWofData` value retained from the affected on-disk structure."]
+        reason: &'static str,
+    },
     #[error("Invalid SID at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent sid metadata."]
     InvalidSid {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid security descriptor at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent security descriptor metadata."]
     InvalidSecurityDescriptor {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid ACL at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent acl metadata."]
     InvalidAcl {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid quota entry at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent quota entry metadata."]
     InvalidQuotaEntry {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid $O index entry at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent object id index entry metadata."]
     InvalidObjectIdIndexEntry {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid reparse point index entry at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent reparse point index entry metadata."]
     InvalidReparsePointIndexEntry {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid ACE at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent ace metadata."]
     InvalidAce {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid $SDS entry at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent sds entry metadata."]
     InvalidSdsEntry {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error(
         "Circular attribute list reference at {position:#x}: MFT record {record_number} was already visited"
     )]
+    #[doc = "Reports the circular attribute list condition encountered while reading NTFS data."]
     CircularAttributeList {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic record number value retained from the affected on-disk structure."]
         record_number: u64,
     },
     #[error("Feature not enabled: {feature}. Enable it in Cargo.toml.")]
-    UnsupportedFeature { feature: &'static str },
+    #[doc = "Reports an unsupported feature value or feature."]
+    UnsupportedFeature {
+        #[doc = "Diagnostic `UnsupportedFeature` value retained from the affected on-disk structure."]
+        feature: &'static str,
+    },
     #[error("Attribute is compressed but compression support is not enabled")]
+    #[doc = "Reports the compressed attribute not supported condition encountered while reading NTFS data."]
     CompressedAttributeNotSupported,
     #[error(
         "The NTFS B-tree index at byte position {position:#x} exceeds the maximum depth of {max_depth} levels"
     )]
+    #[doc = "Reports the index b tree too deep condition encountered while reading NTFS data."]
     IndexBTreeTooDeep {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic max depth value retained from the affected on-disk structure."]
         max_depth: usize,
     },
     #[error("Invalid reparse point data at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent reparse point data metadata."]
     InvalidReparsePointData {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error(
         "Reparse tag mismatch at byte position {position:#x}: expected {expected:#010x}, actual {actual:#010x}"
     )]
+    #[doc = "Reports the reparse tag mismatch condition encountered while reading NTFS data."]
     ReparseTagMismatch {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Value or size required by the NTFS format."]
         expected: u32,
+        #[doc = "Value or size observed in the input."]
         actual: u32,
     },
     #[error(
         "Reparse data at byte position {position:#x} is too large: {size} bytes exceeds maximum of {max_size} bytes"
     )]
+    #[doc = "Reports the reparse data too large condition encountered while reading NTFS data."]
     ReparseDataTooLarge {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Encoded or computed size involved in the failure."]
         size: usize,
+        #[doc = "Diagnostic max size value retained from the affected on-disk structure."]
         max_size: usize,
     },
     #[error("Invalid $LogFile record at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent log file record metadata."]
     InvalidLogFileRecord {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Unsupported LFS version {major}.{minor} at byte position {position:#x}")]
+    #[doc = "Reports an unsupported lfs version value or feature."]
     UnsupportedLfsVersion {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic major value retained from the affected on-disk structure."]
         major: u16,
+        #[doc = "Diagnostic minor value retained from the affected on-disk structure."]
         minor: u16,
     },
     #[error("Invalid EFS metadata at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent efs metadata metadata."]
     InvalidEfsMetadata {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Invalid TxF $TXF_DATA at byte position {position:#x}: {reason}")]
+    #[doc = "Reports malformed or inconsistent txf data metadata."]
     InvalidTxfData {
+        #[doc = "Byte position associated with the malformed NTFS data."]
         position: NtfsPosition,
+        #[doc = "Diagnostic reason value retained from the affected on-disk structure."]
         reason: &'static str,
     },
     #[error("Failed to parse MFT record {record_number}: {source}")]
+    #[doc = "Reports the mft record parse failed condition encountered while reading NTFS data."]
     MftRecordParseFailed {
+        #[doc = "Diagnostic record number value retained from the affected on-disk structure."]
         record_number: u64,
         #[source]
+        #[doc = "Underlying error that caused this failure."]
         source: Box<NtfsError>,
     },
 }
@@ -541,7 +842,9 @@ impl FsError for NtfsError {
             | Self::InvalidLogFileRecord { position, .. }
             | Self::InvalidEfsMetadata { position, .. }
             | Self::InvalidTxfData { position, .. }
-            | Self::UnsupportedLfsVersion { position, .. } => position.value().map(|v| v.get()),
+            | Self::UnsupportedLfsVersion { position, .. } => {
+                position.value().map(core::num::NonZero::get)
+            }
             Self::BufferTooSmall { .. }
             | Self::InvalidFileRecordNumber { .. }
             | Self::InvalidMftLcn
@@ -581,164 +884,4 @@ impl From<NtfsError> for io::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mft_record_parse_failed_display_includes_record_and_cause() {
-        let inner = NtfsError::InvalidFileSignature {
-            position: NtfsPosition::none(),
-            expected: b"FILE",
-            actual: [0x00, 0x00, 0x00, 0x00],
-        };
-        let outer = NtfsError::MftRecordParseFailed {
-            record_number: 42,
-            source: Box::new(inner),
-        };
-        let msg = outer.to_string();
-        assert!(
-            msg.contains("42"),
-            "Display should include record number: {msg}",
-        );
-        assert!(
-            msg.contains("signature"),
-            "Display should include inner cause: {msg}",
-        );
-    }
-
-    #[test]
-    fn test_mft_record_parse_failed_source_chain() {
-        use std::error::Error;
-
-        let inner = NtfsError::InvalidFileSignature {
-            position: NtfsPosition::none(),
-            expected: b"FILE",
-            actual: [0xDE, 0xAD, 0xBE, 0xEF],
-        };
-        let outer = NtfsError::MftRecordParseFailed {
-            record_number: 99,
-            source: Box::new(inner),
-        };
-        let source = outer.source().expect("should have source");
-        let source_msg = source.to_string();
-        assert!(
-            source_msg.contains("signature"),
-            "source should be the inner error: {source_msg}",
-        );
-    }
-
-    #[test]
-    fn test_mft_record_parse_failed_pattern_match() {
-        let inner = NtfsError::UpdateSequenceNumberMismatch {
-            position: NtfsPosition::none(),
-            expected: [0x01, 0x00],
-            actual: [0xFF, 0xFF],
-        };
-        let error = NtfsError::MftRecordParseFailed {
-            record_number: 1234,
-            source: Box::new(inner),
-        };
-        match &error {
-            NtfsError::MftRecordParseFailed {
-                record_number,
-                source,
-            } => {
-                assert_eq!(*record_number, 1234);
-                assert!(matches!(
-                    **source,
-                    NtfsError::UpdateSequenceNumberMismatch { .. }
-                ),);
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn fs_error_io_kind_maps_correctly() {
-        let err = NtfsError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "test"));
-        assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof),);
-    }
-
-    #[test]
-    fn fs_error_non_io_has_no_io_kind() {
-        let err = NtfsError::InvalidTime;
-        assert_eq!(FsError::io_kind(&err), None);
-    }
-
-    #[test]
-    fn into_io_error_unwraps_io_variant() {
-        // The `NtfsError::Io(e) => e` arm must return the wrapped error
-        // unchanged, preserving its original kind. Deleting the arm would
-        // re-wrap it via `io::Error::other`, downgrading the kind to `Other`.
-        let original = NtfsError::Io(io::Error::new(io::ErrorKind::PermissionDenied, "denied"));
-        let converted: io::Error = original.into();
-        assert_eq!(converted.kind(), io::ErrorKind::PermissionDenied);
-    }
-
-    #[test]
-    fn into_io_error_wraps_non_io_variant() {
-        // A non-Io error has no inherent io kind, so the conversion wraps it.
-        let converted: io::Error = NtfsError::InvalidTime.into();
-        assert_ne!(converted.kind(), io::ErrorKind::PermissionDenied);
-    }
-
-    #[test]
-    fn fs_error_byte_offset_from_position() {
-        let err = NtfsError::InvalidFileSignature {
-            position: NtfsPosition::new(0x1000),
-            expected: b"FILE",
-            actual: [0; 4],
-        };
-        assert_eq!(FsError::byte_offset(&err), Some(0x1000));
-    }
-
-    #[test]
-    fn fs_error_byte_offset_none_position() {
-        let err = NtfsError::InvalidFileSignature {
-            position: NtfsPosition::none(),
-            expected: b"FILE",
-            actual: [0; 4],
-        };
-        // NtfsPosition::none() wraps None, so byte_offset is None
-        assert_eq!(FsError::byte_offset(&err), None);
-    }
-
-    #[test]
-    fn fs_error_byte_offset_no_position_variant() {
-        let err = NtfsError::InvalidTime;
-        assert_eq!(FsError::byte_offset(&err), None);
-    }
-
-    #[test]
-    fn from_fs_common_io_error() {
-        let io_err = fse::IoError::new(fse::ErrorKind::Interrupted);
-        let ntfs_err: NtfsError = io_err.into();
-        match ntfs_err {
-            NtfsError::Io(e) => {
-                assert_eq!(e.kind(), io::ErrorKind::Interrupted);
-            }
-            _ => panic!("Expected NtfsError::Io"),
-        }
-    }
-
-    #[test]
-    fn test_bitlocker_encrypted_display() {
-        let err = NtfsError::BitLockerEncrypted {
-            position: NtfsPosition::new(0x03),
-            oem_id: *b"-FVE-FS-",
-        };
-        let msg = err.to_string();
-        assert!(msg.contains("BitLocker"), "should mention BitLocker: {msg}");
-        assert!(msg.contains("0x3"), "should include position: {msg}");
-        assert!(msg.contains("Decrypt"), "should suggest decryption: {msg}");
-    }
-
-    #[test]
-    fn test_bitlocker_encrypted_byte_offset() {
-        let err = NtfsError::BitLockerEncrypted {
-            position: NtfsPosition::new(0x03),
-            oem_id: *b"-FVE-FS-",
-        };
-        assert_eq!(FsError::byte_offset(&err), Some(3));
-    }
-}
+mod tests;

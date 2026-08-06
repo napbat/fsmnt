@@ -32,8 +32,8 @@ impl<'a> VmkDatum<'a> {
             VmkBody::read_from_prefix(payload).map_err(|_| BitLockerError::InvalidMetadata {
                 block_index: 0,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: (DATUM_HEADER_SIZE + VMK_FIXED_SIZE) as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(DATUM_HEADER_SIZE + VMK_FIXED_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             })?;
 
@@ -44,11 +44,13 @@ impl<'a> VmkDatum<'a> {
     }
 
     #[must_use]
+    /// Returns the VMK protector's persistent identifier.
     pub fn guid(&self) -> &[u8; 16] {
         &self.body.guid
     }
 
     #[must_use]
+    /// Returns the raw key-protector type stored in the VMK datum.
     pub fn protection_type(&self) -> u16 {
         self.body.protection_type.get()
     }
@@ -100,11 +102,13 @@ impl StretchKeyDatum {
     }
 
     #[must_use]
+    /// Returns the key-stretching algorithm identifier.
     pub fn algorithm(&self) -> u16 {
         self.body.algorithm.get()
     }
 
     #[must_use]
+    /// Returns the salt used to derive this protector key.
     pub fn salt(&self) -> &[u8; 16] {
         &self.body.salt
     }
@@ -136,16 +140,19 @@ impl<'a> AesCcmDatum<'a> {
     }
 
     #[must_use]
+    /// Returns the AES-CCM nonce associated with the encrypted key material.
     pub fn nonce(&self) -> &[u8; 12] {
         &self.body.nonce
     }
 
     #[must_use]
+    /// Returns the AES-CCM authentication tag.
     pub fn mac(&self) -> &[u8; 16] {
         &self.body.mac
     }
 
     #[must_use]
+    /// Returns the AES-CCM ciphertext following the fixed datum fields.
     pub fn encrypted_data(&self) -> &[u8] {
         self.encrypted_data
     }
@@ -171,24 +178,25 @@ impl<'a> ExternalKeyDatum<'a> {
     }
 
     #[must_use]
+    /// Returns the identifier of the referenced external startup key.
     pub fn guid(&self) -> &[u8; 16] {
         &self.body.guid
     }
 
     #[must_use]
+    /// Returns the encoded datum sequence carried by the external key.
     pub fn nested_data(&self) -> &[u8] {
         self.nested_data
     }
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
     fn make_vmk_datum(protection_type: u16) -> Vec<u8> {
         let total_size: u16 = 64;
-        let mut buf = vec![0u8; total_size as usize];
+        let mut buf = vec![0u8; usize::from(total_size)];
         buf[0..2].copy_from_slice(&total_size.to_le_bytes());
         buf[2..4].copy_from_slice(&2u16.to_le_bytes());
         buf[4..6].copy_from_slice(&8u16.to_le_bytes());

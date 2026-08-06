@@ -15,6 +15,11 @@ impl ExFat {
     /// Returns `Ok(Some(next))` when the chain continues,
     /// `Ok(None)` at end-of-chain (0xFFFFFFF8..=0xFFFFFFFF),
     /// or an appropriate error for bad/invalid entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `cluster` or its FAT entry is invalid, the
+    /// cluster is marked bad, or the entry cannot be read.
     pub fn next_cluster<T>(&self, fs: &mut T, cluster: u32) -> Result<Option<u32>>
     where
         T: Read + Seek,
@@ -26,7 +31,7 @@ impl ExFat {
         }
 
         // Seek to the FAT entry for this cluster.
-        let entry_offset = self.fat_offset() + cluster as u64 * 4;
+        let entry_offset = self.fat_offset() + u64::from(cluster) * 4;
         fs.seek(SeekFrom::Start(entry_offset))?;
 
         let mut buf = [0u8; 4];
@@ -49,6 +54,7 @@ impl ExFat {
 
     /// Creates a lazy cluster chain iterator starting at the given
     /// cluster.
+    #[must_use]
     pub fn cluster_iter(&self, start_cluster: u32) -> ExFatClusterIterator<'_> {
         ExFatClusterIterator::new(self, start_cluster)
     }
@@ -68,6 +74,7 @@ pub struct ExFatClusterIterator<'e> {
 
 impl<'e> ExFatClusterIterator<'e> {
     /// Creates a new iterator starting at `start_cluster`.
+    #[must_use]
     pub fn new(exfat: &'e ExFat, start_cluster: u32) -> Self {
         Self {
             exfat,
@@ -274,12 +281,11 @@ mod tests {
                 Some(Ok(_)) => {
                     count += 1;
                     // Safety: prevent infinite test if detection fails.
-                    if count > 200 {
-                        panic!(
-                            "Loop detection did not trigger \
-                             after 200 iterations"
-                        );
-                    }
+                    assert!(
+                        count <= 200,
+                        "Loop detection did not trigger \
+                         after 200 iterations"
+                    );
                 }
                 Some(Err(ExFatError::ChainLoop { .. })) => {
                     saw_loop_error = true;
@@ -301,7 +307,7 @@ mod tests {
     }
 
     /// Spec §7.1.5: valid cluster indices are `2..=ClusterCount+1`.
-    /// Cluster_count = 100 means cluster 101 is the inclusive
+    /// `Cluster_count` = 100 means cluster 101 is the inclusive
     /// boundary. Kills `> → >=` at the upper bound check.
     #[test]
     fn test_next_cluster_accepts_last_valid_cluster() {

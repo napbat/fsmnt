@@ -4,7 +4,7 @@
 //! at `s_mmp_block`) for the MMP record. The kernel updates it
 //! periodically while mounted. This module reads the block, classifies
 //! the sequence state, and verifies the on-disk checksum when
-//! METADATA_CSUM is enabled.
+//! `METADATA_CSUM` is enabled.
 //!
 //! `fs-ext` is read-only — this is reporting, not enforcement.
 
@@ -27,6 +27,10 @@ pub(crate) const MMP_SEQ_MAX: u32 = 0xE24D_4D4F;
 /// On-disk MMP block (`struct mmp_struct`, exactly 1024 bytes).
 ///
 /// Mirrors `fs/ext4/ext4.h:2654-2680`.
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical ext4 mmp_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct RawMmpBlock {
@@ -99,7 +103,7 @@ pub struct ExtMmpBlock {
     pub bdevname: [u8; 32],
     /// MMP poll interval in seconds.
     pub check_interval: u16,
-    /// Checksum validation state. `Unknown` when METADATA_CSUM is
+    /// Checksum validation state. `Unknown` when `METADATA_CSUM` is
     /// disabled; `Valid` / `Invalid` otherwise.
     pub checksum: ChecksumState,
 }

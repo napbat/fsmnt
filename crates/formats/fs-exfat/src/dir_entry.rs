@@ -5,7 +5,7 @@
 //! critical vs. benign, and in-use vs. deleted.
 //!
 //! This module provides:
-//! - [`EntryTypeInfo`] for parsing the EntryType byte into its
+//! - [`EntryTypeInfo`] for parsing the `EntryType` byte into its
 //!   component fields.
 //! - Zero-copy on-disk structs for each known entry type.
 //! - [`ExFatFileAttributes`] bitflags matching the exFAT spec.
@@ -43,7 +43,7 @@ pub const ENTRY_TYPE_NAME: u8 = 0xC1;
 /// Volume GUID directory entry (benign primary).
 pub const ENTRY_TYPE_VOLUME_GUID: u8 = 0xA0;
 
-/// TexFAT Padding entry (benign primary).
+/// `TexFAT` Padding entry (benign primary).
 pub const ENTRY_TYPE_TEXFAT_PADDING: u8 = 0xA1;
 
 /// Vendor Extension entry (benign secondary).
@@ -59,7 +59,7 @@ pub const DIR_ENTRY_SIZE: usize = 32;
 // EntryTypeInfo
 // ============================================================
 
-/// Parsed representation of the one-byte EntryType field.
+/// Parsed representation of the one-byte `EntryType` field.
 ///
 /// The exFAT specification encodes four pieces of information in
 /// a single byte:
@@ -83,8 +83,9 @@ pub struct EntryTypeInfo {
 }
 
 impl EntryTypeInfo {
-    /// Parses the EntryType byte into its four component fields.
+    /// Parses the `EntryType` byte into its four component fields.
     #[inline]
+    #[must_use]
     pub const fn from_byte(byte: u8) -> Self {
         Self {
             in_use: byte & 0x80 != 0,
@@ -97,12 +98,14 @@ impl EntryTypeInfo {
     /// Returns `true` if the entry is benign (can be safely ignored
     /// by implementations that do not recognize the type code).
     #[inline]
+    #[must_use]
     pub const fn is_benign(&self) -> bool {
         self.type_importance
     }
 
     /// Returns `true` if the entry is a primary entry.
     #[inline]
+    #[must_use]
     pub const fn is_primary(&self) -> bool {
         !self.type_category
     }
@@ -136,7 +139,7 @@ bitflags! {
 // On-disk entry structures (32 bytes each, zerocopy)
 // ============================================================
 
-/// File Directory Entry (EntryType 0x85).
+/// File Directory Entry (`EntryType` 0x85).
 ///
 /// The primary entry for a file or directory. Contains timestamps,
 /// file attributes, and the count of secondary entries that follow.
@@ -179,7 +182,7 @@ pub struct FileDirectoryEntry {
     pub reserved2: [u8; 7],
 }
 
-/// Stream Extension Entry (EntryType 0xC0).
+/// Stream Extension Entry (`EntryType` 0xC0).
 ///
 /// The first secondary entry of a file entry set. Contains the
 /// file's data stream location (first cluster and length) and the
@@ -189,8 +192,8 @@ pub struct FileDirectoryEntry {
 pub struct StreamExtensionEntry {
     /// Entry type byte (0xC0 for in-use stream extension).
     pub entry_type: u8,
-    /// General secondary flags (bit 0 = AllocationPossible,
-    /// bit 1 = NoFatChain).
+    /// General secondary flags (bit 0 = `AllocationPossible`,
+    /// bit 1 = `NoFatChain`).
     pub general_flags: u8,
     /// Reserved.
     pub reserved1: u8,
@@ -210,7 +213,7 @@ pub struct StreamExtensionEntry {
     pub data_length: U64<LittleEndian>,
 }
 
-/// File Name Entry (EntryType 0xC1).
+/// File Name Entry (`EntryType` 0xC1).
 ///
 /// Contains up to 15 UTF-16LE characters of the file name. Multiple
 /// file name entries are chained together for longer names.
@@ -225,7 +228,7 @@ pub struct FileNameEntry {
     pub file_name: [u8; 30],
 }
 
-/// Volume Label Entry (EntryType 0x83).
+/// Volume Label Entry (`EntryType` 0x83).
 ///
 /// Contains the volume label as a UTF-16LE string of up to 11
 /// characters.
@@ -242,7 +245,7 @@ pub struct VolumeLabelEntry {
     pub reserved: [u8; 8],
 }
 
-/// Allocation Bitmap Directory Entry (EntryType 0x81).
+/// Allocation Bitmap Directory Entry (`EntryType` 0x81).
 ///
 /// Located in the root directory. Contains the first cluster and
 /// length of the allocation bitmap data. The `bitmap_flags` field
@@ -252,7 +255,7 @@ pub struct VolumeLabelEntry {
 pub struct BitmapDirectoryEntry {
     /// Entry type byte (0x81 for in-use allocation bitmap).
     pub entry_type: u8,
-    /// Bit 0: BitmapIdentifier (0 = first, 1 = second bitmap).
+    /// Bit 0: `BitmapIdentifier` (0 = first, 1 = second bitmap).
     pub bitmap_flags: u8,
     /// Reserved bytes.
     pub reserved: [u8; 18],
@@ -262,7 +265,7 @@ pub struct BitmapDirectoryEntry {
     pub data_length: U64<LittleEndian>,
 }
 
-/// Up-case Table Directory Entry (EntryType 0x82).
+/// Up-case Table Directory Entry (`EntryType` 0x82).
 ///
 /// Located in the root directory. Contains the first cluster,
 /// length, and checksum of the up-case table data (which may be

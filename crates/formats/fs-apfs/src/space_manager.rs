@@ -35,6 +35,10 @@ const CAB_CIB_ADDR_OFFSET: usize = OBJ_PHYS_SIZE + 8;
 const CAB_CIB_COUNT_OFFSET: usize = OBJ_PHYS_SIZE + 4;
 
 /// On-disk `spaceman_device_t` (48 bytes).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the sm_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawSpacemanDevice {
@@ -49,6 +53,10 @@ struct RawSpacemanDevice {
 }
 
 /// On-disk `chunk_info_t` (32 bytes).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the ci_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawChunkInfo {
@@ -123,6 +131,11 @@ impl SpaceManager {
     ///
     /// Returns [`ApfsError::Truncated`] for a block too small to hold the
     /// fixed `spaceman_phys_t` fields.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width space-manager field ceases to fit the
+    /// minimum block length checked before parsing.
     pub fn parse(block: Vec<u8>) -> Result<Self> {
         if block.len() < SM_DEV_OFFSET + SD_COUNT * SPACEMAN_DEVICE_SIZE {
             return Err(ApfsError::Truncated {
@@ -211,15 +224,19 @@ impl SpaceManager {
                 reason: "cibs-per-cab is zero with a two-level layout",
             });
         }
-        let cab_index = cib_index / cibs_per_cab;
+        let address_block_index = cib_index / cibs_per_cab;
         let cib_in_cab = cib_index % cibs_per_cab;
-        if cab_index >= u64::from(self.main_device.cab_count) {
+        if address_block_index >= u64::from(self.main_device.cab_count) {
             return Err(ApfsError::Malformed {
                 structure: "spaceman_device_t",
                 reason: "chunk index past the device's address blocks",
             });
         }
-        let cab = read_block(reader, self.block_size, self.device_address(cab_index)?)?;
+        let cab = read_block(
+            reader,
+            self.block_size,
+            self.device_address(address_block_index)?,
+        )?;
         let cab_cib_count = u64::from(u32::from_le_bytes(
             cab.get(CAB_CIB_COUNT_OFFSET..CAB_CIB_COUNT_OFFSET + 4)
                 .and_then(|slice| slice.try_into().ok())
@@ -290,7 +307,11 @@ impl SpaceManager {
         if bitmap_addr <= 0 {
             return Ok(info.ci_free_count.get() == 0 && info.ci_block_count.get() != 0);
         }
-        let bitmap = read_block(reader, self.block_size, bitmap_addr as u64)?;
+        let bitmap_addr = u64::try_from(bitmap_addr).map_err(|_| ApfsError::Malformed {
+            structure: "chunk_info_t",
+            reason: "bitmap address is negative",
+        })?;
+        let bitmap = read_block(reader, self.block_size, bitmap_addr)?;
         let bit = usize::try_from(block_addr % blocks_per_chunk).unwrap_or(usize::MAX);
         let byte = bitmap.get(bit / 8).ok_or(ApfsError::Malformed {
             structure: "spaceman bitmap",
@@ -333,7 +354,11 @@ impl SpaceManager {
                 }
                 continue;
             }
-            let bitmap = read_block(reader, self.block_size, bitmap_addr as u64)?;
+            let bitmap_addr = u64::try_from(bitmap_addr).map_err(|_| ApfsError::Malformed {
+                structure: "chunk_info_t",
+                reason: "bitmap address is negative",
+            })?;
+            let bitmap = read_block(reader, self.block_size, bitmap_addr)?;
             // The bitmap block must cover every block of the chunk.
             if (bitmap.len() as u64).saturating_mul(8) < block_count {
                 return Err(ApfsError::Malformed {
@@ -403,7 +428,11 @@ mod tests {
         cib_addrs: &[u64],
     ) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
-        b[0x20..0x24].copy_from_slice(&(BLK as u32).to_le_bytes());
+        b[0x20..0x24].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         b[0x24..0x28].copy_from_slice(&blocks_per_chunk.to_le_bytes());
         b[0x28..0x2C].copy_from_slice(&chunks_per_cib.to_le_bytes());
         // sm_dev[SD_MAIN].
@@ -419,7 +448,11 @@ mod tests {
         b[dev + 24..dev + 32].copy_from_slice(&main_free.to_le_bytes());
         // The CIB address array sits after both spaceman_device_t structs.
         let addr_off = SM_DEV_OFFSET + SD_COUNT * SPACEMAN_DEVICE_SIZE;
-        b[dev + 32..dev + 36].copy_from_slice(&(addr_off as u32).to_le_bytes());
+        b[dev + 32..dev + 36].copy_from_slice(
+            &u32::try_from(addr_off)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         for (i, &addr) in cib_addrs.iter().enumerate() {
             b[addr_off + i * 8..addr_off + i * 8 + 8].copy_from_slice(&addr.to_le_bytes());
         }
@@ -440,7 +473,10 @@ mod tests {
     #[test]
     fn parses_geometry_and_counts() {
         let sm = SpaceManager::parse(spaceman(8, 100, 5000, 1200, 1, &[3])).unwrap();
-        assert_eq!(sm.block_size, BLK as u32);
+        assert_eq!(
+            sm.block_size,
+            u32::try_from(BLK).expect("the test fixture value fits in u32")
+        );
         assert_eq!(sm.blocks_per_chunk, 8);
         assert_eq!(sm.total_blocks(), 5000);
         assert_eq!(sm.free_blocks(), 1200);
@@ -513,8 +549,11 @@ mod tests {
     /// addresses.
     fn cab(cib_addrs: &[u64]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
-        b[CAB_CIB_COUNT_OFFSET..CAB_CIB_COUNT_OFFSET + 4]
-            .copy_from_slice(&(cib_addrs.len() as u32).to_le_bytes());
+        b[CAB_CIB_COUNT_OFFSET..CAB_CIB_COUNT_OFFSET + 4].copy_from_slice(
+            &u32::try_from(cib_addrs.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         for (i, &addr) in cib_addrs.iter().enumerate() {
             let off = CAB_CIB_ADDR_OFFSET + i * 8;
             b[off..off + 8].copy_from_slice(&addr.to_le_bytes());
@@ -662,7 +701,11 @@ mod tests {
         // offset 96. The line 24 `+ → *` mutant moves SM_DEV_OFFSET to 512
         // and tier-2 to 560, which also misses our nonzero bytes.
         let mut block = vec![0u8; BLK];
-        block[0x20..0x24].copy_from_slice(&(BLK as u32).to_le_bytes());
+        block[0x20..0x24].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         // Main device at offset 48: block_count = 1000, free = 100.
         block[48..56].copy_from_slice(&1000u64.to_le_bytes());
         block[48 + 24..48 + 32].copy_from_slice(&100u64.to_le_bytes());
@@ -686,11 +729,18 @@ mod tests {
         // (kills line 166 `-> Ok(1)` and line 167 `+ → -`, since with
         // index = 1 the two paths return different bytes).
         let mut block = vec![0u8; BLK];
-        block[0x20..0x24].copy_from_slice(&(BLK as u32).to_le_bytes());
+        block[0x20..0x24].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         let addr_off = SM_DEV_OFFSET + SD_COUNT * SPACEMAN_DEVICE_SIZE;
         // Main device: addr_offset
-        block[SM_DEV_OFFSET + 32..SM_DEV_OFFSET + 36]
-            .copy_from_slice(&(addr_off as u32).to_le_bytes());
+        block[SM_DEV_OFFSET + 32..SM_DEV_OFFSET + 36].copy_from_slice(
+            &u32::try_from(addr_off)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         block[addr_off..addr_off + 8].copy_from_slice(&0x1111_1111_u64.to_le_bytes());
         block[addr_off + 8..addr_off + 16].copy_from_slice(&0x2222_2222_u64.to_le_bytes());
         let sm = SpaceManager::parse(block).unwrap();
@@ -827,7 +877,7 @@ mod tests {
         // reject the bitmap as "shorter than the chunk it covers". A chunk
         // of `BLK * 8` blocks is covered by exactly the whole `BLK`-sized
         // bitmap block.
-        let chunk_blocks = (BLK as u32) * 8; // 32768
+        let chunk_blocks = u32::try_from(BLK).expect("the test fixture value fits in u32") * 8; // 32768
         let mut data = spaceman(chunk_blocks, 100, u64::from(chunk_blocks), 0, 1, &[1]);
         // Bitmapped chunk fully allocated, bitmap at block 2.
         let mut cib_block = vec![0u8; BLK];

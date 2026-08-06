@@ -10,7 +10,7 @@ use crate::structured_values::NtfsStructuredValue;
 use crate::types::Vcn;
 use fs_common::io::FsReadSeek;
 
-/// Structure of an $INDEX_ALLOCATION attribute.
+/// Structure of an $`INDEX_ALLOCATION` attribute.
 ///
 /// This attribute describes the sub-nodes of a B-tree.
 /// The top-level nodes are managed via [`NtfsIndexRoot`].
@@ -18,7 +18,7 @@ use fs_common::io::FsReadSeek;
 /// NTFS uses B-trees for describing directories (as indexes of [`NtfsFileName`]s), looking up Object IDs,
 /// Reparse Points, and Security Descriptors, to just name a few.
 ///
-/// An $INDEX_ALLOCATION attribute can be resident or non-resident.
+/// An $`INDEX_ALLOCATION` attribute can be resident or non-resident.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/attributes/index_allocation.html>
 ///
@@ -41,6 +41,11 @@ impl<'n, 'f> NtfsIndexAllocation<'n, 'f> {
     /// down in the B-tree.
     ///
     /// [`NtfsIndexEntry::subnode_vcn`]: crate::NtfsIndexEntry::subnode_vcn
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested VCN cannot be resolved or the index
+    /// record cannot be read, fixed up, or validated.
     pub fn record_from_vcn<T>(
         &self,
         fs: &mut T,
@@ -77,9 +82,10 @@ impl<'n, 'f> NtfsIndexAllocation<'n, 'f> {
         Ok(record)
     }
 
-    /// Returns an iterator over all Index Records of this $INDEX_ALLOCATION attribute (cf. [`NtfsIndexRecord`]).
+    /// Returns an iterator over all Index Records of this $`INDEX_ALLOCATION` attribute (cf. [`NtfsIndexRecord`]).
     ///
     /// Each Index Record is fully read, fixed up, and validated.
+    #[must_use]
     pub fn records(&self, index_record_size: u32) -> NtfsIndexRecords<'n, 'f> {
         NtfsIndexRecords::new(self.clone(), index_record_size)
     }
@@ -157,19 +163,19 @@ impl<'n, 'f> NtfsIndexRecords<'n, 'f> {
         iter_try!(
             self.index_allocation
                 .value
-                .seek(fs, SeekFrom::Current(self.index_record_size as i64))
+                .seek(fs, SeekFrom::Current(i64::from(self.index_record_size)))
         );
 
         Some(Ok(record))
     }
 }
 
-impl<'n, 'f> fs_common::iter::FsTryIteratorType for NtfsIndexRecords<'n, 'f> {
+impl fs_common::iter::FsTryIteratorType for NtfsIndexRecords<'_, '_> {
     type Error = NtfsError;
     type Item<'a> = NtfsIndexRecord;
 }
 
-impl<'n, 'f, R: Read + Seek> fs_common::iter::FsTryIterator<R> for NtfsIndexRecords<'n, 'f> {
+impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for NtfsIndexRecords<'_, '_> {
     fn try_next(&mut self, r: &mut R) -> Result<Option<NtfsIndexRecord>> {
         self.next(r).transpose()
     }
@@ -200,12 +206,13 @@ where
         Self { fs, index_records }
     }
     /// Consumes this iterator and returns the inner [`NtfsIndexRecords`].
+    #[must_use]
     pub fn detach(self) -> NtfsIndexRecords<'n, 'f> {
         self.index_records
     }
 }
 
-impl<'n, 'f, 'a, T> Iterator for NtfsIndexRecordsAttached<'n, 'f, 'a, T>
+impl<T> Iterator for NtfsIndexRecordsAttached<'_, '_, '_, T>
 where
     T: Read + Seek,
 {
@@ -216,7 +223,7 @@ where
     }
 }
 
-impl<'n, 'f, 'a, T> FusedIterator for NtfsIndexRecordsAttached<'n, 'f, 'a, T> where T: Read + Seek {}
+impl<T> FusedIterator for NtfsIndexRecordsAttached<'_, '_, '_, T> where T: Read + Seek {}
 
 #[cfg(test)]
 mod tests {

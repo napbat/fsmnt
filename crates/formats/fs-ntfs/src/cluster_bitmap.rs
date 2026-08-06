@@ -1,5 +1,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
+use fs_common::error::IoError;
 
 use crate::attribute::NtfsAttributeType;
 use crate::data_run_map::DataRunMap;
@@ -44,21 +45,27 @@ impl NtfsClusterBitmap {
     ///
     /// Opens MFT record 6 (`$Bitmap`), extracts its `$DATA` attribute data runs,
     /// and prepares the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `$Bitmap` record or its non-resident data cannot
+    /// be read, parsed, or represented in memory on this target.
     pub fn load<T: Read + Seek>(ntfs: &Ntfs, fs: &mut T) -> Result<Self> {
-        let bitmap_file = ntfs.file(fs, KnownNtfsFileRecordNumber::Bitmap as u64)?;
+        let bitmap_file = ntfs.file(fs, KnownNtfsFileRecordNumber::Bitmap.as_u64())?;
         let data_attribute =
             bitmap_file.find_resident_attribute(NtfsAttributeType::Data, None, None)?;
         let non_resident_value = data_attribute.non_resident_value()?;
         let map = DataRunMap::from_data_runs(non_resident_value.data_runs())?;
 
-        let total_clusters = ntfs.size() / ntfs.cluster_size() as u64;
+        let total_clusters = ntfs.size() / u64::from(ntfs.cluster_size());
         let cluster_size = ntfs.cluster_size();
+        let cache_size = usize::try_from(cluster_size).map_err(|_| IoError::invalid_input())?;
 
         Ok(Self {
             map,
             total_clusters,
             cluster_size,
-            cache: vec![0u8; cluster_size as usize],
+            cache: vec![0u8; cache_size],
             cached_cluster: None,
         })
     }
@@ -73,23 +80,29 @@ impl NtfsClusterBitmap {
         total_clusters: u64,
         cluster_size: u32,
     ) -> Self {
+        let cache_size =
+            usize::try_from(cluster_size).expect("synthetic cluster size fits in memory");
         Self {
             map,
             total_clusters,
             cluster_size,
-            cache: vec![0u8; cluster_size as usize],
+            cache: vec![0u8; cache_size],
             cached_cluster: None,
         }
     }
 
     /// Returns the total number of clusters on the volume.
+    #[must_use]
     pub fn total_clusters(&self) -> u64 {
         self.total_clusters
     }
 
     /// Returns whether the given cluster is marked as allocated in the bitmap.
     ///
-    /// Returns `Err(ClusterOutOfRange)` if `cluster >= total_clusters`.
+    /// # Errors
+    ///
+    /// Returns [`NtfsError::ClusterOutOfRange`] when `cluster` lies beyond the
+    /// volume, or an I/O error when its bitmap byte cannot be read.
     pub fn is_allocated<T: Read + Seek>(&mut self, fs: &mut T, cluster: u64) -> Result<bool> {
         if cluster >= self.total_clusters {
             return Err(NtfsError::ClusterOutOfRange {
@@ -98,21 +111,31 @@ impl NtfsClusterBitmap {
             });
         }
 
-        let bits_per_cache = self.cluster_size as u64 * 8;
+        let bits_per_cache = u64::from(self.cluster_size) * 8;
         let bitmap_cluster = cluster / bits_per_cache;
         let bit_offset = cluster % bits_per_cache;
 
         self.ensure_cached(fs, bitmap_cluster)?;
 
-        let byte_index = (bit_offset / 8) as usize;
-        let bit_index = (bit_offset % 8) as u32;
-        Ok((self.cache[byte_index] & (1 << bit_index)) != 0)
+        let byte_index = usize::try_from(bit_offset / 8).map_err(|_| IoError::invalid_input())?;
+        let bit_index = u32::try_from(bit_offset % 8).map_err(|_| IoError::invalid_input())?;
+        let bitmap_byte = self
+            .cache
+            .get(byte_index)
+            .copied()
+            .ok_or(IoError::invalid_data())?;
+        Ok((bitmap_byte & (1 << bit_index)) != 0)
     }
 
     /// Returns allocation statistics for a range of clusters.
     ///
     /// Counts how many clusters in `start..start+count` are allocated vs free.
     /// Clusters beyond `total_clusters` are silently excluded from the count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any bitmap cluster covering the requested range
+    /// cannot be read.
     pub fn range_status<T: Read + Seek>(
         &mut self,
         fs: &mut T,
@@ -136,10 +159,15 @@ impl NtfsClusterBitmap {
 
     /// Returns the total number of free (unallocated) clusters on the volume.
     ///
-    /// Uses bulk popcount for efficiency — O(bitmap_size / cluster_size) I/O
-    /// operations instead of O(total_clusters).
+    /// Uses bulk popcount for efficiency — `O(bitmap_size` / `cluster_size`) I/O
+    /// operations instead of `O(total_clusters)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if bitmap data cannot be read or a bitmap offset cannot
+    /// be represented on this target.
     pub fn free_clusters<T: Read + Seek>(&mut self, fs: &mut T) -> Result<u64> {
-        let bits_per_cache = self.cluster_size as u64 * 8;
+        let bits_per_cache = u64::from(self.cluster_size) * 8;
         let bitmap_clusters = self.total_clusters.div_ceil(bits_per_cache);
         let mut allocated: u64 = 0;
 
@@ -147,7 +175,7 @@ impl NtfsClusterBitmap {
             self.ensure_cached(fs, bc)?;
 
             // For the last bitmap cluster, only count bits up to total_clusters.
-            let bits_in_this_chunk = if bc == bitmap_clusters - 1 {
+            let bits_in_this_chunk = if bc + 1 == bitmap_clusters {
                 let remainder = self.total_clusters % bits_per_cache;
                 if remainder == 0 {
                     bits_per_cache
@@ -158,21 +186,25 @@ impl NtfsClusterBitmap {
                 bits_per_cache
             };
 
-            let full_bytes = (bits_in_this_chunk / 8) as usize;
-            let remaining_bits = (bits_in_this_chunk % 8) as u32;
+            let full_bytes =
+                usize::try_from(bits_in_this_chunk / 8).map_err(|_| IoError::invalid_input())?;
+            let remaining_bits =
+                u32::try_from(bits_in_this_chunk % 8).map_err(|_| IoError::invalid_input())?;
 
             // Popcount full bytes
-            allocated += self.cache[..full_bytes]
+            allocated += self
+                .cache
                 .iter()
-                .map(|b| b.count_ones() as u64)
+                .take(full_bytes)
+                .map(|b| u64::from(b.count_ones()))
                 .sum::<u64>();
 
             // Handle partial last byte
             if remaining_bits > 0
                 && let Some(&last_byte) = self.cache.get(full_bytes)
             {
-                let mask = (1u16 << remaining_bits) as u8 - 1;
-                allocated += (last_byte & mask).count_ones() as u64;
+                let mask = u8::MAX >> (u8::BITS - remaining_bits);
+                allocated += u64::from((last_byte & mask).count_ones());
             }
         }
 
@@ -185,12 +217,11 @@ impl NtfsClusterBitmap {
             return Ok(());
         }
 
-        let byte_offset = bitmap_cluster * self.cluster_size as u64;
+        let byte_offset = bitmap_cluster * u64::from(self.cluster_size);
         let disk_position = self
             .map
             .resolve_position(byte_offset)
-            .map(|(p, _)| p)
-            .unwrap_or(NtfsPosition::none());
+            .map_or(NtfsPosition::none(), |(p, _)| p);
 
         match disk_position.value() {
             Some(pos) => {
@@ -237,24 +268,26 @@ mod tests {
         total: u64,
         set_bits: &[u64],
     ) -> (NtfsClusterBitmap, std::io::Cursor<Vec<u8>>) {
-        let bits_per_cache = (SYNTH_CLUSTER_SIZE as u64) * 8;
+        let bits_per_cache = u64::from(SYNTH_CLUSTER_SIZE) * 8;
         let bitmap_clusters = total.div_ceil(bits_per_cache);
-        let bitmap_len = (bitmap_clusters * SYNTH_CLUSTER_SIZE as u64) as usize;
+        let bitmap_len = usize::try_from(bitmap_clusters * u64::from(SYNTH_CLUSTER_SIZE))
+            .expect("test value fits usize");
 
         let mut bitmap = vec![0u8; bitmap_len];
         for &c in set_bits {
-            let byte = (c / 8) as usize;
-            let bit = (c % 8) as u32;
+            let byte = usize::try_from(c / 8).expect("test cluster index fits usize");
+            let bit = u32::try_from(c % 8).expect("bit index is below eight");
             bitmap[byte] |= 1 << bit;
         }
 
         // Disk image: SYNTH_BASE bytes of padding, then the bitmap bytes.
-        let mut disk = vec![0u8; SYNTH_BASE as usize];
+        let mut disk = vec![0u8; usize::try_from(SYNTH_BASE).expect("test value fits usize")];
         disk.extend_from_slice(&bitmap);
         let cursor = std::io::Cursor::new(disk);
 
         // One contiguous segment maps virtual offset 0 -> disk SYNTH_BASE.
-        let map = DataRunMap::from_segments_for_test(&[(Some(SYNTH_BASE), bitmap_len as u64)]);
+        let bitmap_len_u64 = u64::try_from(bitmap_len).expect("test bitmap length fits u64");
+        let map = DataRunMap::from_segments_for_test(&[(Some(SYNTH_BASE), bitmap_len_u64)]);
         let bm = NtfsClusterBitmap::from_parts_for_test(map, total, SYNTH_CLUSTER_SIZE);
         (bm, cursor)
     }
@@ -349,19 +382,21 @@ mod tests {
         // Set a bit at position 130 (cluster index beyond total) inside the
         // last cached chunk's byte. The mask must exclude it so it is not
         // counted as allocated (kills the `<< - 1` mask and `% 8` mutants).
-        let bits_per_cache = (SYNTH_CLUSTER_SIZE as u64) * 8;
+        let bits_per_cache = u64::from(SYNTH_CLUSTER_SIZE) * 8;
         let bitmap_clusters = SYNTH_TOTAL.div_ceil(bits_per_cache);
-        let bitmap_len = (bitmap_clusters * SYNTH_CLUSTER_SIZE as u64) as usize;
+        let bitmap_len = usize::try_from(bitmap_clusters * u64::from(SYNTH_CLUSTER_SIZE))
+            .expect("test value fits usize");
         let mut bitmap = vec![0u8; bitmap_len];
         // Cluster 128 (in range) allocated.
         bitmap[16] |= 1 << 0;
         // Cluster 130 (out of range, same byte, bit 2) also set on disk.
         bitmap[16] |= 1 << 2;
 
-        let mut disk = vec![0u8; SYNTH_BASE as usize];
+        let mut disk = vec![0u8; usize::try_from(SYNTH_BASE).expect("test value fits usize")];
         disk.extend_from_slice(&bitmap);
         let mut fs = std::io::Cursor::new(disk);
-        let map = DataRunMap::from_segments_for_test(&[(Some(SYNTH_BASE), bitmap_len as u64)]);
+        let bitmap_len_u64 = u64::try_from(bitmap_len).expect("test bitmap length fits u64");
+        let map = DataRunMap::from_segments_for_test(&[(Some(SYNTH_BASE), bitmap_len_u64)]);
         let mut bm = NtfsClusterBitmap::from_parts_for_test(map, SYNTH_TOTAL, SYNTH_CLUSTER_SIZE);
 
         // Only cluster 128 counts as allocated; 130 is masked out.
@@ -394,9 +429,9 @@ mod tests {
     fn synth_sparse_segment_reads_as_free() {
         // A sparse map (None position) yields an all-zero cache, so every
         // cluster reads as free and the whole volume is free.
-        let bits_per_cache = (SYNTH_CLUSTER_SIZE as u64) * 8;
+        let bits_per_cache = u64::from(SYNTH_CLUSTER_SIZE) * 8;
         let bitmap_clusters = SYNTH_TOTAL.div_ceil(bits_per_cache);
-        let bitmap_len = bitmap_clusters * SYNTH_CLUSTER_SIZE as u64;
+        let bitmap_len = bitmap_clusters * u64::from(SYNTH_CLUSTER_SIZE);
         let map = DataRunMap::from_segments_for_test(&[(None, bitmap_len)]);
         let mut bm = NtfsClusterBitmap::from_parts_for_test(map, SYNTH_TOTAL, SYNTH_CLUSTER_SIZE);
         let mut fs = std::io::Cursor::new(Vec::<u8>::new());

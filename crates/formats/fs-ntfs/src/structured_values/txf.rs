@@ -1,13 +1,13 @@
-//! Transactional NTFS (TxF) per-file metadata (`$TXF_DATA`).
+//! Transactional NTFS (`TxF`) per-file metadata (`$TXF_DATA`).
 //!
-//! When a file or directory takes part in a TxF transaction, NTFS
+//! When a file or directory takes part in a `TxF` transaction, NTFS
 //! attaches a `$TXF_DATA` attribute — a `$LOGGED_UTILITY_STREAM` (0x100)
 //! named `$TXF_DATA`. The attribute is a fixed 56-byte structure that
 //! identifies the transaction and points, via three Common Log File
 //! System (CLFS) Log Sequence Numbers, at the records describing the
 //! file's data, metadata, and directory-index changes.
 //!
-//! TxF is deprecated, but the attribute survives on modern NTFS volumes
+//! `TxF` is deprecated, but the attribute survives on modern NTFS volumes
 //! and is forensically useful: its presence shows a file participated in
 //! a transaction, and the LSN fields reveal which CLFS streams hold the
 //! corresponding records. This module parses the attribute only — the
@@ -26,7 +26,7 @@ const TXF_DATA_LEN: usize = 56;
 
 /// A Common Log File System (CLFS) Log Sequence Number.
 ///
-/// A 64-bit value addressing a record in the TxF CLFS log. The low 32
+/// A 64-bit value addressing a record in the `TxF` CLFS log. The low 32
 /// bits split into a record number (bits 0-8) and the block offset
 /// within the container (bits 9-31); the high 32 bits are the logical
 /// container identifier.
@@ -40,33 +40,40 @@ impl ClfsLsn {
     pub const INVALID: ClfsLsn = ClfsLsn(0x0000_0000_FFFF_FFFF);
 
     /// Wraps a raw 64-bit LSN value.
+    #[must_use]
     pub fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
     /// The raw 64-bit LSN value.
+    #[must_use]
     pub fn raw(self) -> u64 {
         self.0
     }
 
     /// Whether this is the null LSN (no record).
+    #[must_use]
     pub fn is_null(self) -> bool {
         self.0 == Self::NULL.0
     }
 
     /// Whether this is the invalid-LSN sentinel.
+    #[must_use]
     pub fn is_invalid(self) -> bool {
         self.0 == Self::INVALID.0
     }
 
     /// Whether this LSN references an actual CLFS log record.
+    #[must_use]
     pub fn is_present(self) -> bool {
         !self.is_null() && !self.is_invalid()
     }
 
     /// The record number within the block (bits 0-8).
+    #[must_use]
     pub fn record_number(self) -> u16 {
-        (self.0 & 0x1FF) as u16
+        let bytes = (self.0 & 0x1FF).to_le_bytes();
+        u16::from_le_bytes([bytes[0], bytes[1]])
     }
 
     /// The byte offset of the containing CLFS block within its container.
@@ -75,17 +82,21 @@ impl ClfsLsn {
     /// 512-byte CLFS blocks; this returns that index scaled to a byte
     /// address, which is the form CLFS uses to locate records in a
     /// container such as `$TxfLog.blf`.
+    #[must_use]
     pub fn block_offset(self) -> u32 {
-        (((self.0 >> 9) & 0x7F_FFFF) << 9) as u32
+        let bytes = (((self.0 >> 9) & 0x7F_FFFF) << 9).to_le_bytes();
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 
     /// The logical container identifier (high 32 bits).
+    #[must_use]
     pub fn container_id(self) -> u32 {
-        (self.0 >> 32) as u32
+        let bytes = self.0.to_le_bytes();
+        u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]])
     }
 }
 
-/// Parsed `$TXF_DATA` per-file TxF metadata.
+/// Parsed `$TXF_DATA` per-file `TxF` metadata.
 ///
 /// Obtain via [`NtfsLoggedUtilityStream::parse_txf`].
 ///
@@ -105,6 +116,11 @@ pub struct NtfsTxfData {
 impl NtfsTxfData {
     /// Parses a `$TXF_DATA` attribute from the bytes of its
     /// `$LOGGED_UTILITY_STREAM`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `data` is shorter than the fixed `$TXF_DATA`
+    /// structure.
     pub fn parse(data: &[u8], position: NtfsPosition) -> Result<Self> {
         if data.len() < TXF_DATA_LEN {
             return Err(NtfsError::InvalidTxfData {
@@ -129,26 +145,31 @@ impl NtfsTxfData {
 
     /// File reference of the resource manager root that owns this
     /// transaction (typically `$Extend\$RmMetadata`).
+    #[must_use]
     pub fn rm_root_reference(&self) -> NtfsFileReference {
         self.rm_root_reference
     }
 
-    /// The TxF transaction identifier (`TxID`) for this file.
+    /// The `TxF` transaction identifier (`TxID`) for this file.
+    #[must_use]
     pub fn txf_id(&self) -> u64 {
         self.txf_id
     }
 
     /// CLFS LSN of the records describing this file's data changes.
+    #[must_use]
     pub fn data_lsn(&self) -> ClfsLsn {
         self.data_lsn
     }
 
     /// CLFS LSN of the records describing this file's metadata changes.
+    #[must_use]
     pub fn metadata_lsn(&self) -> ClfsLsn {
         self.metadata_lsn
     }
 
     /// CLFS LSN of the records describing directory-index changes.
+    #[must_use]
     pub fn directory_index_lsn(&self) -> ClfsLsn {
         self.directory_index_lsn
     }
@@ -157,11 +178,13 @@ impl NtfsTxfData {
     ///
     /// Observed values are 0x0000 and 0x0002; the semantics are not
     /// publicly documented, so the field is exposed verbatim.
+    #[must_use]
     pub fn flags(&self) -> u16 {
         self.flags
     }
 
     /// The absolute byte position of the `$TXF_DATA` attribute, if known.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         self.position
     }
@@ -212,7 +235,7 @@ mod tests {
     #[test]
     fn parses_all_fields() {
         // RM root file reference: record 27, sequence 1.
-        let rm_ref = 27u64 | (1u64 << 48);
+        let rm_ref = 0x1B_u64 | (1u64 << 48);
         let buf = build_txf_data(
             rm_ref,
             0xABCD_1234,

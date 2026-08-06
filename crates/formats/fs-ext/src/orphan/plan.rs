@@ -61,35 +61,55 @@ mod overlay_delta_tests {
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct OrphanPlan {
+    /// Entries discovered by walking the legacy `s_last_orphan` inode chain.
     pub legacy: Vec<LegacyOrphanEntry>,
+    /// Entries decoded from the indexed orphan file.
     pub orphan_file: Vec<OrphanFileEntry>,
+    /// Recoverable inconsistencies observed while combining both sources.
     pub warnings: Vec<OrphanWarning>,
+    /// Fatal condition that prevented recovery from completing.
     pub stop: Option<OrphanStop>,
 }
 
+/// Snapshot of one inode discovered in the legacy orphan chain.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct LegacyOrphanEntry {
+    /// Orphaned inode number.
     pub inode: u32,
+    /// Next inode number stored in the legacy chain link.
     pub next_legacy: u32,
+    /// Raw inode mode at parse time.
     pub mode: u16,
+    /// Link count at parse time.
     pub links_count: u16,
+    /// File size at parse time.
     pub size: u64,
+    /// Recovery action implied by the inode's link count.
     pub disposition: OrphanDisposition,
 }
 
+/// Snapshot of one slot decoded from the ext4 orphan file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct OrphanFileEntry {
+    /// Orphaned inode number stored in the slot.
     pub inode: u32,
+    /// Logical orphan-file block containing the slot.
     pub file_block_index: u32,
+    /// Entry index within the orphan-file block.
     pub slot_index: u32,
+    /// Raw inode mode at parse time.
     pub mode: u16,
+    /// Link count at parse time.
     pub links_count: u16,
+    /// File size at parse time.
     pub size: u64,
+    /// Recovery action implied by the inode's link count.
     pub disposition: OrphanDisposition,
 }
 
+/// Recovery action selected for an orphan entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OrphanDisposition {
@@ -101,78 +121,113 @@ pub enum OrphanDisposition {
     TruncateDeferred,
 }
 
+/// Recoverable inconsistency observed during orphan discovery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct OrphanWarning {
+    /// Category and affected objects for the warning.
     pub kind: OrphanWarningKind,
 }
 
+/// Kinds of recoverable orphan-discovery inconsistency.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OrphanWarningKind {
     /// Same inode number appears in both orphan sources.
     DuplicateInode {
+        /// Inode that appeared more than once.
         inode: u32,
+        /// Source in which the inode was first observed.
         first_source: OrphanSourceKind,
+        /// Source containing the duplicate entry.
         second_source: OrphanSourceKind,
     },
 }
 
+/// On-disk mechanism from which an orphan entry was discovered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OrphanSourceKind {
+    /// Legacy linked list rooted at `s_last_orphan`.
     Legacy,
+    /// Indexed orphan file enabled by `COMPAT_ORPHAN_FILE`.
     OrphanFile,
 }
 
+/// Location and reason at which orphan recovery stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct OrphanStop {
+    /// Discovery or apply location associated with the failure.
     pub position: OrphanPosition,
+    /// Condition that made recovery unsafe.
     pub reason: OrphanStopReason,
 }
 
+/// Logical location within orphan discovery or application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OrphanPosition {
+    /// Superblock head of the legacy orphan chain.
     LegacyHead,
+    /// A specific inode while walking the legacy chain.
     LegacyInode {
+        /// Inode being decoded.
         inode: u32,
     },
+    /// A block and optional slot in the orphan file.
     OrphanFileBlock {
+        /// Logical orphan-file block index.
         file_block_index: u32,
+        /// Slot index when failure occurred after selecting a slot.
         slot_index: Option<u32>,
     },
+    /// Atomic overlay-application phase.
     Apply,
 }
 
+/// Fatal conditions that stop orphan discovery or application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OrphanStopReason {
+    /// The legacy orphan chain revisited an inode.
     LegacyChainCycle {
+        /// Inode at which the cycle was detected.
         at_inode: u32,
     },
+    /// The legacy chain points outside the filesystem's inode range.
     LegacyChainInodeOutOfRange {
+        /// Invalid inode number stored in the chain.
         inode: u32,
     },
+    /// An orphan-file slot names an inode outside the valid range.
     OrphanFileInodeOutOfRange {
+        /// Invalid inode number stored in the slot.
         inode: u32,
     },
+    /// An orphan-file block does not end with the required tail magic.
     OrphanFileTailMagicInvalid,
+    /// An orphan-file block failed metadata-checksum validation.
     OrphanFileChecksumInvalid,
     /// Two owned physical blocks of one inode mapped to the same
     /// allocation cluster from different logical cluster slots. Only
     /// reachable on `RO_COMPAT_BIGALLOC` filesystems.
     BigallocClusterOverlap {
+        /// Inode containing the overlapping mappings.
         inode: u32,
+        /// Allocation cluster claimed more than once.
         cluster: u64,
+        /// First physical block mapped into the cluster.
         first_block: u64,
+        /// Conflicting physical block mapped into the same cluster.
         second_block: u64,
     },
     /// An EA inode referenced by an Unlinked host does not have
     /// `EA_INODE_FL` set.
     EaInodeMissingFlag {
+        /// Orphaned inode containing the xattr reference.
         host_inode: u32,
+        /// Referenced external-value inode.
         ea_inode: u32,
     },
     /// An EA inode referenced by an Unlinked host had an effective
@@ -180,21 +235,29 @@ pub enum OrphanStopReason {
     /// zero or the sum of unlinked references already exceeds the
     /// pre-apply refcount.
     EaInodeRefcountZero {
+        /// Orphaned inode whose reference would be removed.
         host_inode: u32,
+        /// Referenced EA inode with no remaining count.
         ea_inode: u32,
     },
     /// An EA inode's `i_size` does not match the host's xattr entry
     /// `e_value_size`. Expected / actual both widened to u64.
     EaInodeSizeMismatch {
+        /// Orphaned inode containing the xattr entry.
         host_inode: u32,
+        /// EA inode supplying the external xattr value.
         ea_inode: u32,
+        /// Value size recorded in the host's xattr entry.
         expected: u64,
+        /// Size stored in the EA inode.
         actual: u64,
     },
     /// `METADATA_CSUM` is set and the EA inode's stored value hash in
     /// `i_atime` does not match `ea_inode_hash(seed, value_bytes)`.
     EaInodeChecksumInvalid {
+        /// Orphaned inode containing the xattr reference.
         host_inode: u32,
+        /// EA inode whose stored value hash is invalid.
         ea_inode: u32,
     },
     /// An EA inode carries its own non-empty xattrs (i-body or any
@@ -202,30 +265,41 @@ pub enum OrphanStopReason {
     /// variant handles the shared-external-block case; this variant
     /// covers all other non-empty-xattr cases on EA inodes.
     EaInodeNestedReference {
+        /// Orphaned inode containing the original reference.
         host_inode: u32,
+        /// EA inode that itself carries xattrs.
         ea_inode: u32,
     },
     /// An EA inode has `i_file_acl != 0` pointing at an external xattr
     /// block with `h_refcount > 1`. More specific than the generic
     /// `EaInodeNestedReference`.
     EaInodeSharedXattrBlock {
+        /// Orphaned inode containing the original reference.
         host_inode: u32,
+        /// EA inode that points at the shared block.
         ea_inode: u32,
+        /// Shared external xattr block number.
         xattr_block: u64,
+        /// On-disk reference count of that block.
         refcount: u32,
     },
     /// An xattr block referenced by one or more Unlinked hosts has
     /// `h_refcount == 0` — either on-disk zero or `count > h_refcount`
     /// at apply time.
     SharedXattrBlockRefcountZero {
+        /// Orphaned inode referencing the block.
         inode: u32,
+        /// External xattr block with an exhausted reference count.
         xattr_block: u64,
     },
     /// An xattr block referenced by an Unlinked host has `h_refcount >
-    /// EXT4_XATTR_REFCOUNT_MAX` (0x4000_0000).
+    /// EXT4_XATTR_REFCOUNT_MAX` (`0x4000_0000`).
     SharedXattrBlockRefcountOverflow {
+        /// Orphaned inode referencing the block.
         inode: u32,
+        /// External xattr block with an invalid reference count.
         xattr_block: u64,
+        /// On-disk reference count exceeding the ext4 maximum.
         refcount: u32,
     },
 }

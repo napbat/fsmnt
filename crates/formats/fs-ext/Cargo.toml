@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
-crc32c = "0.6"
+crc32c = { workspace = true }
 crc32fast = { workspace = true }
 fs-common = { workspace = true, default-features = false }
 thiserror = { workspace = true }
@@ -28,20 +28,21 @@ zeroize = { workspace = true, optional = true }
 
 chrono = { workspace = true, default-features = false, optional = true }
 time = { workspace = true, default-features = false, features = [
-    "formatting", "large-dates", "macros",
+    "large-dates",
 ], optional = true }
-unicode-casefold = { version = "0.2.0", optional = true }
-unicode-normalization = { version = "0.1.25", optional = true }
+unicode-casefold = { workspace = true, optional = true }
+unicode-normalization = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Placeholder crate that makes `#[cfg_attr(test, mutants::skip)]`
 # compile when annotating a function/expression as equivalent or
 # diagnostic-only for `cargo-mutants`. See
 # crates/fs-ext/docs/mutation-testing.md.
-mutants = "0.0.4"
+fsmnt-testkit = { workspace = true }
+mutants = { workspace = true }
 
 [features]
-default = ["std", "fscrypt", "verity"]
+default = ["fscrypt", "verity"]
 std = [
     "chrono?/std",
     "crc32fast/std",
@@ -67,4 +68,7 @@ fscrypt = [
 verity = ["dep:sha2"]
 chrono = ["dep:chrono"]
 time = ["dep:time"]
-unicode-casefold = ["std", "dep:unicode-casefold", "dep:unicode-normalization"]
+unicode-casefold = ["dep:unicode-casefold", "dep:unicode-normalization"]
+
+[lints]
+workspace = true

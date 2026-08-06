@@ -2,7 +2,7 @@
 //!
 //! [FAT](https://en.wikipedia.org/wiki/File_Allocation_Table) is a widely-used filesystem format,
 //! commonly found on removable media (USB drives, SD cards), boot partitions, and for cross-platform
-//! compatibility. This crate supports FAT12, FAT16, and FAT32. ExFAT has enough differences that
+//! compatibility. This crate supports FAT12, FAT16, and FAT32. `ExFAT` has enough differences that
 //! it should be treated as a completely different filesystem.
 //!
 //! The crate is `no_std`-compatible and therefore usable from firmware level code up to user-mode applications.

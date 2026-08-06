@@ -32,17 +32,39 @@ const ACL_OTHER: u16 = 0x0020;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PosixAclEntry {
     /// `ACL_USER_OBJ`: permissions of the file's owning user.
-    UserObj { perm: u16 },
+    UserObj {
+        /// Raw permission word for the owning user.
+        perm: u16,
+    },
     /// `ACL_USER`: permissions for a named user identified by `uid`.
-    User { uid: u32, perm: u16 },
+    User {
+        /// Numeric user identifier stored in the ACL entry.
+        uid: u32,
+        /// Raw permission word for the named user.
+        perm: u16,
+    },
     /// `ACL_GROUP_OBJ`: permissions of the file's owning group.
-    GroupObj { perm: u16 },
+    GroupObj {
+        /// Raw permission word for the owning group.
+        perm: u16,
+    },
     /// `ACL_GROUP`: permissions for a named group identified by `gid`.
-    Group { gid: u32, perm: u16 },
+    Group {
+        /// Numeric group identifier stored in the ACL entry.
+        gid: u32,
+        /// Raw permission word for the named group.
+        perm: u16,
+    },
     /// `ACL_MASK`: maximum effective permissions for `User`/`Group`/`GroupObj`.
-    Mask { perm: u16 },
+    Mask {
+        /// Raw permission mask applied to named-user and group entries.
+        perm: u16,
+    },
     /// `ACL_OTHER`: permissions for everyone else.
-    Other { perm: u16 },
+    Other {
+        /// Raw permission word for users not matched by another entry.
+        perm: u16,
+    },
 }
 
 /// Decode a Linux on-disk `posix_acl_xattr_*` blob into typed entries.
@@ -176,19 +198,19 @@ mod tests {
         // big-endian would read 0x04030201 instead of 0x01020304.
         let mut blob = Vec::new();
         blob.extend_from_slice(&POSIX_ACL_XATTR_VERSION.to_le_bytes());
-        push_acl_entry(&mut blob, ACL_USER, 0o6, 0x01020304);
-        push_acl_entry(&mut blob, ACL_GROUP, 0o4, 0x0A0B0C0D);
+        push_acl_entry(&mut blob, ACL_USER, 0o6, 0x0102_0304);
+        push_acl_entry(&mut blob, ACL_GROUP, 0o4, 0x0A0B_0C0D);
 
         let entries = decode(7, &blob).unwrap();
         assert_eq!(
             entries,
             vec![
                 PosixAclEntry::User {
-                    uid: 0x01020304,
+                    uid: 0x0102_0304,
                     perm: 0o6,
                 },
                 PosixAclEntry::Group {
-                    gid: 0x0A0B0C0D,
+                    gid: 0x0A0B_0C0D,
                     perm: 0o4,
                 },
             ]

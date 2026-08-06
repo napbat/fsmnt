@@ -1,4 +1,6 @@
-mod common;
+//! Integration tests for reading and seeking through ext file data.
+
+mod support;
 
 use std::io::Cursor;
 
@@ -23,7 +25,7 @@ const SPARSE_FILE_INO: u32 = 525; // ext4 only
 
 #[test]
 fn read_file_from_ext4() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     assert!(inode.is_regular_file());
     assert_eq!(inode.size(), 17);
@@ -38,7 +40,7 @@ fn read_file_from_ext4() {
 
 #[test]
 fn read_file_from_ext2() {
-    let (ext, mut fs) = common::open_ext("ext2.img");
+    let (ext, mut fs) = support::open_ext("ext2.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT23).unwrap();
     assert!(inode.is_regular_file());
     assert_eq!(inode.size(), 17);
@@ -53,7 +55,7 @@ fn read_file_from_ext2() {
 
 #[test]
 fn read_file_from_ext3() {
-    let (ext, mut fs) = common::open_ext("ext3.img");
+    let (ext, mut fs) = support::open_ext("ext3.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT23).unwrap();
     assert!(inode.is_regular_file());
 
@@ -67,7 +69,7 @@ fn read_file_from_ext3() {
 
 #[test]
 fn seek_start_and_read() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -82,7 +84,7 @@ fn seek_start_and_read() {
 
 #[test]
 fn seek_current_forward_and_back() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -101,7 +103,7 @@ fn seek_current_forward_and_back() {
 
 #[test]
 fn seek_end() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -116,7 +118,7 @@ fn seek_end() {
 
 #[test]
 fn seek_past_eof_returns_zero_bytes() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -130,7 +132,7 @@ fn seek_past_eof_returns_zero_bytes() {
 
 #[test]
 fn seek_to_negative_position_fails() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -142,7 +144,7 @@ fn seek_to_negative_position_fails() {
 
 #[test]
 fn read_into_empty_buffer_returns_zero() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 
@@ -156,7 +158,7 @@ fn read_into_empty_buffer_returns_zero() {
 
 #[test]
 fn sparse_file_holes_are_zero() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, SPARSE_FILE_INO).unwrap();
     assert!(inode.is_regular_file());
     assert_eq!(inode.size(), 8292);
@@ -192,7 +194,7 @@ fn sparse_file_holes_are_zero() {
 
 #[test]
 fn file_len_and_is_empty() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
 
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let file = inode.open_file().unwrap();
@@ -204,7 +206,7 @@ fn file_len_and_is_empty() {
 
 #[test]
 fn sequential_read_accumulates_full_file() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, HELLO_TXT_INO_EXT4).unwrap();
     let mut file = inode.open_file().unwrap();
 

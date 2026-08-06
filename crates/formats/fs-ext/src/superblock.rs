@@ -141,7 +141,7 @@ pub(crate) struct RawSuperblock {
     pub s_want_extra_isize: U16<LE>,
 
     /// 0x160: Miscellaneous filesystem flags (e.g. signed/unsigned htree
-    /// hash, test_fs marker).
+    /// hash, `test_fs` marker).
     pub s_flags: U32<LE>,
     /// 0x164: RAID stride (`s_raid_stride`, blocks per disk in a stripe).
     pub s_raid_stride: U16<LE>,
@@ -151,7 +151,7 @@ pub(crate) struct RawSuperblock {
     pub s_mmp_block: U64<LE>,
     /// 0x170: RAID stripe width in blocks (`s_raid_stripe_width`).
     pub s_raid_stripe_width: U32<LE>,
-    /// 0x174: log2 of flex_bg group size (`s_log_groups_per_flex`).
+    /// 0x174: log2 of `flex_bg` group size (`s_log_groups_per_flex`).
     pub s_log_groups_per_flex: u8,
 
     /// 0x175: Metadata checksum algorithm (must be 1 = CRC32C).
@@ -209,7 +209,7 @@ pub(crate) struct RawSuperblock {
     /// (superblock copies, GDT, bitmaps, inode tables).
     pub s_overhead_clusters: U32<LE>,
 
-    /// 0x24C: SPARSE_SUPER2 backup block groups.
+    /// 0x24C: `SPARSE_SUPER2` backup block groups.
     pub s_backup_bgs: [U32<LE>; 2],
 
     /// 0x254: Encryption algorithm codes in use (four 1-byte values).
@@ -227,7 +227,7 @@ pub(crate) struct RawSuperblock {
     pub s_prj_quota_inum: U32<LE>,
 
     /// 0x270: CRC32C checksum seed (replaces UUID-derived seed
-    /// when INCOMPAT_CSUM_SEED is set).
+    /// when `INCOMPAT_CSUM_SEED` is set).
     pub s_checksum_seed: U32<LE>,
 
     /// 0x274: High byte of `s_wtime` (40-bit unsigned epoch extension).

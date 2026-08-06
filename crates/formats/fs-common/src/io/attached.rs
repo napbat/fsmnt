@@ -40,16 +40,28 @@ where
     R: Read + Seek,
 {
     /// Reads bytes from the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns the value reader's error when the read cannot be completed.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, V::Error> {
         self.value.read(self.reader, buf)
     }
 
     /// Seeks within the value's stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns the value reader's error when the target position is invalid.
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64, V::Error> {
         self.value.seek(self.reader, pos)
     }
 
     /// Reads exactly `buf.len()` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the value reader's error on I/O failure or premature end of data.
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), V::Error> {
         self.value.read_exact(self.reader, buf)
     }
@@ -137,6 +149,16 @@ mod tests {
     use crate::error::{ErrorKind, FsError, IoError};
     use std::vec;
 
+    fn offset_position(base: u64, offset: i64) -> u64 {
+        if offset.is_negative() {
+            base.checked_sub(offset.unsigned_abs())
+                .expect("test seek stays at or after zero")
+        } else {
+            base.checked_add(offset.unsigned_abs())
+                .expect("test seek position fits u64")
+        }
+    }
+
     #[derive(Debug)]
     enum TestError {
         Io(IoError),
@@ -169,10 +191,11 @@ mod tests {
         type Error = TestError;
 
         fn read(&mut self, _r: &mut R, buf: &mut [u8]) -> Result<usize, TestError> {
-            let remaining = &self.data[self.pos as usize..];
+            let position = usize::try_from(self.pos).expect("test position fits usize");
+            let remaining = &self.data[position..];
             let n = buf.len().min(remaining.len());
             buf[..n].copy_from_slice(&remaining[..n]);
-            self.pos += n as u64;
+            self.pos += u64::try_from(n).expect("read length fits u64");
             Ok(n)
         }
 
@@ -180,10 +203,11 @@ mod tests {
             match pos {
                 SeekFrom::Start(n) => self.pos = n,
                 SeekFrom::Current(n) => {
-                    self.pos = (self.pos as i64 + n) as u64;
+                    self.pos = offset_position(self.pos, n);
                 }
                 SeekFrom::End(n) => {
-                    self.pos = (self.data.len() as i64 + n) as u64;
+                    let end = u64::try_from(self.data.len()).expect("slice length fits u64");
+                    self.pos = offset_position(end, n);
                 }
             }
             Ok(self.pos)
@@ -194,7 +218,7 @@ mod tests {
         }
 
         fn len(&self) -> u64 {
-            self.data.len() as u64
+            u64::try_from(self.data.len()).expect("slice length fits u64")
         }
     }
 

@@ -41,6 +41,10 @@ impl NtfsWofAttributeValue {
     /// point metadata ([`WofInfo`]).
     ///
     /// [`WofInfo`]: crate::structured_values::wof::WofInfo
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WOF chunk table or compressed payload is inconsistent with the declared size.
     pub fn new(
         compressed_data: Vec<u8>,
         uncompressed_size: u64,
@@ -50,8 +54,7 @@ impl NtfsWofAttributeValue {
         let chunk_size = algorithm.chunk_size();
         let num_chunks = uncompressed_size
             .checked_add(u64::from(chunk_size) - 1)
-            .map(|n| n / u64::from(chunk_size))
-            .unwrap_or(0);
+            .map_or(0, |n| n / u64::from(chunk_size));
 
         if uncompressed_size == 0 {
             return Ok(Self {
@@ -73,7 +76,10 @@ impl NtfsWofAttributeValue {
         } else {
             8
         };
-        let table_entries = (num_chunks - 1) as usize;
+        let table_entries =
+            usize::try_from(num_chunks - 1).map_err(|_| NtfsError::InvalidWofData {
+                reason: "chunk count exceeds addressable memory",
+            })?;
         let table_end = table_entries
             .checked_mul(entry_size)
             .ok_or(NtfsError::InvalidWofData {
@@ -98,7 +104,14 @@ impl NtfsWofAttributeValue {
             chunk_offsets,
             table_end,
             stream_position: 0,
-            decompressed_buffer: vec![0u8; chunk_size as usize],
+            decompressed_buffer: vec![
+                0u8;
+                usize::try_from(chunk_size).map_err(|_| {
+                    NtfsError::InvalidWofData {
+                        reason: "chunk size exceeds addressable memory",
+                    }
+                })?
+            ],
             buffered_chunk_index: None,
             recovery_mode,
         })
@@ -110,16 +123,19 @@ impl NtfsWofAttributeValue {
     }
 
     /// Returns the total uncompressed file size in bytes.
+    #[must_use]
     pub fn len(&self) -> u64 {
         self.uncompressed_size
     }
 
     /// Returns `true` if the uncompressed file is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.uncompressed_size == 0
     }
 
     /// Returns the current position in the decompressed stream.
+    #[must_use]
     pub fn stream_position(&self) -> u64 {
         self.stream_position
     }
@@ -127,13 +143,14 @@ impl NtfsWofAttributeValue {
     fn decompressed_chunk_size(&self, chunk_index: usize) -> usize {
         let num_chunks = self.chunk_offsets.len();
         if chunk_index + 1 < num_chunks {
-            self.chunk_size as usize
+            usize::try_from(self.chunk_size).expect("a WOF chunk size fits usize")
         } else {
             let remainder = self.uncompressed_size % u64::from(self.chunk_size);
             if remainder == 0 {
-                self.chunk_size as usize
+                usize::try_from(self.chunk_size).expect("a WOF chunk size fits usize")
             } else {
-                remainder as usize
+                usize::try_from(remainder)
+                    .expect("a WOF chunk remainder is bounded by its u32 chunk size")
             }
         }
     }
@@ -183,10 +200,13 @@ impl NtfsWofAttributeValue {
         let end = if chunk_index + 1 < self.chunk_offsets.len() {
             self.chunk_offsets[chunk_index + 1]
         } else {
-            (self.compressed_data.len() - self.table_end) as u64
+            u64::try_from(self.compressed_data.len() - self.table_end)
+                .expect("a slice length fits u64")
         };
-        let abs_start = self.table_end + start as usize;
-        let abs_end = self.table_end + end as usize;
+        let abs_start = self.table_end
+            + usize::try_from(start).expect("validated chunk offsets fit addressable memory");
+        let abs_end = self.table_end
+            + usize::try_from(end).expect("validated chunk offsets fit addressable memory");
         abs_start..abs_end
     }
 }
@@ -200,15 +220,23 @@ impl Read for NtfsWofAttributeValue {
         let mut bytes_read = 0;
 
         while bytes_read < buf.len() && self.stream_position < self.uncompressed_size {
-            let chunk_index = (self.stream_position / u64::from(self.chunk_size)) as usize;
+            let chunk_index = usize::try_from(self.stream_position / u64::from(self.chunk_size))
+                .map_err(|_| {
+                    crate::io::Error::from(NtfsError::InvalidWofData {
+                        reason: "chunk index exceeds addressable memory",
+                    })
+                })?;
 
             self.ensure_chunk_buffered(chunk_index)
                 .map_err(crate::io::Error::from)?;
 
-            let offset_in_chunk = (self.stream_position % u64::from(self.chunk_size)) as usize;
+            let offset_in_chunk =
+                usize::try_from(self.stream_position % u64::from(self.chunk_size))
+                    .expect("a chunk-relative offset is bounded by its u32 chunk size");
             let chunk_decompressed = self.decompressed_chunk_size(chunk_index);
             let remaining_in_chunk = chunk_decompressed - offset_in_chunk;
-            let remaining_in_file = (self.uncompressed_size - self.stream_position) as usize;
+            let remaining_in_file = usize::try_from(self.uncompressed_size - self.stream_position)
+                .unwrap_or(usize::MAX);
             let remaining_in_buf = buf.len() - bytes_read;
 
             let to_copy = remaining_in_chunk
@@ -220,7 +248,7 @@ impl Read for NtfsWofAttributeValue {
             );
 
             bytes_read += to_copy;
-            self.stream_position += to_copy as u64;
+            self.stream_position += u64::try_from(to_copy).expect("a copied slice length fits u64");
         }
 
         Ok(bytes_read)
@@ -272,8 +300,12 @@ fn validate_chunk_offsets(offsets: &[u64], data_region_size: usize) -> Result<()
         }
     }
 
+    let data_region_size =
+        u64::try_from(data_region_size).map_err(|_| NtfsError::InvalidWofData {
+            reason: "ADS data region size does not fit in u64",
+        })?;
     if let Some(&last) = offsets.last()
-        && last > data_region_size as u64
+        && last > data_region_size
     {
         return Err(NtfsError::InvalidWofData {
             reason: "chunk offset exceeds ADS data bounds",
@@ -301,9 +333,13 @@ mod tests {
         let mut running_offset = chunks.first().map_or(0, |c| c.len());
 
         for i in 0..table_entries {
-            let offset = running_offset as u64;
+            let offset = u64::try_from(running_offset).expect("test offset fits in u64");
             if use_u32 {
-                ads[i * 4..(i + 1) * 4].copy_from_slice(&(offset as u32).to_le_bytes());
+                ads[i * 4..(i + 1) * 4].copy_from_slice(
+                    &u32::try_from(offset)
+                        .expect("test value fits u32")
+                        .to_le_bytes(),
+                );
             } else {
                 ads[i * 8..(i + 1) * 8].copy_from_slice(&offset.to_le_bytes());
             }
@@ -367,10 +403,14 @@ mod tests {
     fn single_chunk_raw_passthrough() {
         let original = b"Hello, WOF world! This is uncompressed.";
         let chunk_size = 4096u32;
-        let uncompressed_size = original.len() as u64;
+        let uncompressed_size =
+            u64::try_from(original.len()).expect("test data length fits in u64");
 
         let mut padded = original.to_vec();
-        padded.resize(chunk_size as usize, 0xDD);
+        padded.resize(
+            usize::try_from(chunk_size).expect("test chunk size fits in usize"),
+            0xDD,
+        );
 
         let ads = build_ads_with_raw_chunks(chunk_size, &[&padded], uncompressed_size);
 
@@ -406,23 +446,23 @@ mod tests {
 
         let length = size - 1;
         let base = length - 3;
-        let field_val = base.min(7) as u16;
+        let field_val = u16::try_from(base.min(7)).expect("test value fits u16");
         let word: u16 = field_val & 0x7;
         payload.extend_from_slice(&word.to_le_bytes());
 
         if base >= 7 {
             let rem = base - 7;
-            let nibble = rem.min(15) as u8;
+            let nibble = u8::try_from(rem.min(15)).expect("test value fits u8");
             payload.push(nibble);
 
             if rem >= 15 {
                 let byte_rem = rem - 15;
-                let byte_val = byte_rem.min(255) as u8;
+                let byte_val = u8::try_from(byte_rem.min(255)).expect("test value fits u8");
                 payload.push(byte_val);
 
                 if byte_rem >= 255 {
                     // u16 extension encodes match_length - 3.
-                    let u16_val = (length - 3) as u16;
+                    let u16_val = u16::try_from(length - 3).expect("test value fits u16");
                     payload.extend_from_slice(&u16_val.to_le_bytes());
                 }
             }
@@ -557,7 +597,7 @@ mod tests {
 
     /// A two-chunk reader whose final chunk is a partial (non-aligned)
     /// remainder, with both chunks stored raw (passthrough). chunk0 is
-    /// 4096 bytes of 0x11, chunk1 is 100 bytes of 0x22, uncompressed_size
+    /// 4096 bytes of 0x11, chunk1 is 100 bytes of 0x22, `uncompressed_size`
     /// 4196. Exercises the last-chunk remainder logic and chunk ranges.
     fn partial_last_chunk_reader() -> NtfsWofAttributeValue {
         let chunk0 = vec![0x11u8; 4096];

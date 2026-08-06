@@ -200,17 +200,29 @@ mod tests {
     /// eight-byte-aligning each value as APFS does.
     fn blob(fields: &[(u8, u8, Vec<u8>)]) -> Vec<u8> {
         let mut region = Vec::new();
-        region.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+        region.extend_from_slice(
+            &u16::try_from(fields.len())
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let used: usize = fields.len() * X_FIELD_SIZE
             + fields
                 .iter()
                 .map(|(_, _, d)| align8(d.len()))
                 .sum::<usize>();
-        region.extend_from_slice(&(used as u16).to_le_bytes());
+        region.extend_from_slice(
+            &u16::try_from(used)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         for (ty, flags, data) in fields {
             region.push(*ty);
             region.push(*flags);
-            region.extend_from_slice(&(data.len() as u16).to_le_bytes());
+            region.extend_from_slice(
+                &u16::try_from(data.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
         }
         for (_, _, data) in fields {
             region.extend_from_slice(data);
@@ -328,7 +340,11 @@ mod tests {
         );
 
         // Widen the field's declared size to reach into the slack region.
-        region[6..8].copy_from_slice(&((blob_len) as u16).to_le_bytes());
+        region[6..8].copy_from_slice(
+            &u16::try_from(blob_len)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         assert!(matches!(
             ExtendedFields::parse(&region),
             Err(ApfsError::Malformed { .. })

@@ -33,6 +33,7 @@ impl<'n> FatFile<'n> {
 
     /// Returns `true` if this is a directory.
     #[inline]
+    #[must_use]
     pub fn is_directory(&self) -> bool {
         self.is_directory
     }
@@ -41,6 +42,7 @@ impl<'n> FatFile<'n> {
     ///
     /// For directories, this returns 0.
     #[inline]
+    #[must_use]
     pub fn file_size(&self) -> u32 {
         self.file_size
     }
@@ -49,6 +51,7 @@ impl<'n> FatFile<'n> {
     ///
     /// Returns `None` for FAT12/16 root directory (which is at a fixed location).
     #[inline]
+    #[must_use]
     pub fn first_cluster(&self) -> Option<u32> {
         self.first_cluster
     }
@@ -95,7 +98,7 @@ impl<'n> FatFile<'n> {
         Ok(FatFileValue::new(
             self.fat,
             self.first_cluster,
-            self.file_size as u64,
+            u64::from(self.file_size),
         ))
     }
 }
@@ -108,9 +111,9 @@ mod tests {
     use std::io::Cursor;
 
     /// Minimal in-memory FAT16 image — just enough for `Fat::new` to succeed.
-    /// Layout: bps=512, spc=1, reserved=1, fats=1, root_entries=16, spf16=1,
-    /// total_sectors=20 → first_data_sector = 1+1+1 = 3, data_sectors = 17,
-    /// cluster_count = 17 < 4085 → FAT12.
+    /// Layout: bps=512, spc=1, reserved=1, fats=1, `root_entries=16`, spf16=1,
+    /// `total_sectors=20` → `first_data_sector` = 1+1+1 = 3, `data_sectors` = 17,
+    /// `cluster_count` = 17 < 4085 → FAT12.
     fn minimal_fat_image() -> Vec<u8> {
         let mut img = vec![0u8; 20 * 512];
         img[0x00..0x03].copy_from_slice(&[0xEB, 0x3C, 0x90]);

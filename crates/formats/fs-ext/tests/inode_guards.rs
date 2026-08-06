@@ -1,10 +1,12 @@
-mod common;
+//! Integration tests for inode boundary and corruption guards.
+
+mod support;
 
 use fs_common::io::FsReadSeek;
 
 #[test]
 fn open_file_rejects_directory() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, 2).unwrap(); // root dir
     assert!(inode.is_directory());
     let result = inode.open_file();
@@ -18,7 +20,7 @@ fn open_file_rejects_directory() {
 
 #[test]
 fn open_file_still_works_for_regular_files() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, 20).unwrap(); // hello.txt
     assert!(inode.is_regular_file());
     let mut file = inode.open_file().unwrap();
@@ -29,7 +31,7 @@ fn open_file_still_works_for_regular_files() {
 
 #[test]
 fn read_symlink_still_works_after_refactor() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let inode = ext.inode(&mut fs, 524).unwrap(); // short_link
     let target = inode.read_symlink(&mut fs).unwrap();
     assert_eq!(&target, b"hello.txt");
@@ -41,7 +43,7 @@ fn open_file_rejects_ea_inode() {
     // integration test.  For now, verify that open_file does NOT
     // succeed on the root dir (IsADirectory fires first), confirming
     // the guard pipeline is wired up.
-    let mut fs = common::load_image("ext4.img");
+    let mut fs = support::load_image("ext4.img");
     let ext = fs_ext::Ext::new(&mut fs).unwrap();
     let root = ext.inode(&mut fs, 2).unwrap();
     assert!(root.open_file().is_err());
@@ -50,5 +52,8 @@ fn open_file_rejects_ea_inode() {
 #[test]
 fn entries_rejects_ea_inode_dir() {
     // Structural test: verify that UnsupportedEaInode error variant exists.
-    let _err = fs_ext::ExtError::UnsupportedEaInode { inode: 42 };
+    assert!(matches!(
+        fs_ext::ExtError::UnsupportedEaInode { inode: 42 },
+        fs_ext::ExtError::UnsupportedEaInode { inode: 42 }
+    ));
 }

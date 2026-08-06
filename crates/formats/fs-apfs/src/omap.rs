@@ -66,6 +66,10 @@ bitflags! {
 }
 
 /// On-disk `omap_phys_t` (88 bytes).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the om_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawOmapPhys {
@@ -82,6 +86,10 @@ struct RawOmapPhys {
 }
 
 /// On-disk `omap_val_t` (16 bytes).
+#[allow(
+    clippy::struct_field_names,
+    reason = "the ov_ prefixes preserve the names in Apple's APFS on-disk specification"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawOmapVal {
@@ -265,16 +273,32 @@ mod tests {
         let mut b = vec![0u8; BLK];
         // btn_flags = ROOT | LEAF | FIXED_KV_SIZE.
         b[0x20..0x22].copy_from_slice(&0x0007u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(entries.len() as u32).to_le_bytes()); // btn_nkeys
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(entries.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        ); // btn_nkeys
         let toc_len = entries.len() * 4;
-        b[0x2A..0x2C].copy_from_slice(&(toc_len as u16).to_le_bytes()); // table_space.len
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(toc_len)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        ); // table_space.len
 
         let key_area = BTN_DATA_OFFSET + toc_len;
         let value_end = BLK - BTREE_INFO_SIZE;
         for (i, &(oid, xid, flags, size, paddr)) in entries.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 4;
-            b[toc..toc + 2].copy_from_slice(&((i * 16) as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(((i + 1) * 16) as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(i * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from((i + 1) * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
 
             let ks = key_area + i * 16;
             b[ks..ks + 8].copy_from_slice(&oid.to_le_bytes());
@@ -287,7 +311,11 @@ mod tests {
         }
         // btree_info: bt_key_size 16, bt_val_size 16.
         let info = BLK - BTREE_INFO_SIZE;
-        b[info + 4..info + 8].copy_from_slice(&(BLK as u32).to_le_bytes()); // bt_node_size
+        b[info + 4..info + 8].copy_from_slice(
+            &u32::try_from(BLK)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        ); // bt_node_size
         b[info + 8..info + 12].copy_from_slice(&16u32.to_le_bytes()); // bt_key_size
         b[info + 12..info + 16].copy_from_slice(&16u32.to_le_bytes()); // bt_val_size
         b
@@ -298,9 +326,27 @@ mod tests {
         // Block 0 = omap_phys, block 1 = the mapping tree.
         let mut image = omap_block(1);
         image.extend(omap_tree_block(&[
-            (588, 2101, 0, BLK as u32, 200),
-            (588, 2202, 0, BLK as u32, 300),
-            (588, 2300, 0, BLK as u32, 100),
+            (
+                588,
+                2101,
+                0,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                200,
+            ),
+            (
+                588,
+                2202,
+                0,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                300,
+            ),
+            (
+                588,
+                2300,
+                0,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                100,
+            ),
         ]));
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (omap, Cursor::new(image))
@@ -327,7 +373,12 @@ mod tests {
     fn resolve_exact_transaction() {
         let (omap, mut reader) = spec_example();
         let value = omap
-            .resolve(&mut reader, BLK as u32, Oid(588), Xid(2300))
+            .resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(588),
+                Xid(2300),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(value.paddr, Paddr(100));
@@ -338,7 +389,12 @@ mod tests {
         let (omap, mut reader) = spec_example();
         // No entry at xid 2290; 2202 is the largest xid <= 2290.
         let value = omap
-            .resolve(&mut reader, BLK as u32, Oid(588), Xid(2290))
+            .resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(588),
+                Xid(2290),
+            )
             .unwrap()
             .unwrap();
         assert_eq!(value.paddr, Paddr(300));
@@ -348,9 +404,14 @@ mod tests {
     fn resolve_before_first_transaction_is_none() {
         let (omap, mut reader) = spec_example();
         assert!(
-            omap.resolve(&mut reader, BLK as u32, Oid(588), Xid(2050))
-                .unwrap()
-                .is_none()
+            omap.resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(588),
+                Xid(2050)
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -358,9 +419,14 @@ mod tests {
     fn resolve_unknown_object_is_none() {
         let (omap, mut reader) = spec_example();
         assert!(
-            omap.resolve(&mut reader, BLK as u32, Oid(999), Xid(9999))
-                .unwrap()
-                .is_none()
+            omap.resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(999),
+                Xid(9999)
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -371,21 +437,43 @@ mod tests {
         // the object as gone; a lookup at xid 15 still sees the live entry.
         let mut image = omap_block(1);
         image.extend(omap_tree_block(&[
-            (70, 10, 0, BLK as u32, 555),
-            (70, 20, OmapValFlags::DELETED.bits(), BLK as u32, 777),
+            (
+                70,
+                10,
+                0,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                555,
+            ),
+            (
+                70,
+                20,
+                OmapValFlags::DELETED.bits(),
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                777,
+            ),
         ]));
         let omap = Omap::parse(&image[..BLK]).unwrap();
         let mut reader = Cursor::new(image);
         assert!(
-            omap.resolve(&mut reader, BLK as u32, Oid(70), Xid(25))
-                .unwrap()
-                .is_none()
+            omap.resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(70),
+                Xid(25)
+            )
+            .unwrap()
+            .is_none()
         );
         assert_eq!(
-            omap.resolve(&mut reader, BLK as u32, Oid(70), Xid(15))
-                .unwrap()
-                .unwrap()
-                .paddr,
+            omap.resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(70),
+                Xid(15)
+            )
+            .unwrap()
+            .unwrap()
+            .paddr,
             Paddr(555)
         );
     }
@@ -397,13 +485,18 @@ mod tests {
             70,
             10,
             OmapValFlags::ENCRYPTED.bits() | OmapValFlags::SAVED.bits(),
-            BLK as u32,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
             555,
         )]));
         let omap = Omap::parse(&image[..BLK]).unwrap();
         let mut reader = Cursor::new(image);
         let value = omap
-            .resolve(&mut reader, BLK as u32, Oid(70), Xid(10))
+            .resolve(
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Oid(70),
+                Xid(10),
+            )
             .unwrap()
             .unwrap();
         assert!(value.flags.contains(OmapValFlags::ENCRYPTED));

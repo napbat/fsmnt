@@ -1,7 +1,7 @@
 //! HKDF-SHA512-based key derivation for fscrypt v2.
 //!
 //! Mirrors `fs/crypto/hkdf.c`. Salt = 64 zero bytes; IKM = master key
-//! bytes (length 16..=64); info prefix = "fscrypt\0" || context_byte.
+//! bytes (length 16..=64); info prefix = "fscrypt\0" || `context_byte`.
 
 #![cfg(feature = "fscrypt")]
 
@@ -34,7 +34,7 @@ fn build_info(context: u8, application_info: &[u8]) -> Vec<u8> {
 }
 
 /// Run HKDF-SHA512 with the kernel salt (64 zero bytes), the master key
-/// as IKM, and the given context + application_info.
+/// as IKM, and the given context + `application_info`.
 pub fn derive(
     master_key: &FscryptMasterKey,
     context: u8,
@@ -50,7 +50,7 @@ pub fn derive(
     okm
 }
 
-/// Compute the v2 master_key_identifier from a master key.
+/// Compute the v2 `master_key_identifier` from a master key.
 pub fn key_identifier(master_key: &FscryptMasterKey) -> FscryptKeyIdentifier {
     let okm = derive(master_key, ctx::KEY_IDENTIFIER, &[], 16);
     let mut ident = [0u8; 16];
@@ -58,7 +58,7 @@ pub fn key_identifier(master_key: &FscryptMasterKey) -> FscryptKeyIdentifier {
     FscryptKeyIdentifier(ident)
 }
 
-/// HKDF info layout for the IV_INO_LBLK_* per-mode keys:
+/// HKDF info layout for the `IV_INO_LBLK`_* per-mode keys:
 /// one byte of `mode_num` followed by the 16-byte FS UUID. Kernel
 /// `fs/crypto/keysetup_v2.c::fscrypt_setup_iv_ino_lblk_*_key`.
 fn iv_ino_lblk_info(mode_num: u8, fs_uuid: &[u8; 16]) -> [u8; 17] {
@@ -109,7 +109,7 @@ pub fn derive_direct_key(master_key: &FscryptMasterKey, mode_num: u8, out_len: u
     derive(master_key, ctx::DIRECT_KEY, &[mode_num], out_len)
 }
 
-/// Derive the 16-byte per-FS SipHash key used to hash inode numbers
+/// Derive the 16-byte per-FS `SipHash` key used to hash inode numbers
 /// under an `IV_INO_LBLK_32` policy. Kernel info field is empty.
 pub fn derive_inode_hash_key(master_key: &FscryptMasterKey) -> [u8; 16] {
     let okm = derive(master_key, ctx::INODE_HASH_KEY, &[], 16);
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn per_file_key_matches_kernel_vector() {
         let mk = FscryptMasterKey::from_array([0u8; 64]);
-        let nonce: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let nonce: [u8; 16] = core::array::from_fn(|i| (i).to_le_bytes()[0]);
         let pfk = derive(&mk, ctx::PER_FILE_ENC_KEY, &nonce, 64);
         assert_eq!(pfk, hex_to_bytes(ZERO_KEY_PFK_HEX));
     }
@@ -178,9 +178,9 @@ mod tests {
     const MODE_AES_256_CTS: u8 = 4;
 
     /// HKDF-Expand( extract([0;64], [0;64]),
-    ///   "fscrypt\0" || ctx=3 (DIRECT_KEY) || mode=9 (Adiantum), 32 )
+    ///   "fscrypt\0" || ctx=3 (`DIRECT_KEY`) || mode=9 (Adiantum), 32 )
     /// computed via the Python snippet in plan-issue-154.md (kernel info
-    /// field is just `[mode_num]` — no FS UUID, unlike IV_INO_LBLK_*).
+    /// field is just `[mode_num]` — no FS UUID, unlike `IV_INO_LBLK`_*).
     const REF_DIRECT_KEY_ADIANTUM: &str =
         "46c6805bd158d581cecfbf238c17b823163acfcbf21298ecf14bb1e35d7ca52a";
 

@@ -76,6 +76,7 @@ mod slack_recovery;
 pub mod structured_values;
 mod time;
 mod traverse;
+/// Address, position, cluster, and record-size types used by the parser.
 pub mod types;
 mod upcase_table;
 mod usn_journal;

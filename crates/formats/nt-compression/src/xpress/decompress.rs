@@ -24,7 +24,7 @@ const FLAG_GROUP_SIZE: u32 = 32;
 const INPUT_GUARD: usize = 196;
 
 /// Controls fast-path entry. NOT a bound on match length -- each match
-/// is individually bounds-checked before copy_match_unchecked.
+/// is individually bounds-checked before `copy_match_unchecked`.
 const OUTPUT_GUARD: usize = 256;
 
 /// Decompress XPRESS Plain LZ77 data in strict mode.
@@ -32,6 +32,11 @@ const OUTPUT_GUARD: usize = 256;
 /// Returns the number of bytes written to `output`, or an error if the
 /// input is malformed. The caller must pre-allocate `output` to the
 /// expected decompressed size.
+///
+/// # Errors
+///
+/// Returns an error when the stream is malformed or a match refers outside
+/// the decoded output.
 pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     let mut state = DecompressState::new(input, output.len());
 
@@ -115,12 +120,9 @@ pub fn decompress_lenient(input: &[u8], output: &mut [u8]) -> LenientResult {
     let mut had_errors = false;
 
     while state.out_pos < state.out_len {
-        let flags = match state.read_flag_dword() {
-            Ok(f) => f,
-            Err(_) => {
-                had_errors = true;
-                break;
-            }
+        let Ok(flags) = state.read_flag_dword() else {
+            had_errors = true;
+            break;
         };
         for bit in 0..FLAG_GROUP_SIZE {
             if state.out_pos >= state.out_len {
@@ -130,18 +132,15 @@ pub fn decompress_lenient(input: &[u8], output: &mut [u8]) -> LenientResult {
                 };
             }
             if (flags >> (31 - bit)) & 1 == 0 {
-                match state.read_literal() {
-                    Ok(byte) => {
-                        output[state.out_pos] = byte;
-                        state.out_pos += 1;
-                    }
-                    Err(_) => {
-                        had_errors = true;
-                        return LenientResult {
-                            bytes_written: state.out_pos,
-                            had_errors,
-                        };
-                    }
+                if let Ok(byte) = state.read_literal() {
+                    output[state.out_pos] = byte;
+                    state.out_pos += 1;
+                } else {
+                    had_errors = true;
+                    return LenientResult {
+                        bytes_written: state.out_pos,
+                        had_errors,
+                    };
                 }
             } else {
                 // End-of-stream: match bit set but input exhausted.
@@ -151,24 +150,21 @@ pub fn decompress_lenient(input: &[u8], output: &mut [u8]) -> LenientResult {
                         had_errors,
                     };
                 }
-                match state.read_match() {
-                    Ok((offset, length)) => {
-                        if copy_match(output, state.out_pos, offset, length).is_err() {
-                            had_errors = true;
-                            return LenientResult {
-                                bytes_written: state.out_pos,
-                                had_errors,
-                            };
-                        }
-                        state.out_pos += length;
-                    }
-                    Err(_) => {
+                if let Ok((offset, length)) = state.read_match() {
+                    if copy_match(output, state.out_pos, offset, length).is_err() {
                         had_errors = true;
                         return LenientResult {
                             bytes_written: state.out_pos,
                             had_errors,
                         };
                     }
+                    state.out_pos += length;
+                } else {
+                    had_errors = true;
+                    return LenientResult {
+                        bytes_written: state.out_pos,
+                        had_errors,
+                    };
                 }
             }
         }
@@ -425,16 +421,23 @@ mod tests {
         let base_length = length - 3;
 
         let (field_val, remainder) = if base_length < 7 {
-            (base_length as u16, None)
+            (
+                u16::try_from(base_length).expect("the inline XPRESS length field is three bits"),
+                None,
+            )
         } else {
             (7, Some(base_length - 7))
         };
 
-        let word = (((offset - 1) as u16) << 3) | (field_val & 0x7);
+        let word = (u16::try_from(offset - 1)
+            .expect("synthetic XPRESS offsets are limited to 8192 bytes")
+            << 3)
+            | (field_val & 0x7);
         payload.extend_from_slice(&word.to_le_bytes());
 
         if let Some(rem) = remainder {
-            let nibble_val = rem.min(15) as u8;
+            let nibble_val =
+                u8::try_from(rem.min(15)).expect("the XPRESS nibble extension is four bits");
             if let Some(pos) = nibble_byte.take() {
                 payload[pos] |= nibble_val << 4;
             } else {
@@ -445,11 +448,13 @@ mod tests {
 
             if rem >= 15 {
                 let byte_rem = rem - 15;
-                let byte_val = byte_rem.min(255) as u8;
+                let byte_val = u8::try_from(byte_rem.min(255))
+                    .expect("the XPRESS byte extension is eight bits");
                 payload.push(byte_val);
 
                 if byte_rem >= 255 {
-                    let u16_val = (length - 3) as u16;
+                    let u16_val = u16::try_from(length - 3)
+                        .expect("synthetic XPRESS matches are capped at 65538 bytes");
                     payload.extend_from_slice(&u16_val.to_le_bytes());
                 }
             }
@@ -467,14 +472,19 @@ mod tests {
 
     #[test]
     fn all_literals_32() {
-        let items: Vec<Item> = (0..32).map(|i| Item::Literal(i as u8)).collect();
+        let items: Vec<Item> = (0..32)
+            .map(|i| Item::Literal(u8::try_from(i).expect("the test range is below 256")))
+            .collect();
         let stream = encode_xpress(&items);
 
         let mut out = [0u8; 32];
         let n = decompress(&stream, &mut out).unwrap();
         assert_eq!(n, 32);
         for (i, &byte) in out.iter().enumerate() {
-            assert_eq!(byte, i as u8);
+            assert_eq!(
+                byte,
+                u8::try_from(i).expect("the output buffer is shorter than 256 bytes")
+            );
         }
     }
 
@@ -540,7 +550,9 @@ mod tests {
         // offset=8192, length=3.
         let mut items = Vec::new();
         for i in 0..8192 {
-            items.push(Item::Literal((i & 0xFF) as u8));
+            items.push(Item::Literal(
+                u8::try_from(i & 0xFF).expect("the mask limits the test value to one byte"),
+            ));
         }
         items.push(Item::Match {
             offset: 8192,

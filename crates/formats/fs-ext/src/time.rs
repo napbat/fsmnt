@@ -9,7 +9,7 @@ pub struct ExtTimestamp {
     pub seconds: i64,
     /// Sub-second nanosecond component.
     ///
-    /// Typically in range 0..999_999_999. Out-of-range values from
+    /// Typically in range `0..999_999_999`. Out-of-range values from
     /// malformed extended fields are preserved raw without clamping.
     pub nanoseconds: u32,
 }
@@ -20,7 +20,7 @@ pub struct ExtTimestamp {
 /// Nanoseconds are set to 0 (no extended timestamp fields in Phase 1).
 pub(crate) fn base_timestamp(raw: u32) -> ExtTimestamp {
     ExtTimestamp {
-        seconds: raw as i32 as i64,
+        seconds: i64::from(raw.cast_signed()),
         nanoseconds: 0,
     }
 }
@@ -35,7 +35,7 @@ pub(crate) fn base_timestamp(raw: u32) -> ExtTimestamp {
 /// preserved as-is.
 pub(crate) fn decode_extended_timestamp(base: u32, extra: u32) -> ExtTimestamp {
     ExtTimestamp {
-        seconds: (base as i32 as i64) + (((extra & 0x3) as i64) << 32),
+        seconds: i64::from(base.cast_signed()) + (i64::from(extra & 0x3) << 32),
         nanoseconds: extra >> 2,
     }
 }

@@ -31,6 +31,14 @@ const PKI_HEADER_LEN: usize = 0x1C;
 /// Minimum size of a Certificate Data header (§2.2.2.1.4): five `u32` fields.
 const CERT_HEADER_LEN: usize = 0x14;
 
+fn read_usize(data: &[u8], offset: usize, position: NtfsPosition) -> Result<usize> {
+    let value = read_u32(data, offset, position)?;
+    usize::try_from(value).map_err(|_| NtfsError::InvalidEfsMetadata {
+        position,
+        reason: "32-bit EFS offset or length does not fit the target address space",
+    })
+}
+
 /// How the FEK in a key list entry is wrapped (§2.2.2.1.2, `Flags`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FekEncryptionMethod {
@@ -70,11 +78,11 @@ impl EfsCertificateData {
                 reason: "certificate data smaller than its header",
             });
         }
-        let thumb_off = read_u32(cert, 0x00, position)? as usize;
-        let thumb_len = read_u32(cert, 0x04, position)? as usize;
-        let container_off = read_u32(cert, 0x08, position)? as usize;
-        let provider_off = read_u32(cert, 0x0C, position)? as usize;
-        let display_off = read_u32(cert, 0x10, position)? as usize;
+        let thumb_off = read_usize(cert, 0x00, position)?;
+        let thumb_len = read_usize(cert, 0x04, position)?;
+        let container_off = read_usize(cert, 0x08, position)?;
+        let provider_off = read_usize(cert, 0x0C, position)?;
+        let display_off = read_usize(cert, 0x10, position)?;
 
         let thumbprint = read_slice(cert, thumb_off, thumb_len, position)?.to_vec();
 
@@ -87,21 +95,25 @@ impl EfsCertificateData {
     }
 
     /// The SHA-1 hash of the DER-encoded certificate (`Certificate Thumbprint`).
+    #[must_use]
     pub fn thumbprint(&self) -> &[u8] {
         &self.thumbprint
     }
 
     /// Hint for the key container holding the private key, if recorded.
+    #[must_use]
     pub fn container_name(&self) -> Option<&str> {
         self.container_name.as_deref()
     }
 
     /// Hint for the CSP/KSP provider name, if recorded.
+    #[must_use]
     pub fn provider_name(&self) -> Option<&str> {
         self.provider_name.as_deref()
     }
 
     /// Friendly display name for the certificate, if recorded.
+    #[must_use]
     pub fn display_name(&self) -> Option<&str> {
         self.display_name.as_deref()
     }
@@ -133,7 +145,7 @@ pub struct EfsPublicKeyInfo {
 impl EfsPublicKeyInfo {
     /// Parses Public Key Information; `pki_offset` is relative to `entry`.
     fn parse(entry: &[u8], pki_offset: usize, position: NtfsPosition) -> Result<Self> {
-        let pki_len = read_u32(entry, pki_offset, position)? as usize;
+        let pki_len = read_usize(entry, pki_offset, position)?;
         let pki = read_slice(entry, pki_offset, pki_len, position)?;
         if pki.len() < PKI_HEADER_LEN {
             return Err(NtfsError::InvalidEfsMetadata {
@@ -142,9 +154,9 @@ impl EfsPublicKeyInfo {
             });
         }
 
-        let owner_hint_off = read_u32(pki, 0x04, position)? as usize;
-        let cert_data_len = read_u32(pki, 0x0C, position)? as usize;
-        let cert_data_off = read_u32(pki, 0x10, position)? as usize;
+        let owner_hint_off = read_usize(pki, 0x04, position)?;
+        let cert_data_len = read_usize(pki, 0x0C, position)?;
+        let cert_data_off = read_usize(pki, 0x10, position)?;
 
         let owner_sid = if owner_hint_off == 0 {
             None
@@ -166,11 +178,13 @@ impl EfsPublicKeyInfo {
     }
 
     /// SID hinting at the identity of the key owner, if present.
+    #[must_use]
     pub fn owner_sid(&self) -> Option<&NtfsSid> {
         self.owner_sid.as_ref()
     }
 
     /// Certificate hints (thumbprint, container/provider/display names).
+    #[must_use]
     pub fn certificate(&self) -> &EfsCertificateData {
         &self.certificate
     }
@@ -187,7 +201,7 @@ pub struct EfsKeyListEntry {
 impl EfsKeyListEntry {
     /// Parses a key list entry; `entry_offset` is relative to the metadata.
     fn parse(data: &[u8], entry_offset: usize, position: NtfsPosition) -> Result<(Self, usize)> {
-        let entry_len = read_u32(data, entry_offset, position)? as usize;
+        let entry_len = read_usize(data, entry_offset, position)?;
         if entry_len < ENTRY_HEADER_LEN {
             return Err(NtfsError::InvalidEfsMetadata {
                 position,
@@ -196,9 +210,9 @@ impl EfsKeyListEntry {
         }
         let entry = read_slice(data, entry_offset, entry_len, position)?;
 
-        let pki_offset = read_u32(entry, 0x04, position)? as usize;
-        let fek_len = read_u32(entry, 0x08, position)? as usize;
-        let fek_offset = read_u32(entry, 0x0C, position)? as usize;
+        let pki_offset = read_usize(entry, 0x04, position)?;
+        let fek_len = read_usize(entry, 0x08, position)?;
+        let fek_offset = read_usize(entry, 0x0C, position)?;
         let flags = read_u32(entry, 0x10, position)?;
 
         let encrypted_fek = read_slice(entry, fek_offset, fek_len, position)?.to_vec();
@@ -215,6 +229,7 @@ impl EfsKeyListEntry {
     }
 
     /// How the FEK blob in this entry is wrapped.
+    #[must_use]
     pub fn fek_encryption(&self) -> FekEncryptionMethod {
         self.fek_encryption
     }
@@ -223,11 +238,13 @@ impl EfsKeyListEntry {
     ///
     /// Decrypting it yields the §2.2.2.1.5 `Encrypted FEK` plaintext
     /// structure; that requires the private key and is out of scope here.
+    #[must_use]
     pub fn encrypted_fek(&self) -> &[u8] {
         &self.encrypted_fek
     }
 
     /// Certificate and owner information for the wrapping key.
+    #[must_use]
     pub fn public_key_info(&self) -> &EfsPublicKeyInfo {
         &self.public_key_info
     }
@@ -242,7 +259,7 @@ pub struct EfsKeyList {
 impl EfsKeyList {
     /// Parses a key list starting at `list_offset` within the metadata.
     fn parse(data: &[u8], list_offset: usize, position: NtfsPosition) -> Result<Self> {
-        let count = read_u32(data, list_offset, position)? as usize;
+        let count = read_usize(data, list_offset, position)?;
         // Each entry is at least ENTRY_HEADER_LEN bytes, so a count larger
         // than the buffer itself is corrupt — reject before iterating.
         if count > data.len() {
@@ -268,6 +285,7 @@ impl EfsKeyList {
     }
 
     /// The key list entries, one per authorized user (DDF) or DRA (DRF).
+    #[must_use]
     pub fn entries(&self) -> &[EfsKeyListEntry] {
         &self.entries
     }
@@ -295,8 +313,8 @@ impl EfsMetadataV1 {
         }
 
         let efs_id = read_guid(data, EFS_ID_OFFSET, position)?;
-        let ddf_offset = read_u32(data, DDF_OFFSET_FIELD, position)? as usize;
-        let drf_offset = read_u32(data, DRF_OFFSET_FIELD, position)? as usize;
+        let ddf_offset = read_usize(data, DDF_OFFSET_FIELD, position)?;
+        let drf_offset = read_usize(data, DRF_OFFSET_FIELD, position)?;
 
         let ddf_offset = validate_list_offset(ddf_offset, data, position)?;
         let ddf = EfsKeyList::parse(data, ddf_offset, position)?;
@@ -317,27 +335,32 @@ impl EfsMetadataV1 {
     }
 
     /// The `EFS_Version` header field (1-3 for Version 1 metadata).
+    #[must_use]
     pub fn efs_version(&self) -> u32 {
         self.efs_version
     }
 
     /// The `EFS_ID` GUID of the machine that created the metadata.
+    #[must_use]
     pub fn efs_id(&self) -> &NtfsGuid {
         &self.efs_id
     }
 
     /// The Data Decryption Field — FEKs wrapped for authorized users.
+    #[must_use]
     pub fn ddf(&self) -> &EfsKeyList {
         &self.ddf
     }
 
     /// The Data Recovery Field — FEKs wrapped for Data Recovery Agents,
     /// or `None` when no DRA has been applied to the file.
+    #[must_use]
     pub fn drf(&self) -> Option<&EfsKeyList> {
         self.drf.as_ref()
     }
 
     /// The absolute byte position of the `$EFS` attribute, if known.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         self.position
     }
@@ -367,13 +390,15 @@ mod tests {
     /// Builds Certificate Data: header + thumbprint + optional display name.
     fn build_cert(thumbprint: &[u8], display: Option<&str>) -> Vec<u8> {
         let mut buf = Vec::new();
-        let thumb_off = CERT_HEADER_LEN as u32;
+        let thumb_off = u32::try_from(CERT_HEADER_LEN).expect("test value fits u32");
         let display_off = match display {
-            Some(_) => thumb_off + thumbprint.len() as u32,
+            Some(_) => thumb_off + u32::try_from(thumbprint.len()).expect("test value fits u32"),
             None => 0,
         };
         buf.extend_from_slice(&le32(thumb_off));
-        buf.extend_from_slice(&le32(thumbprint.len() as u32));
+        buf.extend_from_slice(&le32(
+            u32::try_from(thumbprint.len()).expect("test value fits u32"),
+        ));
         buf.extend_from_slice(&le32(0)); // container
         buf.extend_from_slice(&le32(0)); // provider
         buf.extend_from_slice(&le32(display_off));
@@ -390,12 +415,14 @@ mod tests {
     /// Builds Public Key Information wrapping `cert`, with no owner hint.
     fn build_pki(cert: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        let cert_off = PKI_HEADER_LEN as u32;
+        let cert_off = u32::try_from(PKI_HEADER_LEN).expect("test value fits u32");
         let total = PKI_HEADER_LEN + cert.len();
-        buf.extend_from_slice(&le32(total as u32));
+        buf.extend_from_slice(&le32(u32::try_from(total).expect("test value fits u32")));
         buf.extend_from_slice(&le32(0)); // owner hint offset
         buf.extend_from_slice(&le32(3)); // credential type
-        buf.extend_from_slice(&le32(cert.len() as u32));
+        buf.extend_from_slice(&le32(
+            u32::try_from(cert.len()).expect("test value fits u32"),
+        ));
         buf.extend_from_slice(&le32(cert_off));
         buf.extend_from_slice(&[0u8; 8]); // reserved
         buf.extend_from_slice(cert);
@@ -405,13 +432,15 @@ mod tests {
     /// Builds a key list entry wrapping `pki` with FEK blob `fek`.
     fn build_entry(pki: &[u8], fek: &[u8], flags: u32) -> Vec<u8> {
         let mut buf = Vec::new();
-        let pki_off = ENTRY_HEADER_LEN as u32;
+        let pki_off = u32::try_from(ENTRY_HEADER_LEN).expect("test value fits u32");
         let fek_off = ENTRY_HEADER_LEN + pki.len();
         let total = fek_off + fek.len();
-        buf.extend_from_slice(&le32(total as u32));
+        buf.extend_from_slice(&le32(u32::try_from(total).expect("test value fits u32")));
         buf.extend_from_slice(&le32(pki_off));
-        buf.extend_from_slice(&le32(fek.len() as u32));
-        buf.extend_from_slice(&le32(fek_off as u32));
+        buf.extend_from_slice(&le32(
+            u32::try_from(fek.len()).expect("test value fits u32"),
+        ));
+        buf.extend_from_slice(&le32(u32::try_from(fek_off).expect("test value fits u32")));
         buf.extend_from_slice(&le32(flags));
         buf.extend_from_slice(pki);
         buf.extend_from_slice(fek);
@@ -426,7 +455,9 @@ mod tests {
 
         let mut buf = alloc::vec![0u8; V1_HEADER_LEN];
         buf[0x08..0x0C].copy_from_slice(&le32(2)); // EFS_Version 2
-        buf[0x40..0x44].copy_from_slice(&le32(V1_HEADER_LEN as u32)); // DDF offset
+        buf[0x40..0x44].copy_from_slice(&le32(
+            u32::try_from(V1_HEADER_LEN).expect("test value fits u32"),
+        )); // DDF offset
         // DRF offset stays 0 (absent).
         buf.extend_from_slice(&le32(1)); // DDF key list: one entry
         buf.extend_from_slice(&entry);
@@ -517,22 +548,27 @@ mod tests {
         display: &str,
     ) -> Vec<u8> {
         fn utf16(s: &str) -> Vec<u8> {
-            let mut v: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            let mut v: Vec<u8> = s.encode_utf16().flat_map(u16::to_le_bytes).collect();
             v.extend_from_slice(&[0, 0]);
             v
         }
-        let thumb_off = CERT_HEADER_LEN as u32;
+        let thumb_off = u32::try_from(CERT_HEADER_LEN).expect("test value fits u32");
         let container_bytes = utf16(container);
         let provider_bytes = utf16(provider);
         let display_bytes = utf16(display);
 
-        let container_off = thumb_off + thumbprint.len() as u32;
-        let provider_off = container_off + container_bytes.len() as u32;
-        let display_off = provider_off + provider_bytes.len() as u32;
+        let container_off =
+            thumb_off + u32::try_from(thumbprint.len()).expect("test value fits u32");
+        let provider_off =
+            container_off + u32::try_from(container_bytes.len()).expect("test value fits u32");
+        let display_off =
+            provider_off + u32::try_from(provider_bytes.len()).expect("test value fits u32");
 
         let mut buf = Vec::new();
         buf.extend_from_slice(&le32(thumb_off));
-        buf.extend_from_slice(&le32(thumbprint.len() as u32));
+        buf.extend_from_slice(&le32(
+            u32::try_from(thumbprint.len()).expect("test value fits u32"),
+        ));
         buf.extend_from_slice(&le32(container_off));
         buf.extend_from_slice(&le32(provider_off));
         buf.extend_from_slice(&le32(display_off));
@@ -545,15 +581,17 @@ mod tests {
 
     /// Builds Public Key Information wrapping `cert` with an owner SID hint.
     fn build_pki_with_sid(cert: &[u8], sid: &[u8]) -> Vec<u8> {
-        let owner_off = PKI_HEADER_LEN as u32;
-        let cert_off = owner_off + sid.len() as u32;
+        let owner_off = u32::try_from(PKI_HEADER_LEN).expect("test value fits u32");
+        let cert_off = owner_off + u32::try_from(sid.len()).expect("test value fits u32");
         let total = PKI_HEADER_LEN + sid.len() + cert.len();
 
         let mut buf = Vec::new();
-        buf.extend_from_slice(&le32(total as u32));
+        buf.extend_from_slice(&le32(u32::try_from(total).expect("test value fits u32")));
         buf.extend_from_slice(&le32(owner_off)); // owner hint offset (non-zero)
         buf.extend_from_slice(&le32(3)); // credential type
-        buf.extend_from_slice(&le32(cert.len() as u32));
+        buf.extend_from_slice(&le32(
+            u32::try_from(cert.len()).expect("test value fits u32"),
+        ));
         buf.extend_from_slice(&le32(cert_off));
         buf.extend_from_slice(&[0u8; 8]); // reserved
         buf.extend_from_slice(sid);
@@ -581,7 +619,9 @@ mod tests {
 
         let mut buf = alloc::vec![0u8; V1_HEADER_LEN];
         buf[0x08..0x0C].copy_from_slice(&le32(2));
-        buf[0x40..0x44].copy_from_slice(&le32(V1_HEADER_LEN as u32));
+        buf[0x40..0x44].copy_from_slice(&le32(
+            u32::try_from(V1_HEADER_LEN).expect("test value fits u32"),
+        ));
         buf.extend_from_slice(&le32(1)); // one DDF entry
         buf.extend_from_slice(&entry);
 
@@ -605,7 +645,9 @@ mod tests {
 
         let mut buf = alloc::vec![0u8; V1_HEADER_LEN];
         buf[0x08..0x0C].copy_from_slice(&le32(2));
-        buf[0x40..0x44].copy_from_slice(&le32(V1_HEADER_LEN as u32));
+        buf[0x40..0x44].copy_from_slice(&le32(
+            u32::try_from(V1_HEADER_LEN).expect("test value fits u32"),
+        ));
         buf.extend_from_slice(&le32(1));
         buf.extend_from_slice(&entry);
 
@@ -625,23 +667,23 @@ mod tests {
         // EfsMetadataV1::drf accessor.
         let cert = build_cert(&[0x33; 20], None);
         let pki = build_pki(&cert);
-        let ddf_entry = build_entry(&pki, &[0x44; 32], 0);
-        let drf_entry = build_entry(&pki, &[0x66; 16], 1);
+        let decryptor_entry = build_entry(&pki, &[0x44; 32], 0);
+        let recovery_entry = build_entry(&pki, &[0x66; 16], 1);
 
         let mut buf = alloc::vec![0u8; V1_HEADER_LEN];
         buf[0x08..0x0C].copy_from_slice(&le32(2));
-        let ddf_off = V1_HEADER_LEN as u32;
-        buf[0x40..0x44].copy_from_slice(&le32(ddf_off));
+        let decryptors_offset = u32::try_from(V1_HEADER_LEN).expect("test value fits u32");
+        buf[0x40..0x44].copy_from_slice(&le32(decryptors_offset));
 
         // Append DDF key list: count + entry.
         buf.extend_from_slice(&le32(1));
-        buf.extend_from_slice(&ddf_entry);
+        buf.extend_from_slice(&decryptor_entry);
 
         // DRF key list starts here.
-        let drf_off = buf.len() as u32;
-        buf[0x44..0x48].copy_from_slice(&le32(drf_off));
+        let recovery_offset = u32::try_from(buf.len()).expect("test value fits u32");
+        buf[0x44..0x48].copy_from_slice(&le32(recovery_offset));
         buf.extend_from_slice(&le32(1));
-        buf.extend_from_slice(&drf_entry);
+        buf.extend_from_slice(&recovery_entry);
 
         let meta = match NtfsEfsMetadata::parse(&buf, NtfsPosition::none()).unwrap() {
             NtfsEfsMetadata::V1(m) => m,
@@ -679,17 +721,20 @@ mod tests {
     }
 
     /// Builds a PKI of exactly `pki_len` bytes whose cert sub-slice occupies
-    /// the tail. The cert must be at least CERT_HEADER_LEN bytes, so place it
+    /// the tail. The cert must be at least `CERT_HEADER_LEN` bytes, so place it
     /// so that `cert_off + CERT_HEADER_LEN == pki_len`.
     fn build_pki_exact(pki_len: usize) -> Vec<u8> {
         assert!(pki_len >= PKI_HEADER_LEN + CERT_HEADER_LEN || pki_len >= CERT_HEADER_LEN + 8);
         let cert_len = CERT_HEADER_LEN;
         let cert_off = pki_len - cert_len;
         let mut buf = alloc::vec![0u8; pki_len];
-        buf[0x00..0x04].copy_from_slice(&le32(pki_len as u32)); // StructureSize
+        buf[0x00..0x04]
+            .copy_from_slice(&le32(u32::try_from(pki_len).expect("test value fits u32"))); // StructureSize
         buf[0x04..0x08].copy_from_slice(&le32(0)); // owner hint offset = 0
-        buf[0x0C..0x10].copy_from_slice(&le32(cert_len as u32)); // cert_data_len
-        buf[0x10..0x14].copy_from_slice(&le32(cert_off as u32)); // cert_data_off
+        buf[0x0C..0x10]
+            .copy_from_slice(&le32(u32::try_from(cert_len).expect("test value fits u32"))); // cert_data_len
+        buf[0x10..0x14]
+            .copy_from_slice(&le32(u32::try_from(cert_off).expect("test value fits u32"))); // cert_data_off
         buf
     }
 
@@ -717,7 +762,9 @@ mod tests {
         // Asserting the header-size reason kills `< -> ==`.
         let short_len = PKI_HEADER_LEN - 1;
         let mut pki = alloc::vec![0u8; short_len];
-        pki[0x00..0x04].copy_from_slice(&le32(short_len as u32));
+        pki[0x00..0x04].copy_from_slice(&le32(
+            u32::try_from(short_len).expect("test value fits u32"),
+        ));
         let err = EfsPublicKeyInfo::parse(&pki, 0, NtfsPosition::none());
         assert!(matches!(
             err,
@@ -736,10 +783,16 @@ mod tests {
         // guard with "smaller than its header". Asserting the later reason
         // kills `< -> <=`.
         let mut data = alloc::vec![0u8; ENTRY_HEADER_LEN];
-        data[0x00..0x04].copy_from_slice(&le32(ENTRY_HEADER_LEN as u32)); // entry_len == header
+        data[0x00..0x04].copy_from_slice(&le32(
+            u32::try_from(ENTRY_HEADER_LEN).expect("test value fits u32"),
+        )); // entry_len == header
         // pki/fek offsets point past the 20-byte entry slice -> read fails.
-        data[0x04..0x08].copy_from_slice(&le32(ENTRY_HEADER_LEN as u32)); // pki_offset
-        data[0x0C..0x10].copy_from_slice(&le32(ENTRY_HEADER_LEN as u32)); // fek_offset
+        data[0x04..0x08].copy_from_slice(&le32(
+            u32::try_from(ENTRY_HEADER_LEN).expect("test value fits u32"),
+        )); // pki_offset
+        data[0x0C..0x10].copy_from_slice(&le32(
+            u32::try_from(ENTRY_HEADER_LEN).expect("test value fits u32"),
+        )); // fek_offset
         let err = EfsKeyListEntry::parse(&data, 0, NtfsPosition::none());
         assert!(
             matches!(
@@ -756,7 +809,9 @@ mod tests {
         // entry_len = ENTRY_HEADER_LEN - 1 -> `<` true (reject). Kills `< -> ==`.
         let short_len = ENTRY_HEADER_LEN - 1;
         let mut data = alloc::vec![0u8; short_len];
-        data[0x00..0x04].copy_from_slice(&le32(short_len as u32));
+        data[0x00..0x04].copy_from_slice(&le32(
+            u32::try_from(short_len).expect("test value fits u32"),
+        ));
         assert!(EfsKeyListEntry::parse(&data, 0, NtfsPosition::none()).is_err());
     }
 
@@ -770,7 +825,7 @@ mod tests {
         // size". Asserting the error reason distinguishes them.
         let n = 8usize;
         let mut data = alloc::vec![0u8; n];
-        data[0..4].copy_from_slice(&le32(n as u32)); // count == data.len() == 8
+        data[0..4].copy_from_slice(&le32(u32::try_from(n).expect("test value fits u32"))); // count == data.len() == 8
         let err = EfsKeyList::parse(&data, 0, NtfsPosition::none());
         match err {
             Err(NtfsError::InvalidEfsMetadata { reason, .. }) => {
@@ -789,7 +844,7 @@ mod tests {
         // by exercising the strictly-greater side of the boundary.
         let n = 4usize;
         let mut data = alloc::vec![0u8; n];
-        data[0..4].copy_from_slice(&le32((n + 1) as u32)); // count = 5 > 4
+        data[0..4].copy_from_slice(&le32(u32::try_from(n + 1).expect("test value fits u32"))); // count = 5 > 4
         let err = EfsKeyList::parse(&data, 0, NtfsPosition::none());
         assert!(matches!(
             err,

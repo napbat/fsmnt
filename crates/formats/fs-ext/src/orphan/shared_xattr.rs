@@ -167,7 +167,7 @@ pub(crate) fn plan_shared_xattr_blocks<T: Read + Seek>(
             ));
         }
 
-        let count = hosts.len() as u32;
+        let count = u32::try_from(hosts.len()).unwrap_or(u32::MAX);
         if count > h_refcount {
             return Err(SharedXattrPlanError::Stop(
                 OrphanStopReason::SharedXattrBlockRefcountZero {
@@ -260,7 +260,7 @@ mod tests {
         overlay: &mut T,
     ) -> BTreeMap<u64, alloc::vec::Vec<u32>> {
         let mut map: BTreeMap<u64, alloc::vec::Vec<u32>> = BTreeMap::new();
-        let head = ext.last_orphan(overlay).expect("read s_last_orphan");
+        let head = Ext::read_last_orphan(overlay).expect("read s_last_orphan");
         let mut current = head;
         let mut seen = alloc::collections::BTreeSet::new();
 
@@ -385,7 +385,7 @@ mod tests {
         cursor: &mut std::io::Cursor<alloc::vec::Vec<u8>>,
     ) -> alloc::vec::Vec<u8> {
         use crate::io::SeekFrom;
-        let sb_block: u64 = if ext.block_size() > 1024 { 0 } else { 1 };
+        let sb_block: u64 = u64::from(ext.block_size() <= 1024);
         let mut sb_bytes = alloc::vec![0u8; ext.block_size() as usize];
         cursor
             .seek(SeekFrom::Start(sb_block * u64::from(ext.block_size())))
@@ -457,9 +457,12 @@ mod tests {
         h_refcount: u32,
     ) -> std::io::Cursor<alloc::vec::Vec<u8>> {
         let block_size = 4096usize;
-        let total = ((block_nr as usize) + 2) * block_size;
+        let total = ((usize::try_from(block_nr).expect("the test fixture value fits in usize"))
+            + 2)
+            * block_size;
         let mut bytes = alloc::vec![0u8; total];
-        let base = (block_nr as usize) * block_size;
+        let base =
+            (usize::try_from(block_nr).expect("the test fixture value fits in usize")) * block_size;
         bytes[base..base + 4].copy_from_slice(&crate::xattr::XATTR_MAGIC.to_le_bytes());
         bytes[base + 4..base + 8].copy_from_slice(&h_refcount.to_le_bytes());
         bytes[base + 8..base + 12].copy_from_slice(&1u32.to_le_bytes()); // h_blocks = 1

@@ -1,11 +1,11 @@
 //! Htree (hash-tree) accelerated directory lookup for ext3/ext4.
 //!
-//! Provides `htree_lookup()` which navigates the on-disk dx_root and
-//! dx_node structures to locate a directory entry by name hash, then
+//! Provides `htree_lookup()` which navigates the on-disk `dx_root` and
+//! `dx_node` structures to locate a directory entry by name hash, then
 //! scans the target leaf block for a byte-exact name match.
 //!
 //! Returns `None` for any condition that should fall back to sequential
-//! scan (unsupported hash version, casefold, missing INDEX_FL, etc).
+//! scan (unsupported hash version, casefold, missing `INDEX_FL`, etc).
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -22,7 +22,7 @@ use crate::inode::{ExtInode, InodeFlags};
 use crate::io::{Read, Seek, SeekFrom};
 use crate::traverse::{ExtLookupEntry, resolve_kind};
 
-/// On-disk count/limit header at the start of a dx_entry array.
+/// On-disk count/limit header at the start of a `dx_entry` array.
 ///
 /// At offset 0x20 in block 0 (the root), this holds:
 /// - `limit`: max entries the node can hold
@@ -41,7 +41,7 @@ const _: () = assert!(
     "DxCountLimit must be exactly 8 bytes"
 );
 
-/// On-disk dx_entry: hash + child block pointer (8 bytes).
+/// On-disk `dx_entry`: hash + child block pointer (8 bytes).
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 struct RawDxEntry {
@@ -111,21 +111,20 @@ pub(crate) fn htree_lookup<R: Read + Seek>(
 
     match htree_lookup_inner(ext, r, inode, &hash_name, &match_name, filenames_cipher) {
         Ok(Some(entry)) => Some(Ok(entry)),
-        Ok(None) => None,
         // Checksum/corruption errors and fscrypt policy/key/mode errors
         // propagate — sequential scan must not silently bypass detected
         // on-disk corruption nor downgrade fscrypt fail-closed semantics
         // (e.g. v1 + casefold or unsupported flag/mode combinations) to
         // a successful unencrypted-style lookup.
         Err(
-            e @ ExtError::InvalidDirectoryEntry { .. }
-            | e @ ExtError::InvalidExtentHeader { .. }
-            | e @ ExtError::InvalidFscryptPolicy { .. }
-            | e @ ExtError::UnsupportedFscryptMode { .. }
-            | e @ ExtError::MissingFscryptKey { .. },
+            e @ (ExtError::InvalidDirectoryEntry { .. }
+            | ExtError::InvalidExtentHeader { .. }
+            | ExtError::InvalidFscryptPolicy { .. }
+            | ExtError::UnsupportedFscryptMode { .. }
+            | ExtError::MissingFscryptKey { .. }),
         ) => Some(Err(e)),
         // Other htree structural failures → fallback to sequential
-        Err(_) => None,
+        Ok(None) | Err(_) => None,
     }
 }
 
@@ -171,7 +170,7 @@ pub(crate) fn htree_lookup<R: Read + Seek>(
 
 /// Inner htree lookup that returns `Result<Option<ExtLookupEntry>>`.
 ///
-/// `hash_name` is the name bytes to hash (casefolded for CASEFOLD_FL).
+/// `hash_name` is the name bytes to hash (casefolded for `CASEFOLD_FL`).
 /// `match_name` is the original name for byte-exact leaf block matching
 /// (or casefolded name for case-insensitive matching).
 /// `filenames_cipher` is forwarded to the leaf scanner so on-disk
@@ -209,14 +208,11 @@ fn htree_lookup_inner<R: Read + Seek>(
         use zeroize::Zeroize;
         k.zeroize();
     }
-    let hash = match hash_result {
-        Some(h) => h,
-        None => {
-            return Err(ExtError::InvalidDirectoryEntry {
-                inode: inode.inode_number(),
-                offset: 0x1C,
-            });
-        }
+    let Some(hash) = hash_result else {
+        return Err(ExtError::InvalidDirectoryEntry {
+            inode: inode.inode_number(),
+            offset: 0x1C,
+        });
     };
 
     // Validate dx_root checksum
@@ -340,7 +336,7 @@ fn htree_lookup_inner<R: Read + Seek>(
     scan_leaf_block(ext, r, inode, leaf_block, match_name)
 }
 
-/// Parse and validate the dx_root header fields used by lookup.
+/// Parse and validate the `dx_root` header fields used by lookup.
 fn parse_dx_root_header(block0: &[u8], dir_inode: u32, max_depth: u8) -> Result<DxRootHeader> {
     if block0.len() < 0x28 {
         return Err(ExtError::InvalidDirectoryEntry {
@@ -474,11 +470,11 @@ fn read_dir_block<R: Read + Seek>(
     Ok(buf)
 }
 
-/// Binary search the dx_entry array to find which child block contains
+/// Binary search the `dx_entry` array to find which child block contains
 /// entries with the given target hash.
 ///
-/// The dx_entry array is sorted by hash ascending. We find the last
-/// entry whose hash <= target_hash. If no entry qualifies, the
+/// The `dx_entry` array is sorted by hash ascending. We find the last
+/// entry whose hash <= `target_hash`. If no entry qualifies, the
 /// leftmost child block is the target.
 fn find_target_block(
     block_buf: &[u8],
@@ -516,7 +512,7 @@ fn find_target_block(
     Ok(result_block)
 }
 
-/// Navigate interior dx_node levels to reach the leaf block.
+/// Navigate interior `dx_node` levels to reach the leaf block.
 fn navigate_interior<R: Read + Seek>(
     ext: &Ext,
     r: &mut R,
@@ -754,10 +750,10 @@ mod tests {
     use super::*;
     use crate::hash::dx_hash;
 
-    /// Build a minimal dx_root block (block 0 of an htree directory).
+    /// Build a minimal `dx_root` block (block 0 of an htree directory).
     ///
-    /// Sets the dx_root_info fields at offsets 0x18-0x1F and a minimal
-    /// DxCountLimit at 0x20.
+    /// Sets the `dx_root_info` fields at offsets 0x18-0x1F and a minimal
+    /// `DxCountLimit` at 0x20.
     fn make_dx_root(block_size: usize, indirect_levels: u8) -> Vec<u8> {
         let mut block = vec![0u8; block_size];
         // reserved_zero at 0x18 = 0 (already zeroed)
@@ -771,7 +767,7 @@ mod tests {
         block
     }
 
-    /// Verify that depth 3 is only accepted when INCOMPAT_LARGEDIR is set.
+    /// Verify that depth 3 is only accepted when `INCOMPAT_LARGEDIR` is set.
     ///
     /// Without LARGEDIR, the maximum is 2 (standard ext4).
     /// With LARGEDIR, the maximum is 3.
@@ -828,7 +824,7 @@ mod tests {
     fn casefold_produces_same_hash_for_different_case() {
         // For ASCII names, casefolding lowercases. The hash of the
         // casefolded form should be identical regardless of input case.
-        let seed = [0x776bcb4a, 0xb042dd57, 0x70fd0fae, 0xda77dd04];
+        let seed = [0x776b_cb4a, 0xb042_dd57, 0x70fd_0fae, 0xda77_dd04];
         let hash_version = 4u8; // half-MD4 unsigned
 
         let lower = crate::casefold::casefold_for_hash(b"Hello.TXT").unwrap();

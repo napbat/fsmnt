@@ -50,7 +50,7 @@ impl<'n> FatFileValue<'n> {
     }
 
     /// Returns a wrapper that implements `Read + Seek` by borrowing the filesystem reader.
-    pub fn attach<'a, T>(self, fs: &'a mut T) -> fs_common::io::Attached<'a, Self, T>
+    pub fn attach<T>(self, fs: &mut T) -> fs_common::io::Attached<'_, Self, T>
     where
         T: Read + Seek,
     {
@@ -87,17 +87,14 @@ impl<'n> FatFileValue<'n> {
                 return Err(FatError::ClusterChainLoop { max_clusters });
             }
 
-            match self.fat.next_cluster(fs, current)? {
-                Some(next) => {
-                    self.current_cluster = Some(next);
-                    self.position_in_cluster = 0;
-                    self.clusters_traversed += 1;
-                    Ok(true)
-                }
-                None => {
-                    self.current_cluster = None;
-                    Ok(false)
-                }
+            if let Some(next) = self.fat.next_cluster(fs, current)? {
+                self.current_cluster = Some(next);
+                self.position_in_cluster = 0;
+                self.clusters_traversed += 1;
+                Ok(true)
+            } else {
+                self.current_cluster = None;
+                Ok(false)
             }
         } else {
             Ok(false)
@@ -135,7 +132,7 @@ impl<'n> FatFileValue<'n> {
     // least `cluster_size` per iteration).
     #[cfg_attr(test, mutants::skip)]
     fn cluster_step_for_advance(&self) -> u64 {
-        self.fat.cluster_size() as u64 - self.position_in_cluster as u64
+        u64::from(self.fat.cluster_size()) - u64::from(self.position_in_cluster)
     }
 
     /// Seeks to a position, possibly traversing the cluster chain from the start.
@@ -143,7 +140,7 @@ impl<'n> FatFileValue<'n> {
     where
         T: Read + Seek,
     {
-        let cluster_size = self.fat.cluster_size() as u64;
+        let cluster_size = u64::from(self.fat.cluster_size());
 
         // Clamp to data size
         let target_pos = target_pos.min(self.data_size);
@@ -170,7 +167,8 @@ impl<'n> FatFileValue<'n> {
         }
 
         // Set position within the cluster
-        self.position_in_cluster = (target_pos % cluster_size) as u32;
+        self.position_in_cluster =
+            u32::try_from(target_pos % cluster_size).map_err(|_| FatError::BpbOverflow)?;
         self.stream_position = target_pos;
 
         Ok(())
@@ -203,13 +201,11 @@ impl<R: Read + Seek> FsReadSeek<R> for FatFileValue<'_> {
             };
 
             let remaining_in_cluster = cluster_size - self.position_in_cluster;
-            let remaining_in_file = self.remaining() as usize;
+            let remaining_in_file = usize::try_from(self.remaining()).unwrap_or(usize::MAX);
+            let remaining_in_cluster = usize::try_from(remaining_in_cluster).unwrap_or(usize::MAX);
 
             // Calculate how much we can read
-            let to_read = buf
-                .len()
-                .min(remaining_in_cluster as usize)
-                .min(remaining_in_file);
+            let to_read = buf.len().min(remaining_in_cluster).min(remaining_in_file);
 
             if to_read == 0 {
                 // At cluster boundary, advance to next cluster and retry
@@ -220,15 +216,17 @@ impl<R: Read + Seek> FsReadSeek<R> for FatFileValue<'_> {
             }
 
             // Seek to the correct position in the underlying stream
-            let disk_offset = self.fat.cluster_offset(cluster)? + self.position_in_cluster as u64;
+            let disk_offset =
+                self.fat.cluster_offset(cluster)? + u64::from(self.position_in_cluster);
             fs.seek(SeekFrom::Start(disk_offset))?;
 
             // Read the data
             let bytes_read = fs.read(&mut buf[..to_read])?;
 
             // Update position
-            self.position_in_cluster += bytes_read as u32;
-            self.stream_position += bytes_read as u64;
+            self.position_in_cluster +=
+                u32::try_from(bytes_read).map_err(|_| FatError::BpbOverflow)?;
+            self.stream_position += u64::try_from(bytes_read).map_err(|_| FatError::BpbOverflow)?;
 
             // If we've reached the end of this cluster, advance to the next
             if self.position_in_cluster >= cluster_size {
@@ -244,16 +242,16 @@ impl<R: Read + Seek> FsReadSeek<R> for FatFileValue<'_> {
             SeekFrom::Start(n) => n,
             SeekFrom::End(n) => {
                 if n >= 0 {
-                    self.data_size.saturating_add(n as u64)
+                    self.data_size.saturating_add(n.unsigned_abs())
                 } else {
-                    self.data_size.saturating_sub((-n) as u64)
+                    self.data_size.saturating_sub(n.unsigned_abs())
                 }
             }
             SeekFrom::Current(n) => {
                 if n >= 0 {
-                    self.stream_position.saturating_add(n as u64)
+                    self.stream_position.saturating_add(n.unsigned_abs())
                 } else {
-                    self.stream_position.saturating_sub((-n) as u64)
+                    self.stream_position.saturating_sub(n.unsigned_abs())
                 }
             }
         };
@@ -343,7 +341,7 @@ mod tests {
         // Build a deterministic 1200-byte payload: 0..255 repeated.
         let mut payload: Vec<u8> = Vec::with_capacity(1200);
         for i in 0..1200 {
-            payload.push((i % 251) as u8); // 251 keeps adjacent bytes distinct
+            payload.push(u8::try_from(i % 251).expect("the remainder is at most 250"));
         }
 
         // Cluster 2: bytes 0..512

@@ -46,6 +46,7 @@ pub struct ExFatTimestamp {
 impl ExFatTimestamp {
     /// Creates a new timestamp with all four components.
     #[inline]
+    #[must_use]
     pub const fn new(date: u16, time: u16, ten_ms: u8, utc_offset: u8) -> Self {
         Self {
             time,
@@ -60,6 +61,7 @@ impl ExFatTimestamp {
     ///
     /// Useful for access timestamps that lack the 10ms field.
     #[inline]
+    #[must_use]
     pub const fn from_date_time(date: u16, time: u16) -> Self {
         Self {
             time,
@@ -75,21 +77,24 @@ impl ExFatTimestamp {
 
     /// Returns the year (1980-2107).
     #[inline]
+    #[must_use]
     pub const fn year(&self) -> u16 {
         1980 + ((self.date >> 9) & 0x7F)
     }
 
     /// Returns the month (0-12, raw extraction from date field).
     #[inline]
+    #[must_use]
     pub const fn month(&self) -> u8 {
-        ((self.date >> 5) & 0x0F) as u8
+        ((self.date >> 5) & 0x0F).to_le_bytes()[0]
     }
 
     /// Returns the day of the month (0-31, raw extraction from
     /// date field).
     #[inline]
+    #[must_use]
     pub const fn day(&self) -> u8 {
-        (self.date & 0x1F) as u8
+        self.date.to_le_bytes()[0] & 0x1F
     }
 
     // --------------------------------------------------------
@@ -98,14 +103,16 @@ impl ExFatTimestamp {
 
     /// Returns the hour (0-23).
     #[inline]
+    #[must_use]
     pub const fn hour(&self) -> u8 {
-        ((self.time >> 11) & 0x1F) as u8
+        ((self.time >> 11) & 0x1F).to_le_bytes()[0]
     }
 
     /// Returns the minute (0-59).
     #[inline]
+    #[must_use]
     pub const fn minute(&self) -> u8 {
-        ((self.time >> 5) & 0x3F) as u8
+        ((self.time >> 5) & 0x3F).to_le_bytes()[0]
     }
 
     /// Returns the second (0-59).
@@ -113,8 +120,9 @@ impl ExFatTimestamp {
     /// The base DOS time stores seconds / 2 (0-29). If the 10ms
     /// increment is >= 100 the odd second flag is set, adding 1.
     #[inline]
+    #[must_use]
     pub const fn second(&self) -> u8 {
-        let base = ((self.time & 0x1F) * 2) as u8;
+        let base = ((self.time & 0x1F) * 2).to_le_bytes()[0];
         if self.ten_ms >= 100 { base + 1 } else { base }
     }
 
@@ -123,13 +131,14 @@ impl ExFatTimestamp {
     /// After extracting the odd-second flag from the 10ms field,
     /// the remainder is multiplied by 10 to produce milliseconds.
     #[inline]
+    #[must_use]
     pub const fn millisecond(&self) -> u16 {
         let remainder = if self.ten_ms >= 100 {
             self.ten_ms - 100
         } else {
             self.ten_ms
         };
-        (remainder as u16) * 10
+        u16::from_le_bytes([remainder, 0]) * 10
     }
 
     // --------------------------------------------------------
@@ -138,6 +147,7 @@ impl ExFatTimestamp {
 
     /// Returns the raw 10-millisecond increment value (0-199).
     #[inline]
+    #[must_use]
     pub const fn ten_ms_increment(&self) -> u8 {
         self.ten_ms
     }
@@ -148,6 +158,7 @@ impl ExFatTimestamp {
 
     /// Returns `true` if the UTC offset field is valid (bit 7 set).
     #[inline]
+    #[must_use]
     pub const fn utc_offset_valid(&self) -> bool {
         self.utc_offset & 0x80 != 0
     }
@@ -165,22 +176,25 @@ impl ExFatTimestamp {
     // identical bit patterns. The `| → ^` mutation is therefore
     // observationally equivalent on every possible input.
     #[cfg_attr(test, mutants::skip)]
+    #[must_use]
     pub const fn utc_offset_minutes(&self) -> Option<i16> {
         if !self.utc_offset_valid() {
             return None;
         }
-        let raw = (self.utc_offset & 0x7F) as i8;
-        let signed = if raw & 0x40 != 0 {
+        let raw = self.utc_offset & 0x7F;
+        let signed_bits = if raw & 0x40 != 0 {
             // Sign-extend: set bits 7..6 to 1
-            (raw as u8 | !0x7F) as i8
+            raw | !0x7F
         } else {
             raw
         };
-        Some(signed as i16 * 15)
+        let sign_extension = if signed_bits & 0x80 != 0 { 0xFF } else { 0 };
+        Some(i16::from_le_bytes([signed_bits, sign_extension]) * 15)
     }
 
     /// Returns the raw UTC offset byte for forensic analysis.
     #[inline]
+    #[must_use]
     pub const fn utc_offset_raw(&self) -> u8 {
         self.utc_offset
     }
@@ -191,12 +205,14 @@ impl ExFatTimestamp {
 
     /// Returns the raw DOS date value.
     #[inline]
+    #[must_use]
     pub const fn raw_date(&self) -> u16 {
         self.date
     }
 
     /// Returns the raw DOS time value.
     #[inline]
+    #[must_use]
     pub const fn raw_time(&self) -> u16 {
         self.time
     }
@@ -212,20 +228,21 @@ impl ExFatTimestamp {
     /// date or time components are out of range (e.g. month = 0).
     #[cfg(feature = "chrono")]
     #[cfg_attr(docsrs, doc(cfg(feature = "chrono")))]
+    #[must_use]
     pub fn to_chrono(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-        let offset_secs = self.utc_offset_minutes().unwrap_or(0) as i32 * 60;
+        let offset_secs = i32::from(self.utc_offset_minutes().unwrap_or(0)) * 60;
         let fo = chrono::FixedOffset::east_opt(offset_secs)?;
 
         let nd = chrono::NaiveDate::from_ymd_opt(
-            self.year() as i32,
-            self.month() as u32,
-            self.day() as u32,
+            i32::from(self.year()),
+            u32::from(self.month()),
+            u32::from(self.day()),
         )?;
         let nt = chrono::NaiveTime::from_hms_milli_opt(
-            self.hour() as u32,
-            self.minute() as u32,
-            self.second() as u32,
-            self.millisecond() as u32,
+            u32::from(self.hour()),
+            u32::from(self.minute()),
+            u32::from(self.second()),
+            u32::from(self.millisecond()),
         )?;
         let ndt = chrono::NaiveDateTime::new(nd, nt);
 
@@ -239,12 +256,14 @@ impl ExFatTimestamp {
     /// components are out of range.
     #[cfg(feature = "time")]
     #[cfg_attr(docsrs, doc(cfg(feature = "time")))]
+    #[must_use]
     pub fn to_time(&self) -> Option<time::OffsetDateTime> {
-        let offset_secs = self.utc_offset_minutes().unwrap_or(0) as i32 * 60;
+        let offset_secs = i32::from(self.utc_offset_minutes().unwrap_or(0)) * 60;
         let uo = time::UtcOffset::from_whole_seconds(offset_secs).ok()?;
 
         let month = time::Month::try_from(self.month()).ok()?;
-        let date = time::Date::from_calendar_date(self.year() as i32, month, self.day()).ok()?;
+        let date =
+            time::Date::from_calendar_date(i32::from(self.year()), month, self.day()).ok()?;
         let t = time::Time::from_hms_milli(
             self.hour(),
             self.minute(),
@@ -271,8 +290,8 @@ mod tests {
         // ten_ms: 50 (0.500s = 50 * 10ms, second is even)
         // UTC+5:30 = 330min / 15 = 22 quarter-hours
         // utc_offset: 0x80 | 22 = 0x96
-        let date: u16 = (44 << 9) | (6 << 5) | 15;
-        let time: u16 = (14 << 11) | (30 << 5) | 11;
+        let date: u16 = (44 << 9) | (6 << 5) | 0x0F;
+        let time: u16 = (14 << 11) | (30 << 5) | 0x0B;
         let ts = ExFatTimestamp::new(date, time, 50, 0x96);
 
         assert_eq!(ts.year(), 2024);
@@ -289,8 +308,8 @@ mod tests {
         // ten_ms = 150 means odd second (1) + 50 * 10ms = 500ms
         // Base seconds from time word: 22 (11 * 2), odd second
         // adds 1 -> 23
-        let date: u16 = (44 << 9) | (6 << 5) | 15;
-        let time: u16 = (14 << 11) | (30 << 5) | 11;
+        let date: u16 = (44 << 9) | (6 << 5) | 0x0F;
+        let time: u16 = (14 << 11) | (30 << 5) | 0x0B;
         let ts = ExFatTimestamp::new(date, time, 150, 0);
 
         assert_eq!(ts.second(), 23); // 11*2 + 1 = 23
@@ -352,8 +371,8 @@ mod tests {
         use chrono::{Datelike, Timelike};
 
         // 2024-06-15 14:30:22.500 UTC+5:30
-        let date: u16 = (44 << 9) | (6 << 5) | 15;
-        let time: u16 = (14 << 11) | (30 << 5) | 11;
+        let date: u16 = (44 << 9) | (6 << 5) | 0x0F;
+        let time: u16 = (14 << 11) | (30 << 5) | 0x0B;
         let ts = ExFatTimestamp::new(date, time, 50, 0x96);
 
         let dt = ts.to_chrono().expect("valid chrono DateTime");
@@ -376,8 +395,8 @@ mod tests {
         use chrono::Timelike;
 
         // Invalid UTC offset (bit 7 clear)
-        let date: u16 = (44 << 9) | (6 << 5) | 15;
-        let time: u16 = (14 << 11) | (30 << 5) | 11;
+        let date: u16 = (44 << 9) | (6 << 5) | 0x0F;
+        let time: u16 = (14 << 11) | (30 << 5) | 0x0B;
         let ts = ExFatTimestamp::new(date, time, 50, 0x00);
 
         let dt = ts.to_chrono().expect("valid chrono DateTime");
@@ -397,8 +416,8 @@ mod tests {
     #[test]
     fn time_conversion_with_utc_offset() {
         // 2024-06-15 14:30:22.500 UTC+5:30
-        let date: u16 = (44 << 9) | (6 << 5) | 15;
-        let time: u16 = (14 << 11) | (30 << 5) | 11;
+        let date: u16 = (44 << 9) | (6 << 5) | 0x0F;
+        let time: u16 = (14 << 11) | (30 << 5) | 0x0B;
         let ts = ExFatTimestamp::new(date, time, 50, 0x96);
 
         let odt = ts.to_time().expect("valid time::OffsetDateTime");
@@ -432,8 +451,8 @@ mod tests {
     #[test]
     fn time_conversion_without_utc_offset() {
         // Invalid UTC offset (bit 7 clear)
-        let date: u16 = (44 << 9) | (6 << 5) | 15;
-        let time: u16 = (14 << 11) | (30 << 5) | 11;
+        let date: u16 = (44 << 9) | (6 << 5) | 0x0F;
+        let time: u16 = (14 << 11) | (30 << 5) | 0x0B;
         let ts = ExFatTimestamp::new(date, time, 50, 0x00);
 
         let odt = ts.to_time().expect("valid time::OffsetDateTime");

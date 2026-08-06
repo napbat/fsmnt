@@ -25,7 +25,7 @@ struct IndexRootHeader {
     clusters_per_index_record: i8,
 }
 
-/// Structure of an $INDEX_ROOT attribute.
+/// Structure of an $`INDEX_ROOT` attribute.
 ///
 /// This attribute describes the top-level nodes of a B-tree.
 /// The sub-nodes are managed via [`NtfsIndexAllocation`].
@@ -33,7 +33,7 @@ struct IndexRootHeader {
 /// NTFS uses B-trees for describing directories (as indexes of [`NtfsFileName`]s), looking up Object IDs,
 /// Reparse Points, and Security Descriptors, to just name a few.
 ///
-/// An $INDEX_ROOT attribute is always resident.
+/// An $`INDEX_ROOT` attribute is always resident.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/attributes/index_root.html>
 ///
@@ -55,8 +55,9 @@ impl<'f> NtfsIndexRoot<'f> {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::IndexRoot,
-                expected: INDEX_ROOT_HEADER_SIZE as u64,
-                actual: slice.len() as u64,
+                expected: u64::try_from(INDEX_ROOT_HEADER_SIZE)
+                    .expect("the fixed index-root header size fits in u64"),
+                actual: u64::try_from(slice.len()).unwrap_or(u64::MAX),
             });
         }
 
@@ -67,6 +68,11 @@ impl<'f> NtfsIndexRoot<'f> {
     }
 
     /// Returns an iterator over all top-level nodes of the B-tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the on-disk index entry offsets or sizes do not
+    /// describe a valid range within the index root.
     pub fn entries<E>(&self) -> Result<NtfsIndexNodeEntries<'f, E>>
     where
         E: NtfsIndexEntryType,
@@ -78,8 +84,10 @@ impl<'f> NtfsIndexRoot<'f> {
     }
 
     fn entries_range_and_position(&self) -> (Range<usize>, NtfsPosition) {
-        let start = INDEX_ROOT_HEADER_SIZE + self.index_entries_offset() as usize;
-        let end = INDEX_ROOT_HEADER_SIZE + self.index_data_size() as usize;
+        let start = INDEX_ROOT_HEADER_SIZE
+            .saturating_add(usize::try_from(self.index_entries_offset()).unwrap_or(usize::MAX));
+        let end = INDEX_ROOT_HEADER_SIZE
+            .saturating_add(usize::try_from(self.index_data_size()).unwrap_or(usize::MAX));
         let position = self.position + start;
 
         (start..end, position)
@@ -101,9 +109,12 @@ impl<'f> NtfsIndexRoot<'f> {
     /// When files are deleted from a directory, their index entries are removed from the B-tree
     /// but the data is **not zeroed**. This slack space may contain recoverable file names,
     /// timestamps, and MFT references.
+    #[must_use]
     pub fn slack_data(&self) -> &[u8] {
-        let start = INDEX_ROOT_HEADER_SIZE + self.index_data_size() as usize;
-        let end = INDEX_ROOT_HEADER_SIZE + self.index_allocated_size() as usize;
+        let start = INDEX_ROOT_HEADER_SIZE
+            .saturating_add(usize::try_from(self.index_data_size()).unwrap_or(usize::MAX));
+        let end = INDEX_ROOT_HEADER_SIZE
+            .saturating_add(usize::try_from(self.index_allocated_size()).unwrap_or(usize::MAX));
         let start = start.min(self.slice.len());
         let end = end.min(self.slice.len());
         if start >= end {
@@ -113,21 +124,25 @@ impl<'f> NtfsIndexRoot<'f> {
     }
 
     /// Byte position on disk where slack space starts.
+    #[must_use]
     pub fn slack_position(&self) -> NtfsPosition {
-        let start = INDEX_ROOT_HEADER_SIZE + self.index_data_size() as usize;
+        let start = INDEX_ROOT_HEADER_SIZE
+            .saturating_add(usize::try_from(self.index_data_size()).unwrap_or(usize::MAX));
         self.position + start
     }
 
     /// Returns the allocated size of this NTFS Index Root, in bytes.
+    #[must_use]
     pub fn index_allocated_size(&self) -> u32 {
         let start = INDEX_ROOT_HEADER_SIZE + offset_of!(IndexNodeHeader, allocated_size);
-        u32::from_le_bytes(*self.slice[start..].first_chunk().unwrap())
+        self.read_u32(start)
     }
 
     /// Returns the size actually used by index data within this NTFS Index Root, in bytes.
+    #[must_use]
     pub fn index_data_size(&self) -> u32 {
         let start = INDEX_ROOT_HEADER_SIZE + offset_of!(IndexNodeHeader, index_size);
-        u32::from_le_bytes(*self.slice[start..].first_chunk().unwrap())
+        self.read_u32(start)
     }
 
     // mutants::skip: `entries_offset` is the first field of IndexNodeHeader,
@@ -136,26 +151,36 @@ impl<'f> NtfsIndexRoot<'f> {
     #[cfg_attr(test, mutants::skip)]
     fn index_entries_offset(&self) -> u32 {
         let start = INDEX_ROOT_HEADER_SIZE + offset_of!(IndexNodeHeader, entries_offset);
-        u32::from_le_bytes(*self.slice[start..].first_chunk().unwrap())
+        self.read_u32(start)
     }
 
     /// Returns the size of a single Index Record, in bytes.
+    #[must_use]
     pub fn index_record_size(&self) -> u32 {
         let start = offset_of!(IndexRootHeader, index_record_size);
-        u32::from_le_bytes(*self.slice[start..].first_chunk().unwrap())
+        self.read_u32(start)
     }
 
     /// Returns whether the index belonging to this Index Root is large enough
     /// to need an extra Index Allocation attribute.
     /// Otherwise, the entire index information is stored in this Index Root.
+    #[must_use]
     pub fn is_large_index(&self) -> bool {
         let start = INDEX_ROOT_HEADER_SIZE + offset_of!(IndexNodeHeader, flags);
         (self.slice[start] & LARGE_INDEX_FLAG) != 0
     }
 
     /// Returns the absolute position of this Index Root within the filesystem, in bytes.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         self.position
+    }
+
+    fn read_u32(&self, start: usize) -> u32 {
+        let bytes = self.slice[start..]
+            .first_chunk()
+            .expect("validated index-root headers contain every fixed-width field");
+        u32::from_le_bytes(*bytes)
     }
 
     fn validate_sizes(&self) -> Result<()> {
@@ -198,16 +223,15 @@ impl<'n, 'f> NtfsStructuredValue<'n, 'f> for NtfsIndexRoot<'f> {
     {
         let position = value.data_position();
 
-        let resident_value = match value {
-            NtfsAttributeValue::Resident(resident_value) => resident_value,
-            _ => return Err(NtfsError::UnexpectedNonResidentAttribute { position }),
+        let NtfsAttributeValue::Resident(resident_value) = value else {
+            return Err(NtfsError::UnexpectedNonResidentAttribute { position });
         };
 
         Self::new(resident_value.data(), position)
     }
 }
 
-impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsIndexRoot<'f> {
+impl<'f> NtfsStructuredValueFromResidentAttributeValue<'_, 'f> for NtfsIndexRoot<'f> {
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self> {
         Self::new(value.data(), value.data_position())
     }
@@ -236,13 +260,14 @@ mod tests {
         allocated_size: u32,
         flags: u8,
     ) -> alloc::vec::Vec<u8> {
-        let total = INDEX_ROOT_HEADER_SIZE + allocated_size as usize;
+        let total = INDEX_ROOT_HEADER_SIZE
+            + usize::try_from(allocated_size).expect("test allocated size fits usize");
         let mut buf = alloc::vec![0u8; total.max(INDEX_ROOT_HEADER_SIZE + INDEX_NODE_HEADER_SIZE)];
         // IndexRootHeader
         buf[0..4].copy_from_slice(&0x30u32.to_le_bytes()); // ty (FileName)
         buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // collation_rule
         buf[8..12].copy_from_slice(&index_record_size.to_le_bytes());
-        buf[12] = (-12i8) as u8; // clusters_per_index_record
+        buf[12] = (-12i8).cast_unsigned(); // clusters_per_index_record
         // IndexNodeHeader at offset 16.
         buf[16..20].copy_from_slice(&entries_offset.to_le_bytes());
         buf[20..24].copy_from_slice(&index_data_size.to_le_bytes());
@@ -319,7 +344,7 @@ mod tests {
         // slack_data returns exactly those.
         let mut buf = build_index_root(4096, 16, 32, 64, 0x00);
         for (i, b) in buf[48..80].iter_mut().enumerate() {
-            *b = (i as u8).wrapping_add(1);
+            *b = u8::try_from(i).expect("test value fits u8").wrapping_add(1);
         }
         let root = NtfsIndexRoot::new(&buf, NtfsPosition::new(0x2000)).unwrap();
         let slack = root.slack_data();
@@ -416,7 +441,8 @@ mod tests {
 
         // Slack size should be allocated - used
         let expected_len =
-            (index_root.index_allocated_size() - index_root.index_data_size()) as usize;
+            usize::try_from(index_root.index_allocated_size() - index_root.index_data_size())
+                .expect("test slack length fits usize");
         assert_eq!(slack.len(), expected_len);
 
         // Position should be valid

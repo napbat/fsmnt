@@ -57,6 +57,10 @@ pub const DEFAULT_MFT_MODIFIED_THRESHOLD: u64 = 30 * 24 * 3_600 * INTERVALS_PER_
 /// analysis beyond the built-in heuristics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each boolean exposes an independent forensic timestamp heuristic"
+)]
 pub struct NtfsTimestampAnomaly {
     // -- Heuristic flags --------------------------------------------------
     /// `$SI` creation time is earlier than `$FN` creation time.
@@ -141,6 +145,7 @@ pub struct NtfsTimestampAnomaly {
 
 impl NtfsTimestampAnomaly {
     /// Returns `true` if any heuristic triggered.
+    #[must_use]
     pub fn has_anomalies(&self) -> bool {
         self.si_created_before_fn_created
             || self.si_modified_before_fn_created
@@ -156,6 +161,7 @@ impl NtfsTimestampAnomaly {
     /// are also second-aligned). This count reflects raw flag totals,
     /// not independent signals. Callers needing weighted scoring should
     /// inspect individual flags.
+    #[must_use]
     pub fn anomaly_count(&self) -> u32 {
         u32::from(self.si_created_before_fn_created)
             + u32::from(self.si_modified_before_fn_created)
@@ -171,6 +177,7 @@ impl NtfsTimestampAnomaly {
 /// `mft_modified_much_newer`.
 ///
 /// This is pure computation — no filesystem I/O is required.
+#[must_use]
 pub fn detect_timestamp_anomalies(
     si: &NtfsStandardInformation,
     fn_attr: &NtfsFileName,
@@ -192,6 +199,7 @@ pub fn detect_timestamp_anomalies(
 // distinguish the two operators. (Every other behaviour of this function is
 // covered by the `detect_*` unit tests below.)
 #[cfg_attr(test, mutants::skip)]
+#[must_use]
 pub fn detect_timestamp_anomalies_with_threshold(
     si: &NtfsStandardInformation,
     fn_attr: &NtfsFileName,
@@ -272,7 +280,7 @@ fn timestamp_delta(a: NtfsTime, b: NtfsTime) -> i64 {
     if a_val >= b_val {
         i64::try_from(a_val - b_val).unwrap_or(i64::MAX)
     } else {
-        i64::try_from(b_val - a_val).map(|v| -v).unwrap_or(i64::MIN)
+        i64::try_from(b_val - a_val).map_or(i64::MIN, |v| -v)
     }
 }
 

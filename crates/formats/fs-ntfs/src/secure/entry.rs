@@ -9,9 +9,10 @@ use crate::structured_values::NtfsSecurityDescriptor;
 use crate::types::NtfsPosition;
 use fs_common::io::FsReadSeek;
 
-/// Size of the $SDS entry header (hash + security_id + file_offset
-/// + entry_size).
+/// Size of the $SDS entry header (hash + `security_id` + `file_offset`
+/// + `entry_size`).
 pub(crate) const SDS_HEADER_SIZE: usize = 20;
+const SDS_HEADER_SIZE_U64: u64 = 20;
 
 /// Maximum allowed $SDS entry size. Real security descriptors are
 /// typically <1KB. This limit prevents OOM from corrupt $SII entries
@@ -63,11 +64,13 @@ pub struct NtfsSdsEntry<'b> {
 
 impl<'b> NtfsSdsEntry<'b> {
     /// Security descriptor hash from the entry header.
+    #[must_use]
     pub fn hash(&self) -> u32 {
         u32::from_le_bytes([self.data[0], self.data[1], self.data[2], self.data[3]])
     }
 
     /// Security ID from the entry header.
+    #[must_use]
     pub fn security_id(&self) -> u32 {
         u32::from_le_bytes([self.data[4], self.data[5], self.data[6], self.data[7]])
     }
@@ -77,6 +80,7 @@ impl<'b> NtfsSdsEntry<'b> {
     /// On a healthy volume, this equals
     /// [`stream_offset`](Self::stream_offset). A mismatch indicates
     /// the entry was moved or the stream is corrupt.
+    #[must_use]
     pub fn sds_offset(&self) -> u64 {
         u64::from_le_bytes([
             self.data[8],
@@ -92,18 +96,21 @@ impl<'b> NtfsSdsEntry<'b> {
 
     /// Total entry size from the header (header + descriptor +
     /// alignment padding).
+    #[must_use]
     pub fn entry_size(&self) -> u32 {
         u32::from_le_bytes([self.data[16], self.data[17], self.data[18], self.data[19]])
     }
 
     /// Actual byte offset where this entry was read from the `$SDS`
     /// stream.
+    #[must_use]
     pub fn stream_offset(&self) -> u64 {
         self.stream_offset
     }
 
     /// Result of comparing this entry's primary copy with its
     /// mirror copy.
+    #[must_use]
     pub fn mirror_status(&self) -> NtfsSdsMirrorStatus {
         self.mirror_status
     }
@@ -114,6 +121,7 @@ impl<'b> NtfsSdsEntry<'b> {
     /// Zero for the first entry in a block. A nonzero value
     /// indicates inter-entry slack (padding beyond 16-byte alignment
     /// or gaps from deleted entries).
+    #[must_use]
     pub fn slack_before(&self) -> u64 {
         self.slack_before
     }
@@ -123,14 +131,20 @@ impl<'b> NtfsSdsEntry<'b> {
     ///
     /// This includes the security descriptor and any trailing
     /// alignment padding within the entry's allocated size.
+    #[must_use]
     pub fn entry_payload(&self) -> &'b [u8] {
         &self.data[SDS_HEADER_SIZE..]
     }
 
     /// Parse the security descriptor from the entry payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the descriptor payload is truncated or contains
+    /// invalid self-relative security descriptor offsets.
     pub fn descriptor(&self) -> Result<NtfsSecurityDescriptor<'b>> {
         let descriptor_data = &self.data[SDS_HEADER_SIZE..];
-        let position = NtfsPosition::new(self.stream_offset + SDS_HEADER_SIZE as u64);
+        let position = NtfsPosition::new(self.stream_offset + SDS_HEADER_SIZE_U64);
         NtfsSecurityDescriptor::from_bytes(descriptor_data, position)
     }
 }
@@ -192,6 +206,7 @@ impl<'n, 'f> NtfsSdsEntries<'n, 'f> {
     }
 
     /// Total length of the `$SDS` stream in bytes.
+    #[must_use]
     pub fn stream_len(&self) -> u64 {
         self.stream_len
     }
@@ -202,6 +217,7 @@ impl<'n, 'f> NtfsSdsEntries<'n, 'f> {
     /// After the iterator is exhausted, `stream_len() - position()`
     /// gives the stream tail size (bytes after the last valid
     /// entry).
+    #[must_use]
     pub fn position(&self) -> u64 {
         self.current_offset.min(self.stream_len)
     }
@@ -241,7 +257,7 @@ impl<'n, 'f> NtfsSdsEntries<'n, 'f> {
             }
 
             // Read 20-byte header.
-            let header_end = self.current_offset + SDS_HEADER_SIZE as u64;
+            let header_end = self.current_offset + SDS_HEADER_SIZE_U64;
             if header_end > self.stream_len {
                 let position = NtfsPosition::new(self.current_offset);
                 self.current_offset = self.stream_len;
@@ -267,13 +283,20 @@ impl<'n, 'f> NtfsSdsEntries<'n, 'f> {
             let entry_size = u32::from_le_bytes([header[16], header[17], header[18], header[19]]);
             let entry_size_u64 = u64::from(entry_size);
             let position = NtfsPosition::new(self.current_offset);
+            let Ok(entry_size_usize) = usize::try_from(entry_size) else {
+                self.skip_to_next_primary_block();
+                return Some(Err(NtfsError::InvalidSdsEntry {
+                    position,
+                    reason: "$SDS entry size does not fit the target address space",
+                }));
+            };
 
             if let Some(err) = self.validate_entry_size(entry_size, entry_size_u64, rel, position) {
                 return Some(Err(err));
             }
 
             // Read the full entry into the caller's buffer.
-            buf.resize(entry_size as usize, 0);
+            buf.resize(entry_size_usize, 0);
             if let Err(e) = sds_read_at(&self.sds_item, fs, self.current_offset, buf) {
                 self.skip_to_next_primary_block();
                 return Some(Err(e));
@@ -319,7 +342,8 @@ impl<'n, 'f> NtfsSdsEntries<'n, 'f> {
             });
         }
 
-        if (entry_size as usize) <= SDS_HEADER_SIZE {
+        if entry_size <= u32::try_from(SDS_HEADER_SIZE).expect("the 20-byte SDS header fits in u32")
+        {
             self.skip_to_next_primary_block();
             return Some(NtfsError::InvalidSdsEntry {
                 position,
@@ -327,7 +351,9 @@ impl<'n, 'f> NtfsSdsEntries<'n, 'f> {
             });
         }
 
-        if entry_size as usize > SDS_MAX_SIZE {
+        if entry_size
+            > u32::try_from(SDS_MAX_SIZE).expect("the configured SDS size limit fits in u32")
+        {
             self.skip_to_next_primary_block();
             return Some(NtfsError::InvalidSdsEntry {
                 position,
@@ -431,8 +457,8 @@ mod tests {
 
     /// Build a 20-byte `$SDS` entry header followed by `payload`.
     ///
-    /// Header layout: hash@0 (u32), security_id@4 (u32),
-    /// sds_offset@8 (u64), entry_size@16 (u32).
+    /// Header layout: hash@0 (u32), `security_id@4` (u32),
+    /// `sds_offset@8` (u64), `entry_size@16` (u32).
     fn build_sds_entry(
         hash: u32,
         security_id: u32,
@@ -456,7 +482,7 @@ mod tests {
             0x1122_3344,
             0x5566_7788,
             0x0001_0000,
-            (SDS_HEADER_SIZE + payload.len()) as u32,
+            u32::try_from(SDS_HEADER_SIZE + payload.len()).expect("test value fits u32"),
             &payload,
         );
         let entry = NtfsSdsEntry {
@@ -469,7 +495,10 @@ mod tests {
         assert_eq!(entry.hash(), 0x1122_3344);
         assert_eq!(entry.security_id(), 0x5566_7788);
         assert_eq!(entry.sds_offset(), 0x0001_0000);
-        assert_eq!(entry.entry_size(), (SDS_HEADER_SIZE + payload.len()) as u32);
+        assert_eq!(
+            entry.entry_size(),
+            u32::try_from(SDS_HEADER_SIZE + payload.len()).expect("test value fits u32")
+        );
         assert_eq!(entry.stream_offset(), 0x4000);
         assert_eq!(entry.mirror_status(), NtfsSdsMirrorStatus::Match);
         assert_eq!(entry.slack_before(), 7);
@@ -487,7 +516,13 @@ mod tests {
         sd[0] = 1; // revision
         sd[2..4].copy_from_slice(&0x8000u16.to_le_bytes()); // SELF_RELATIVE control
         sd[4..8].copy_from_slice(&0xFFFFu32.to_le_bytes()); // owner offset beyond data
-        let data = build_sds_entry(0, 1, 0, (SDS_HEADER_SIZE + sd.len()) as u32, &sd);
+        let data = build_sds_entry(
+            0,
+            1,
+            0,
+            u32::try_from(SDS_HEADER_SIZE + sd.len()).expect("test value fits u32"),
+            &sd,
+        );
 
         let entry = NtfsSdsEntry {
             data: &data,
@@ -510,7 +545,7 @@ mod tests {
         // The `+` -> `-`/`*` mutants on line 133 would change this exact value.
         assert_eq!(
             position.value().unwrap().get(),
-            0x1000 + SDS_HEADER_SIZE as u64
+            0x1000 + u64::try_from(SDS_HEADER_SIZE).expect("the 20-byte SDS header fits u64")
         );
     }
 }

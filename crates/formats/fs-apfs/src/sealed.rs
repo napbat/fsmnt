@@ -131,6 +131,11 @@ impl IntegrityMeta {
     ///
     /// Returns [`ApfsError::Truncated`] for a short block, or
     /// [`ApfsError::Malformed`] when the root-hash offset is out of range.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width integrity field ceases to fit the minimum
+    /// block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < INTEGRITY_META_FIXED_SIZE {
             return Err(ApfsError::Truncated {
@@ -285,6 +290,11 @@ pub enum SealVerification {
 ///
 /// Returns [`ApfsError::Unsupported`] for an unknown hash type, and
 /// propagates catalog-walk, fext-tree, and I/O errors.
+///
+/// # Panics
+///
+/// Panics only if a catalog key slice returned for an exact eight-byte range
+/// does not contain eight bytes.
 pub fn verify_file_hashes<T: Read + Seek>(
     catalog: &Catalog,
     fext: &FextTree,
@@ -374,8 +384,11 @@ mod tests {
         let off = IM_FIELDS_OFFSET;
         block[off..off + 4].copy_from_slice(&2u32.to_le_bytes()); // version
         block[off + 8..off + 12].copy_from_slice(&1u32.to_le_bytes()); // SHA-256
-        block[off + 12..off + 16]
-            .copy_from_slice(&(INTEGRITY_META_FIXED_SIZE as u32).to_le_bytes());
+        block[off + 12..off + 16].copy_from_slice(
+            &u32::try_from(INTEGRITY_META_FIXED_SIZE)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         // Root hash right after the fixed fields.
         block[INTEGRITY_META_FIXED_SIZE..INTEGRITY_META_FIXED_SIZE + 32].fill(0x5A);
         let im = IntegrityMeta::parse(&block).unwrap();
@@ -392,8 +405,11 @@ mod tests {
         block[off + 4..off + 8]
             .copy_from_slice(&IntegrityMetaFlags::SEAL_BROKEN.bits().to_le_bytes());
         block[off + 8..off + 12].copy_from_slice(&1u32.to_le_bytes());
-        block[off + 12..off + 16]
-            .copy_from_slice(&(INTEGRITY_META_FIXED_SIZE as u32).to_le_bytes());
+        block[off + 12..off + 16].copy_from_slice(
+            &u32::try_from(INTEGRITY_META_FIXED_SIZE)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         assert!(IntegrityMeta::parse(&block).unwrap().is_seal_broken());
     }
 
@@ -415,7 +431,7 @@ mod tests {
         let digest = ApfsHashType::Sha256.digest(content).unwrap();
         let mut value = Vec::new();
         value.extend_from_slice(&4u16.to_le_bytes()); // hashed_len
-        value.push(digest.len() as u8); // hash_size
+        value.push(u8::try_from(digest.len()).expect("the test fixture value fits in u8")); // hash_size
         value.extend_from_slice(&digest);
         let fdh = FileDataHash::parse(&value).unwrap();
         assert_eq!(fdh.hashed_len, 4);
@@ -519,18 +535,42 @@ mod tests {
     fn catalog_leaf(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0003u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -543,14 +583,30 @@ mod tests {
     fn fext_leaf(records: &[(u64, u64, u64, u64)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0007u16.to_le_bytes()); // ROOT|LEAF|FIXED
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 4) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 4)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 4;
         let value_end = BLK - BTREE_INFO_SIZE;
         for (i, &(private_id, logical, length, phys)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 4;
-            b[toc..toc + 2].copy_from_slice(&((i * 16) as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(((i + 1) * 16) as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(i * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from((i + 1) * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             let ks = key_area + i * 16;
             b[ks..ks + 8].copy_from_slice(&private_id.to_le_bytes());
             b[ks + 8..ks + 16].copy_from_slice(&logical.to_le_bytes());
@@ -568,7 +624,7 @@ mod tests {
 
     /// A `FILE_INFO` data-hash record covering the file's first block.
     fn file_info_record(obj_id: u64, content: &[u8]) -> (Vec<u8>, Vec<u8>) {
-        let mut key = (((JObjType::FileInfo.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let mut key = ((u64::from(JObjType::FileInfo.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         // info_and_lba: type DATA_HASH in the high byte, LBA 0.
@@ -577,7 +633,7 @@ mod tests {
         let digest = ApfsHashType::Sha256.digest(content).unwrap();
         let mut value = Vec::new();
         value.extend_from_slice(&1u16.to_le_bytes()); // hashed_len: one block
-        value.push(digest.len() as u8);
+        value.push(u8::try_from(digest.len()).expect("the test fixture value fits in u8"));
         value.extend_from_slice(&digest);
         (key, value)
     }
@@ -588,8 +644,11 @@ mod tests {
         let off = IM_FIELDS_OFFSET;
         block[off..off + 4].copy_from_slice(&2u32.to_le_bytes()); // version
         block[off + 8..off + 12].copy_from_slice(&hash_type.to_le_bytes());
-        block[off + 12..off + 16]
-            .copy_from_slice(&(INTEGRITY_META_FIXED_SIZE as u32).to_le_bytes());
+        block[off + 12..off + 16].copy_from_slice(
+            &u32::try_from(INTEGRITY_META_FIXED_SIZE)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         block
     }
 
@@ -609,7 +668,12 @@ mod tests {
         image.extend(fext_leaf(&[(5, 0, BLK as u64, 3)])); // block 4
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(100), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(100),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             FextTree::new(4),
             Cursor::new(image),
         )
@@ -620,8 +684,14 @@ mod tests {
         let content = vec![0xA5u8; BLK];
         let (catalog, fext, mut reader) = sealed_volume(&content);
         let integrity = IntegrityMeta::parse(&integrity_meta(1)).unwrap();
-        let report =
-            verify_file_hashes(&catalog, &fext, &mut reader, &integrity, BLK as u32).unwrap();
+        let report = verify_file_hashes(
+            &catalog,
+            &fext,
+            &mut reader,
+            &integrity,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+        )
+        .unwrap();
         assert_eq!(report.segments_verified, 1);
         assert!(report.is_intact());
     }
@@ -633,8 +703,14 @@ mod tests {
         // Overwrite the on-disk content (block 3) after the hash was stored.
         reader.get_mut()[3 * BLK] ^= 0xFF;
         let integrity = IntegrityMeta::parse(&integrity_meta(1)).unwrap();
-        let report =
-            verify_file_hashes(&catalog, &fext, &mut reader, &integrity, BLK as u32).unwrap();
+        let report = verify_file_hashes(
+            &catalog,
+            &fext,
+            &mut reader,
+            &integrity,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+        )
+        .unwrap();
         assert_eq!(report.segments_verified, 1);
         assert!(!report.is_intact());
         assert_eq!(report.mismatches.len(), 1);
@@ -648,7 +724,13 @@ mod tests {
         let (catalog, fext, mut reader) = sealed_volume(&content);
         let integrity = IntegrityMeta::parse(&integrity_meta(99)).unwrap();
         assert!(matches!(
-            verify_file_hashes(&catalog, &fext, &mut reader, &integrity, BLK as u32),
+            verify_file_hashes(
+                &catalog,
+                &fext,
+                &mut reader,
+                &integrity,
+                u32::try_from(BLK).expect("the test fixture value fits in u32")
+            ),
             Err(ApfsError::Unsupported(_))
         ));
     }

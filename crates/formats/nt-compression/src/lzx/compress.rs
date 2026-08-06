@@ -21,10 +21,13 @@ use super::{
 };
 
 /// Maximum representable match length in LZX encoding.
-/// length_header(7) + max_length_symbol(248) + MIN_MATCH_LEN(2) = 257.
+/// `length_header(7)` + `max_length_symbol(248)` + `MIN_MATCH_LEN(2)` = 257.
 const MAX_MATCH_LEN: usize = 7 + LENGTH_TREE_SIZE - 1 + MIN_MATCH_LEN;
+const WINDOW_SIZE_U32: u32 = 32_768;
+const MAX_MATCH_LEN_U32: u32 = 257;
 
 /// Worst-case compressed size for LZX WIM.
+#[must_use]
 pub fn compress_bound(input_len: usize) -> usize {
     // Single chunk ≤ 32 KB. Tree headers + bitstream overhead.
     input_len + 300
@@ -43,9 +46,10 @@ pub struct Compressor {
 
 impl Compressor {
     /// Create a new compressor with pre-allocated buffers.
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            finder: MatchFinder::standard(WINDOW_SIZE as u32, MAX_MATCH_LEN as u32, 128),
+            finder: MatchFinder::standard(WINDOW_SIZE_U32, MAX_MATCH_LEN_U32, 128),
             preprocessed: Vec::with_capacity(WINDOW_SIZE),
             main_freqs: vec![0u32; MAIN_TREE_SIZE],
             len_freqs: vec![0u32; LENGTH_TREE_SIZE],
@@ -56,6 +60,11 @@ impl Compressor {
     ///
     /// Input MUST be ≤ 32768 bytes. Returns the number of bytes
     /// written to `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input exceeds the LZX WIM chunk limit or
+    /// `output` is too small for the encoded stream.
     pub fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
         if input.is_empty() {
             return Ok(0);
@@ -87,7 +96,7 @@ impl Compressor {
         let symbols = tokens_to_symbols(&tokens, &mut self.main_freqs, &mut self.len_freqs);
 
         // Build Huffman code lengths.
-        let main_lens = build_code_lengths(&self.main_freqs, 16)?;
+        let main_lens = build_code_lengths(&self.main_freqs, 16);
 
         // Ensure the length tree has at least one valid symbol,
         // even when no matches use the length extension. The
@@ -96,7 +105,7 @@ impl Compressor {
         if self.len_freqs.iter().all(|f| *f == 0) {
             self.len_freqs[0] = 1;
         }
-        let len_lens = build_code_lengths(&self.len_freqs, 16)?;
+        let len_lens = build_code_lengths(&self.len_freqs, 16);
 
         // Ensure at least one symbol in each tree used by the block.
         if main_lens.iter().all(|l| *l == 0) {
@@ -130,6 +139,11 @@ impl Default for Compressor {
 ///
 /// Input MUST be ≤ 32768 bytes. Returns the number of bytes written
 /// to `output`.
+///
+/// # Errors
+///
+/// Returns an error when the input exceeds the LZX WIM chunk limit or
+/// `output` is too small for the encoded stream.
 pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     Compressor::new().compress(input, output)
 }
@@ -147,20 +161,23 @@ fn encode_block(
 
     // Block header: type (3 bits) + size.
     writer.write_bits(BLOCK_VERBATIM, 3);
-    write_block_size(&mut writer, preprocessed.len() as u32);
+    write_block_size(
+        &mut writer,
+        u32::try_from(preprocessed.len()).expect("an LZX WIM block is at most 32 KiB"),
+    );
 
     // Write main tree via pre-tree (two halves).
     let prev_main = [0u8; MAIN_TREE_SIZE];
-    write_pretree_encoded(&mut writer, &main_lens[..256], &prev_main[..256])?;
+    write_pretree_encoded(&mut writer, &main_lens[..256], &prev_main[..256]);
     write_pretree_encoded(
         &mut writer,
         &main_lens[256..MAIN_TREE_SIZE],
         &prev_main[256..MAIN_TREE_SIZE],
-    )?;
+    );
 
     // Write length tree via pre-tree.
     let prev_len = [0u8; LENGTH_TREE_SIZE];
-    write_pretree_encoded(&mut writer, len_lens, &prev_len)?;
+    write_pretree_encoded(&mut writer, len_lens, &prev_len);
 
     // Assign canonical codes.
     let main_counts = count_per_length(main_lens);
@@ -201,7 +218,7 @@ fn encode_block(
 
 /// Write block size: 1 if default (32768), else 0 + 16-bit size.
 fn write_block_size(writer: &mut BitWriter, size: u32) {
-    if size == WINDOW_SIZE as u32 {
+    if size == u32::try_from(WINDOW_SIZE).expect("the LZX window is exactly 32 KiB") {
         writer.write_bits(1, 1);
     } else {
         writer.write_bits(0, 1);
@@ -211,7 +228,8 @@ fn write_block_size(writer: &mut BitWriter, size: u32) {
 
 /// Find the position slot for a given match offset.
 fn position_slot_for_offset(offset: usize) -> usize {
-    let adjusted = offset as u32 + OFFSET_ADJUSTMENT;
+    let adjusted = u32::try_from(offset).expect("LZX offsets are bounded by the 32 KiB window")
+        + OFFSET_ADJUSTMENT;
     // Binary search in POSITION_BASE.
     let mut slot = 0;
     for (i, &base) in POSITION_BASE.iter().enumerate() {
@@ -246,7 +264,7 @@ fn tokens_to_symbols(
     for token in tokens {
         match token {
             Token::Literal(b) => {
-                let sym = *b as u16;
+                let sym = u16::from(*b);
                 main_freqs[sym as usize] += 1;
                 entries.push(SymbolEntry {
                     main_symbol: sym,
@@ -257,26 +275,27 @@ fn tokens_to_symbols(
             }
             Token::Match(m) => {
                 let offset = m.offset as usize;
+                let offset_u32 = m.offset;
                 let length = m.length as usize;
 
                 // Determine position slot and repeat offset handling.
-                let (position_slot, footer_val, footer_count) = if offset as u32 == r0 {
+                let (position_slot, footer_val, footer_count) = if offset_u32 == r0 {
                     (0, 0, 0)
-                } else if offset as u32 == r1 {
+                } else if offset_u32 == r1 {
                     core::mem::swap(&mut r0, &mut r1);
                     (1, 0, 0)
-                } else if offset as u32 == r2 {
+                } else if offset_u32 == r2 {
                     core::mem::swap(&mut r0, &mut r2);
                     (2, 0, 0)
                 } else {
                     let slot = position_slot_for_offset(offset);
-                    let adjusted = offset as u32 + OFFSET_ADJUSTMENT;
+                    let adjusted = offset_u32 + OFFSET_ADJUSTMENT;
                     let base = POSITION_BASE[slot];
                     let extra_bits = u32::from(FOOTER_BITS[slot]);
                     let extra_val = adjusted - base;
                     r2 = r1;
                     r1 = r0;
-                    r0 = offset as u32;
+                    r0 = offset_u32;
                     (slot, extra_val, extra_bits)
                 };
 
@@ -291,7 +310,13 @@ fn tokens_to_symbols(
                         "match length {length} exceeds LZX maximum \
                          {MAX_MATCH_LEN}; max_match_len config is wrong"
                     );
-                    (7, Some(extra as u16))
+                    (
+                        7,
+                        Some(
+                            u16::try_from(extra)
+                                .expect("the LZX length tree contains only 249 symbols"),
+                        ),
+                    )
                 };
 
                 let main_sym = 256 + position_slot * LEN_HEADER_COUNT + length_header;
@@ -301,7 +326,8 @@ fn tokens_to_symbols(
                 }
 
                 entries.push(SymbolEntry {
-                    main_symbol: main_sym as u16,
+                    main_symbol: u16::try_from(main_sym)
+                        .expect("the LZX main tree contains fewer than 1024 symbols"),
                     length_symbol,
                     footer_bits_value: footer_val,
                     footer_bits_count: footer_count,
@@ -320,7 +346,7 @@ const SHORT_RUN_MAX: usize = SHORT_RUN_BASE + (1 << SHORT_RUN_BITS) - 1;
 const LONG_RUN_MAX: usize = LONG_RUN_BASE + (1 << LONG_RUN_BITS) - 1;
 
 /// Delta-encode code lengths and write via pre-tree.
-fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8]) -> Result<()> {
+fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8]) {
     // Compute delta symbols.
     let mut delta_syms: Vec<u8> = Vec::with_capacity(target.len());
     let mut i = 0;
@@ -347,21 +373,28 @@ fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8])
             if run >= LONG_RUN_BASE {
                 let emit_run = run.min(LONG_RUN_MAX);
                 delta_syms.push(PRETREE_ZERO_LONG);
-                delta_syms.push((emit_run - LONG_RUN_BASE) as u8);
+                delta_syms.push(
+                    u8::try_from(emit_run - LONG_RUN_BASE)
+                        .expect("the long zero-run payload uses five bits"),
+                );
                 i += emit_run;
             } else if run >= SHORT_RUN_BASE {
                 let emit_run = run.min(SHORT_RUN_MAX);
                 delta_syms.push(PRETREE_ZERO_SHORT);
-                delta_syms.push((emit_run - SHORT_RUN_BASE) as u8);
+                delta_syms.push(
+                    u8::try_from(emit_run - SHORT_RUN_BASE)
+                        .expect("the short zero-run payload uses four bits"),
+                );
                 i += emit_run;
             } else {
-                let delta =
-                    ((old as u32 + NUM_CODE_LENGTHS - new_val as u32) % NUM_CODE_LENGTHS) as u8;
+                let delta = ((u32::from(old) + NUM_CODE_LENGTHS - u32::from(new_val))
+                    % NUM_CODE_LENGTHS) as u8;
                 delta_syms.push(delta);
                 i += 1;
             }
         } else {
-            let delta = ((old as u32 + NUM_CODE_LENGTHS - new_val as u32) % NUM_CODE_LENGTHS) as u8;
+            let delta =
+                ((u32::from(old) + NUM_CODE_LENGTHS - u32::from(new_val)) % NUM_CODE_LENGTHS) as u8;
             delta_syms.push(delta);
             i += 1;
         }
@@ -373,7 +406,7 @@ fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8])
     let mut k = 0;
     while k < delta_syms.len() {
         let sym = delta_syms[k];
-        if sym < PRE_TREE_SIZE as u8 {
+        if sym < u8::try_from(PRE_TREE_SIZE).expect("the LZX pre-tree has 20 symbols") {
             pre_freqs[sym as usize] += 1;
         }
         if sym == PRETREE_ZERO_SHORT || sym == PRETREE_ZERO_LONG {
@@ -384,7 +417,7 @@ fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8])
     }
 
     // Build pre-tree code lengths.
-    let pre_lens = build_code_lengths(&pre_freqs, 6)?;
+    let pre_lens = build_code_lengths(&pre_freqs, 6);
 
     // Write 20 x 4-bit pre-tree code lengths.
     for &pl in pre_lens.iter().take(PRE_TREE_SIZE) {
@@ -419,8 +452,6 @@ fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8])
             j += 1;
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -448,7 +479,9 @@ mod tests {
 
     #[test]
     fn compress_roundtrip_literals() {
-        let input: Vec<u8> = (0..100).map(|i| i as u8).collect();
+        let input: Vec<u8> = (0..100)
+            .map(|i| u8::try_from(i).expect("the test range is below 256"))
+            .collect();
         let bound = compress_bound(input.len());
         let mut compressed = vec![0u8; bound];
         let c_len = compress(&input, &mut compressed).expect("compress");
@@ -469,7 +502,7 @@ mod tests {
     fn compress_roundtrip_full_chunk() {
         let mut input = vec![0u8; WINDOW_SIZE];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i % 251) as u8;
+            *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
         }
         let patch: Vec<u8> = input[1000..2000].to_vec();
         input[20000..21000].copy_from_slice(&patch);
@@ -490,7 +523,7 @@ mod tests {
         for size in [200, 500, 1000, 2000, 4000, 8000] {
             let mut input = vec![0u8; size];
             for (i, byte) in input.iter_mut().enumerate() {
-                *byte = (i % 251) as u8;
+                *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
             }
             if size >= 400 {
                 let patch: Vec<u8> = input[100..200].to_vec();

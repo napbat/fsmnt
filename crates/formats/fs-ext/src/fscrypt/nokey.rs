@@ -102,7 +102,7 @@ mod tests {
     /// Reference computed via Python (see plan).
     #[test]
     fn nokey_short_matches_python_reference() {
-        let ct: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let ct: [u8; 16] = core::array::from_fn(|i| (i).to_le_bytes()[0]);
         let encoded = encode_nokey_name([0, 0], &ct);
         assert_eq!(&encoded, b"AAAAAAAAAAAAAQIDBAUGBwgJCgsMDQ4P");
     }

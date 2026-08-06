@@ -19,6 +19,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use fs_common::error::IoError;
 
 use crate::cluster_bitmap::NtfsClusterBitmap;
 use crate::error::Result;
@@ -57,21 +58,25 @@ impl FileSignature {
     }
 
     /// The human-readable type name (e.g. `"jpeg"`).
+    #[must_use]
     pub fn name(&self) -> &'static str {
         self.name
     }
 
     /// The magic bytes expected at the start of the file.
+    #[must_use]
     pub fn header(&self) -> &[u8] {
         &self.header
     }
 
     /// The trailer bytes that mark the end of the file, if any.
+    #[must_use]
     pub fn footer(&self) -> Option<&[u8]> {
         self.footer.as_deref()
     }
 
     /// The maximum number of bytes attributed to a single carved file.
+    #[must_use]
     pub fn max_size(&self) -> u64 {
         self.max_size
     }
@@ -81,6 +86,7 @@ impl FileSignature {
     /// Headers and footers are the documented magic constants for each
     /// format; the ZIP signature also recognizes DOCX/XLSX/PPTX/JAR/APK,
     /// which are ZIP containers.
+    #[must_use]
     pub fn builtins() -> Vec<FileSignature> {
         vec![
             // JPEG: SOI marker FF D8 FF .. EOI marker FF D9.
@@ -123,11 +129,13 @@ pub struct CarvingConfig {
 
 impl CarvingConfig {
     /// Creates a config from an explicit signature list.
+    #[must_use]
     pub fn new(signatures: Vec<FileSignature>) -> Self {
         Self { signatures }
     }
 
     /// The signatures the carver will match against.
+    #[must_use]
     pub fn signatures(&self) -> &[FileSignature] {
         &self.signatures
     }
@@ -194,12 +202,16 @@ fn footer_search_step(
     window.extend_from_slice(cluster);
 
     if let Some(i) = find_subslice(&window, footer) {
-        return Some(window_start + (i + footer.len()) as u64);
+        let match_end =
+            u64::try_from(i + footer.len()).expect("an in-memory footer offset fits in u64");
+        return Some(window_start + match_end);
     }
 
     // Retain the last footer.len()-1 bytes so a split footer is caught.
     let keep = footer.len().saturating_sub(1).min(window.len());
-    *consumed += (window.len() - keep) as u64;
+    let newly_consumed =
+        u64::try_from(window.len() - keep).expect("an in-memory window length fits in u64");
+    *consumed += newly_consumed;
     *carry = window[window.len() - keep..].to_vec();
     None
 }
@@ -219,18 +231,31 @@ pub struct NtfsClusterCarver {
 
 impl NtfsClusterCarver {
     /// Creates a carver with the default (built-in) signature registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the volume bitmap cannot be loaded or its cluster
+    /// size cannot be represented as an in-memory buffer length.
     pub fn new<T: Read + Seek>(ntfs: &Ntfs, fs: &mut T) -> Result<Self> {
         Self::with_config(ntfs, fs, CarvingConfig::default())
     }
 
     /// Creates a carver with a custom signature registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the volume bitmap cannot be loaded or its cluster
+    /// size cannot be represented as an in-memory buffer length.
     pub fn with_config<T: Read + Seek>(
         ntfs: &Ntfs,
         fs: &mut T,
         config: CarvingConfig,
     ) -> Result<Self> {
         let bitmap = ntfs.cluster_bitmap(fs)?;
-        let cluster_size = u64::from(ntfs.cluster_size());
+        let cluster_size_u32 = ntfs.cluster_size();
+        let cluster_size = u64::from(cluster_size_u32);
+        let buffer_size =
+            usize::try_from(cluster_size_u32).map_err(|_| IoError::invalid_input())?;
         let total_clusters = bitmap.total_clusters();
         Ok(Self {
             bitmap,
@@ -238,7 +263,7 @@ impl NtfsClusterCarver {
             cluster_size,
             total_clusters,
             next_cluster: 0,
-            buf: vec![0u8; cluster_size as usize],
+            buf: vec![0u8; buffer_size],
         })
     }
 
@@ -434,26 +459,32 @@ mod tests {
         cluster_contents: &[[u8; 8]],
         allocated: &[u64],
     ) -> (NtfsClusterCarver, std::io::Cursor<Vec<u8>>) {
-        let content_len = (CARVE_TOTAL * CARVE_CLUSTER_SIZE) as usize;
+        let content_len =
+            usize::try_from(CARVE_TOTAL * CARVE_CLUSTER_SIZE).expect("test value fits usize");
         let mut disk = vec![0u8; content_len];
         for (i, content) in cluster_contents.iter().enumerate() {
-            let start = i * CARVE_CLUSTER_SIZE as usize;
+            let start = i * usize::try_from(CARVE_CLUSTER_SIZE).expect("test value fits usize");
             disk[start..start + 8].copy_from_slice(content);
         }
 
         // Bitmap: one cached cluster (8 bytes) immediately after the content.
-        let bitmap_disk_offset = content_len as u64;
-        let mut bitmap = [0u8; CARVE_CLUSTER_SIZE as usize];
+        let bitmap_disk_offset = u64::try_from(content_len).expect("test content length fits u64");
+        let mut bitmap = [0u8; 8];
         for &c in allocated {
-            bitmap[(c / 8) as usize] |= 1 << (c % 8);
+            let byte_index = usize::try_from(c / 8).expect("test cluster index fits usize");
+            let bit_index = u32::try_from(c % 8).expect("bit index is below eight");
+            bitmap[byte_index] |= 1 << bit_index;
         }
         disk.extend_from_slice(&bitmap);
 
         let cursor = std::io::Cursor::new(disk);
         let map =
             DataRunMap::from_segments_for_test(&[(Some(bitmap_disk_offset), CARVE_CLUSTER_SIZE)]);
-        let bitmap =
-            NtfsClusterBitmap::from_parts_for_test(map, CARVE_TOTAL, CARVE_CLUSTER_SIZE as u32);
+        let bitmap = NtfsClusterBitmap::from_parts_for_test(
+            map,
+            CARVE_TOTAL,
+            u32::try_from(CARVE_CLUSTER_SIZE).expect("test value fits u32"),
+        );
 
         let carver = NtfsClusterCarver {
             bitmap,
@@ -461,7 +492,7 @@ mod tests {
             cluster_size: CARVE_CLUSTER_SIZE,
             total_clusters: CARVE_TOTAL,
             next_cluster: 0,
-            buf: vec![0u8; CARVE_CLUSTER_SIZE as usize],
+            buf: vec![0u8; usize::try_from(CARVE_CLUSTER_SIZE).expect("test value fits usize")],
         };
         (carver, cursor)
     }
@@ -622,15 +653,13 @@ mod tests {
 
         let mut count = 0;
         while let Some(result) = carver.next(&mut testfs1) {
-            let carved = result.unwrap();
+            let recovered = result.unwrap();
             // Structural invariants for every reported fragment.
-            assert!(carved.end_cluster >= carved.start_cluster);
-            assert!(carved.length > 0);
-            assert!(!carved.signature.is_empty());
+            assert!(recovered.end_cluster >= recovered.start_cluster);
+            assert!(recovered.length > 0);
+            assert!(!recovered.signature.is_empty());
             count += 1;
-            if count > 10_000 {
-                panic!("carver did not terminate");
-            }
+            assert!(count <= 10_000, "carver did not terminate");
         }
     }
 
@@ -638,15 +667,15 @@ mod tests {
     fn synth_carve_footerless_extent() {
         // Footer-less file at cluster 1, bounded by allocated cluster 3.
         let (mut carver, mut fs) = build_carver(&standard_fixture(), &[0, 3]);
-        let carved = carver.next(&mut fs).unwrap().unwrap();
-        assert_eq!(carved.signature, "aa");
-        assert_eq!(carved.start_cluster, 1);
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
+        assert_eq!(recovered.signature, "aa");
+        assert_eq!(recovered.start_cluster, 1);
         // start_offset = cluster 1 * cluster_size 8 = 8.
-        assert_eq!(carved.start_offset, 8);
+        assert_eq!(recovered.start_offset, 8);
         // Spans clusters 1 and 2 (cluster 3 is allocated), so 2 * 8 = 16 bytes.
-        assert_eq!(carved.end_cluster, 2);
-        assert_eq!(carved.length, 16);
-        assert!(!carved.footer_found);
+        assert_eq!(recovered.end_cluster, 2);
+        assert_eq!(recovered.length, 16);
+        assert!(!recovered.footer_found);
     }
 
     #[test]
@@ -654,29 +683,33 @@ mod tests {
         // Advance past the footer-less file to the footer-bearing one.
         let (mut carver, mut fs) = build_carver(&standard_fixture(), &[0, 3]);
         let _first = carver.next(&mut fs).unwrap().unwrap();
-        let carved = carver.next(&mut fs).unwrap().unwrap();
-        assert_eq!(carved.signature, "bb");
-        assert_eq!(carved.start_cluster, 4);
-        assert_eq!(carved.start_offset, 32); // 4 * 8
-        assert_eq!(carved.end_cluster, 5);
-        assert!(carved.footer_found);
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
+        assert_eq!(recovered.signature, "bb");
+        assert_eq!(recovered.start_cluster, 4);
+        assert_eq!(recovered.start_offset, 32); // 4 * 8
+        assert_eq!(recovered.end_cluster, 5);
+        assert!(recovered.footer_found);
         // Footer 0xFF 0xFF sits at region offset 8..10 (start of cluster 5),
         // so the carved length runs to the end of the footer = 10.
-        assert_eq!(carved.length, 10);
+        assert_eq!(recovered.length, 10);
     }
 
     #[test]
     fn synth_carver_terminates_after_last_file() {
         let (mut carver, mut fs) = build_carver(&standard_fixture(), &[0, 3]);
-        let mut carved = Vec::new();
+        let mut recovered_files = Vec::new();
         while let Some(result) = carver.next(&mut fs) {
-            carved.push(result.unwrap());
-            assert!(carved.len() <= CARVE_TOTAL as usize, "carver runaway");
+            recovered_files.push(result.unwrap());
+            assert!(
+                recovered_files.len()
+                    <= usize::try_from(CARVE_TOTAL).expect("test value fits usize"),
+                "carver runaway"
+            );
         }
         // Exactly two files are recovered, in cluster order.
-        assert_eq!(carved.len(), 2);
-        assert_eq!(carved[0].start_cluster, 1);
-        assert_eq!(carved[1].start_cluster, 4);
+        assert_eq!(recovered_files.len(), 2);
+        assert_eq!(recovered_files[0].start_cluster, 1);
+        assert_eq!(recovered_files[1].start_cluster, 4);
     }
 
     #[test]
@@ -699,12 +732,12 @@ mod tests {
             None,
             8, // max one cluster
         )]);
-        let carved = carver.next(&mut fs).unwrap().unwrap();
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
         // max_clusters = ceil(8/8) = 1, so the extent is a single cluster.
-        assert_eq!(carved.start_cluster, 1);
-        assert_eq!(carved.end_cluster, 1);
-        assert_eq!(carved.length, 8);
-        assert!(!carved.footer_found);
+        assert_eq!(recovered.start_cluster, 1);
+        assert_eq!(recovered.end_cluster, 1);
+        assert_eq!(recovered.length, 8);
+        assert!(!recovered.footer_found);
     }
 
     #[test]
@@ -722,13 +755,13 @@ mod tests {
             [0; 8],
         ];
         let (mut carver, mut fs) = build_carver(&contents, &[0, 3]);
-        let carved = carver.next(&mut fs).unwrap().unwrap();
-        assert_eq!(carved.signature, "bb");
-        assert_eq!(carved.start_cluster, 1);
-        assert_eq!(carved.end_cluster, 2);
-        assert!(carved.footer_found);
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
+        assert_eq!(recovered.signature, "bb");
+        assert_eq!(recovered.start_cluster, 1);
+        assert_eq!(recovered.end_cluster, 2);
+        assert!(recovered.footer_found);
         // Footer occupies region bytes 7..9, ending at 9.
-        assert_eq!(carved.length, 9);
+        assert_eq!(recovered.length, 9);
     }
 
     #[test]
@@ -787,15 +820,15 @@ mod tests {
             [0; 8],
         ];
         let (mut carver, mut fs) = build_carver(&contents, &[0, 3]);
-        let carved = carver.next(&mut fs).unwrap().unwrap();
-        assert_eq!(carved.signature, "bb");
-        assert_eq!(carved.start_cluster, 1);
-        assert!(!carved.footer_found);
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
+        assert_eq!(recovered.signature, "bb");
+        assert_eq!(recovered.start_cluster, 1);
+        assert!(!recovered.footer_found);
         // Two clusters scanned (1 and 2) before hitting allocated cluster 3.
         // length = scanned(2) * cluster_size(8) = 16 (kills `+= *=` at 330,
         // and `* +`/`* /` at 351).
-        assert_eq!(carved.end_cluster, 2);
-        assert_eq!(carved.length, 16);
+        assert_eq!(recovered.end_cluster, 2);
+        assert_eq!(recovered.length, 16);
     }
 
     #[test]
@@ -817,13 +850,13 @@ mod tests {
         ];
         // Clusters 0..6 allocated so the scan starts at cluster 6.
         let (mut carver, mut fs) = build_carver(&contents, &[0, 1, 2, 3, 4, 5]);
-        let carved = carver.next(&mut fs).unwrap().unwrap();
-        assert_eq!(carved.signature, "bb");
-        assert_eq!(carved.start_cluster, 6);
-        assert!(!carved.footer_found);
-        assert_eq!(carved.end_cluster, 7);
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
+        assert_eq!(recovered.signature, "bb");
+        assert_eq!(recovered.start_cluster, 6);
+        assert!(!recovered.footer_found);
+        assert_eq!(recovered.end_cluster, 7);
         // Scanned clusters 6 and 7 -> length 2 * 8 = 16.
-        assert_eq!(carved.length, 16);
+        assert_eq!(recovered.length, 16);
     }
 
     #[test]
@@ -849,11 +882,11 @@ mod tests {
             Some(&[0xFF, 0xFF]),
             8, // max one cluster -> max_clusters = 1
         )]);
-        let carved = carver.next(&mut fs).unwrap().unwrap();
-        assert_eq!(carved.signature, "bb");
-        assert!(!carved.footer_found);
+        let recovered = carver.next(&mut fs).unwrap().unwrap();
+        assert_eq!(recovered.signature, "bb");
+        assert!(!recovered.footer_found);
         // Only one cluster scanned before max_clusters stops the loop.
-        assert_eq!(carved.end_cluster, 1);
-        assert_eq!(carved.length, 8);
+        assert_eq!(recovered.end_cluster, 1);
+        assert_eq!(recovered.length, 8);
     }
 }

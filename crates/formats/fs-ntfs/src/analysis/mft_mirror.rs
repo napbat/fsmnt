@@ -1,4 +1,4 @@
-//! MFT Mirror ($MFTMirr) consistency validation.
+//! MFT Mirror ($`MFTMirr`) consistency validation.
 //!
 //! `$MFTMirr` is a backup copy of the first 4 MFT file records
 //! (records 0-3: `$MFT`, `$MFTMirr`, `$LogFile`, `$Volume`).
@@ -27,13 +27,25 @@ pub enum NtfsMftMirrRecordStatus {
     Match,
     /// The records differ. `first_difference_offset` is the byte
     /// offset within the record where the first difference occurs.
-    Mismatch { first_difference_offset: usize },
+    Mismatch {
+        /// Byte offset of the first differing byte within the record.
+        first_difference_offset: usize,
+    },
     /// The primary MFT record could not be read (I/O or parse error).
-    MftReadError { message: &'static str },
+    MftReadError {
+        /// Static diagnostic describing the primary-record failure.
+        message: &'static str,
+    },
     /// The mirror record could not be read from disk.
-    MirrorReadError { message: &'static str },
+    MirrorReadError {
+        /// Static diagnostic describing the mirror read failure.
+        message: &'static str,
+    },
     /// The mirror record does not have a valid `FILE` signature.
-    MirrorInvalidSignature { actual: [u8; 4] },
+    MirrorInvalidSignature {
+        /// Four signature bytes observed in the mirror record.
+        actual: [u8; 4],
+    },
     /// The mirror record's Update Sequence Array fixup failed,
     /// indicating sector-level corruption.
     MirrorFixupFailed,
@@ -41,6 +53,7 @@ pub enum NtfsMftMirrRecordStatus {
 
 impl NtfsMftMirrRecordStatus {
     /// Returns `true` if this record is a byte-for-byte match.
+    #[must_use]
     pub fn is_match(&self) -> bool {
         matches!(self, Self::Match)
     }
@@ -56,11 +69,13 @@ pub struct NtfsMftMirrValidation {
 impl NtfsMftMirrValidation {
     /// Returns the per-record status for records 0 (`$MFT`),
     /// 1 (`$MFTMirr`), 2 (`$LogFile`), and 3 (`$Volume`).
+    #[must_use]
     pub fn records(&self) -> &[NtfsMftMirrRecordStatus; MIRRORED_RECORD_COUNT] {
         &self.records
     }
 
     /// Returns the absolute byte position of `$MFTMirr` on disk.
+    #[must_use]
     pub fn mft_mirror_position(&self) -> NtfsPosition {
         self.mft_mirror_position
     }
@@ -71,6 +86,7 @@ impl NtfsMftMirrValidation {
     }
 
     /// Returns the number of records that are NOT a match.
+    #[must_use]
     pub fn anomaly_count(&self) -> usize {
         self.records.iter().filter(|r| !r.is_match()).count()
     }
@@ -99,7 +115,11 @@ where
         }
     })?;
 
-    let mut data = vec![0u8; record_size as usize];
+    let record_size =
+        usize::try_from(record_size).map_err(|_| NtfsMftMirrRecordStatus::MirrorReadError {
+            message: "record size does not fit the address space",
+        })?;
+    let mut data = vec![0u8; record_size];
     fs.read_exact(&mut data)
         .map_err(|_| NtfsMftMirrRecordStatus::MirrorReadError {
             message: "read failed",
@@ -135,6 +155,10 @@ where
 /// This function always succeeds if basic I/O works — individual
 /// record failures (bad signature, fixup errors) are captured in
 /// the per-record status rather than returned as errors.
+///
+/// # Errors
+///
+/// Returns an error if an MFT or mirror record is malformed or cannot be read.
 pub fn validate_mft_mirror<T>(ntfs: &Ntfs, fs: &mut T) -> Result<NtfsMftMirrValidation>
 where
     T: Read + Seek,
@@ -149,43 +173,40 @@ where
         NtfsMftMirrRecordStatus::Match,
     ];
 
-    for (i, status) in records.iter_mut().enumerate() {
+    for (i, (record_number, status)) in [0_u64, 1, 2, 3]
+        .into_iter()
+        .zip(records.iter_mut())
+        .enumerate()
+    {
         // Read from primary MFT via the standard path.
-        let mft_file = match ntfs.file(fs, i as u64) {
-            Ok(f) => f,
-            Err(_) => {
-                *status = NtfsMftMirrRecordStatus::MftReadError {
-                    message: MFT_READ_ERROR_MESSAGES[i],
-                };
-                continue;
-            }
+        let Ok(mft_file) = ntfs.file(fs, record_number) else {
+            *status = NtfsMftMirrRecordStatus::MftReadError {
+                message: MFT_READ_ERROR_MESSAGES[i],
+            };
+            continue;
         };
 
         // Read the corresponding record from the mirror using checked
         // arithmetic to prevent wrapping on a crafted mirror base.
-        let mirror_offset = (i as u64).checked_mul(record_size as u64).ok_or(
+        let mirror_offset = record_number.checked_mul(u64::from(record_size)).ok_or(
             NtfsError::InvalidFileRecordNumber {
-                file_record_number: i as u64,
+                file_record_number: record_number,
             },
         )?;
 
-        let mirror_base_value = match mirror_base.value() {
-            Some(v) => v.get(),
-            None => {
-                *status = NtfsMftMirrRecordStatus::MirrorReadError {
-                    message: "mirror base position is None",
-                };
-                continue;
-            }
+        let mirror_base_value = if let Some(v) = mirror_base.value() {
+            v.get()
+        } else {
+            *status = NtfsMftMirrRecordStatus::MirrorReadError {
+                message: "mirror base position is None",
+            };
+            continue;
         };
-        let mirror_abs = match mirror_base_value.checked_add(mirror_offset) {
-            Some(v) => v,
-            None => {
-                *status = NtfsMftMirrRecordStatus::MirrorReadError {
-                    message: "mirror position overflow",
-                };
-                continue;
-            }
+        let Some(mirror_abs) = mirror_base_value.checked_add(mirror_offset) else {
+            *status = NtfsMftMirrRecordStatus::MirrorReadError {
+                message: "mirror position overflow",
+            };
+            continue;
         };
         let mirror_pos = NtfsPosition::new(mirror_abs);
         let mirror_record = match read_raw_record(fs, mirror_pos, record_size) {
@@ -252,8 +273,12 @@ mod tests {
         let record = synthetic::file_record(0x0001, 1, 1, &[]);
         let mut cursor = record_at_offset(&record);
         let pos = NtfsPosition::new(512);
-        let parsed = read_raw_record(&mut cursor, pos, synthetic::RECORD_SIZE as u32)
-            .expect("valid FILE record must parse");
+        let parsed = read_raw_record(
+            &mut cursor,
+            pos,
+            u32::try_from(synthetic::RECORD_SIZE).expect("test value fits u32"),
+        )
+        .expect("valid FILE record must parse");
         assert_eq!(&parsed.data()[0..4], b"FILE");
     }
 
@@ -265,14 +290,19 @@ mod tests {
         record[0..4].copy_from_slice(b"BAAD");
         let mut cursor = record_at_offset(&record);
         let pos = NtfsPosition::new(512);
-        let err = read_raw_record(&mut cursor, pos, synthetic::RECORD_SIZE as u32).unwrap_err();
+        let err = read_raw_record(
+            &mut cursor,
+            pos,
+            u32::try_from(synthetic::RECORD_SIZE).expect("test value fits u32"),
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             NtfsMftMirrRecordStatus::MirrorInvalidSignature { actual } if &actual == b"BAAD"
         ));
     }
 
-    /// Builds an image with a working $MFT (records 0-3) plus a $MFTMirr
+    /// Builds an image with a working $MFT (records 0-3) plus a $`MFTMirr`
     /// region at LCN 4 holding byte-identical copies of records 0-3.
     fn synthetic_mirror_image() -> std::io::Cursor<Vec<u8>> {
         // Records 1-3 are simple in-use FILE records; record 0 is generated
@@ -435,10 +465,11 @@ mod tests {
         let record_size = ntfs.file_record_size();
 
         for i in 0..MIRRORED_RECORD_COUNT {
-            let mft_file = ntfs.file(&mut testfs1, i as u64).unwrap();
+            let record_number = u64::try_from(i).expect("test record number fits in u64");
+            let mft_file = ntfs.file(&mut testfs1, record_number).unwrap();
             let mft_data = mft_file.record_data();
 
-            let mirror_pos = ntfs.mft_mirror_position() + (i as u64 * record_size as u64);
+            let mirror_pos = ntfs.mft_mirror_position() + (record_number * u64::from(record_size));
             let mirror_record = read_raw_record(&mut testfs1, mirror_pos, record_size)
                 .unwrap_or_else(|e| {
                     panic!("mirror record {i} read failed: {e:?}");
@@ -464,7 +495,8 @@ mod tests {
         // Parse the intact filesystem first to learn positions.
         let mut cursor = std::io::Cursor::new(&data[..]);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
-        let mirror_pos = ntfs.mft_mirror_position().value().unwrap().get() as usize;
+        let mirror_pos = usize::try_from(ntfs.mft_mirror_position().value().unwrap().get())
+            .expect("test value fits usize");
 
         // Corrupt byte 40 of mirror record 0 (inside the record header,
         // past the fixup area, so fixup still succeeds but content differs).
@@ -509,8 +541,10 @@ mod tests {
 
         let mut cursor = std::io::Cursor::new(&data[..]);
         let ntfs = Ntfs::new(&mut cursor).unwrap();
-        let mirror_pos = ntfs.mft_mirror_position().value().unwrap().get() as usize;
-        let record_size = ntfs.file_record_size() as usize;
+        let mirror_pos = usize::try_from(ntfs.mft_mirror_position().value().unwrap().get())
+            .expect("test value fits usize");
+        let record_size =
+            usize::try_from(ntfs.file_record_size()).expect("test record size fits in usize");
 
         // Corrupt the signature of mirror record 2 ($LogFile).
         let sig_offset = mirror_pos + 2 * record_size;

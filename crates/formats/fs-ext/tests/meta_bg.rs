@@ -1,10 +1,14 @@
+//! Integration tests for ext4 `META_BG` descriptor layouts.
+
 use fs_common::io::FsReadSeek;
 use fs_ext::ChecksumState;
 
 #[test]
 fn opens_meta_bg_image_and_reads_files() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/ext4-meta-bg.img");
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Some(bytes) = fsmnt_testkit::read_optional_fixture(
+        env!("CARGO_MANIFEST_DIR"),
+        "testdata/ext4-meta-bg.img",
+    ) else {
         eprintln!("skipping: ext4-meta-bg.img fixture not generated");
         return;
     };

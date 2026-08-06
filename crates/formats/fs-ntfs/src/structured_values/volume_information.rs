@@ -33,12 +33,19 @@ bitflags! {
     pub struct NtfsVolumeFlags: u16 {
         /// The volume needs to be checked by `chkdsk`.
         const IS_DIRTY = 0x0001;
+        /// The NTFS transaction log should be resized.
         const RESIZE_LOG_FILE = 0x0002;
+        /// The volume should be upgraded when next mounted.
         const UPGRADE_ON_MOUNT = 0x0004;
+        /// The volume was mounted by Windows NT 4.
         const MOUNTED_ON_NT4 = 0x0008;
+        /// Deletion of the USN journal is in progress.
         const DELETE_USN_UNDERWAY = 0x0010;
+        /// Object identifiers require repair.
         const REPAIR_OBJECT_ID = 0x0020;
+        /// A `chkdsk` operation is currently running.
         const CHKDSK_UNDERWAY = 0x4000;
+        /// `chkdsk` modified the volume during its last run.
         const MODIFIED_BY_CHKDSK = 0x8000;
     }
 }
@@ -57,16 +64,16 @@ impl<'a> arbitrary::Arbitrary<'a> for NtfsVolumeFlags {
     }
 }
 
-/// Structure of a $VOLUME_INFORMATION attribute.
+/// Structure of a $`VOLUME_INFORMATION` attribute.
 ///
 /// This attribute is only used by the top-level $Volume file and contains general information about the filesystem.
 /// You can easily access it via [`Ntfs::volume_info`].
 ///
-/// A $VOLUME_INFORMATION attribute is always resident.
+/// A $`VOLUME_INFORMATION` attribute is always resident.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/attributes/volume_information.html>
 ///
-/// Spec reference: MS-FSCC Section 2.5.10 (FileFsVolumeInformation).
+/// Spec reference: MS-FSCC Section 2.5.10 (`FileFsVolumeInformation`).
 ///
 /// [`Ntfs::volume_info`]: crate::Ntfs::volume_info
 #[derive(Clone, Debug)]
@@ -79,11 +86,13 @@ impl NtfsVolumeInformation {
     where
         T: Read,
     {
-        if value_length < VOLUME_INFORMATION_SIZE as u64 {
+        let required_size = u64::try_from(VOLUME_INFORMATION_SIZE)
+            .expect("the fixed volume-information size fits u64");
+        if value_length < required_size {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::VolumeInformation,
-                expected: VOLUME_INFORMATION_SIZE as u64,
+                expected: required_size,
                 actual: value_length,
             });
         }
@@ -94,16 +103,19 @@ impl NtfsVolumeInformation {
     }
 
     /// Returns flags set for this NTFS filesystem/volume as specified by [`NtfsVolumeFlags`].
+    #[must_use]
     pub fn flags(&self) -> NtfsVolumeFlags {
         NtfsVolumeFlags::from_bits_truncate(self.info.flags.get())
     }
 
     /// Returns the major NTFS version of this filesystem (e.g. `3` for NTFS 3.1).
+    #[must_use]
     pub fn major_version(&self) -> u8 {
         self.info.major_version
     }
 
     /// Returns the minor NTFS version of this filesystem (e.g. `1` for NTFS 3.1).
+    #[must_use]
     pub fn minor_version(&self) -> u8 {
         self.info.minor_version
     }
@@ -111,7 +123,7 @@ impl NtfsVolumeInformation {
 
 impl_structured_value_via_new!(NtfsVolumeInformation, NtfsAttributeType::VolumeInformation);
 
-impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsVolumeInformation {
+impl<'f> NtfsStructuredValueFromResidentAttributeValue<'_, 'f> for NtfsVolumeInformation {
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self> {
         let position = value.data_position();
         let value_length = value.len();
@@ -134,8 +146,9 @@ impl<'a> arbitrary::Arbitrary<'a> for NtfsVolumeInformation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::KnownNtfsFileRecordNumber;
     use crate::ntfs::Ntfs;
+
+    const VOLUME_FILE_RECORD_NUMBER: u64 = 3;
 
     #[test]
     fn test_volume_information_accessors() {
@@ -172,9 +185,7 @@ mod tests {
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
         // Access $Volume directly (MFT entry 3) and find VolumeInformation attribute.
-        let volume_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Volume as u64)
-            .unwrap();
+        let volume_file = ntfs.file(&mut testfs1, VOLUME_FILE_RECORD_NUMBER).unwrap();
         let mut attrs = volume_file.attributes_raw();
 
         // Find the VolumeInformation attribute.
@@ -201,7 +212,7 @@ mod tests {
         let result = NtfsVolumeInformation::new(
             &mut cursor,
             NtfsPosition::new(100),
-            short_data.len() as u64,
+            u64::try_from(short_data.len()).expect("test buffer length fits u64"),
         );
         assert!(result.is_err());
     }
@@ -214,8 +225,8 @@ mod tests {
         assert!(!s.is_empty());
     }
 
-    /// Builds a 12-byte $VOLUME_INFORMATION value (MS-FSCC 2.5.10):
-    /// 8-byte reserved, major_version (u8), minor_version (u8), flags (u16).
+    /// Builds a 12-byte $`VOLUME_INFORMATION` value (MS-FSCC 2.5.10):
+    /// 8-byte reserved, `major_version` (u8), `minor_version` (u8), flags (u16).
     fn build_volume_information(major: u8, minor: u8, flags: u16) -> [u8; VOLUME_INFORMATION_SIZE] {
         let mut buf = [0u8; VOLUME_INFORMATION_SIZE];
         buf[8] = major;
@@ -231,9 +242,12 @@ mod tests {
         // minor 1 differs from major and from 0.
         let buf = build_volume_information(3, 1, 0x0001);
         let mut cursor = crate::helpers::ReadOnlyCursor::new(&buf);
-        let vol_info =
-            NtfsVolumeInformation::new(&mut cursor, NtfsPosition::new(0x200), buf.len() as u64)
-                .unwrap();
+        let vol_info = NtfsVolumeInformation::new(
+            &mut cursor,
+            NtfsPosition::new(0x200),
+            u64::try_from(buf.len()).expect("test buffer length fits u64"),
+        )
+        .unwrap();
 
         assert_eq!(vol_info.major_version(), 3);
         assert_eq!(vol_info.minor_version(), 1);
@@ -247,9 +261,12 @@ mod tests {
         // for both fields independently.
         let buf = build_volume_information(7, 2, 0);
         let mut cursor = crate::helpers::ReadOnlyCursor::new(&buf);
-        let vol_info =
-            NtfsVolumeInformation::new(&mut cursor, NtfsPosition::none(), buf.len() as u64)
-                .unwrap();
+        let vol_info = NtfsVolumeInformation::new(
+            &mut cursor,
+            NtfsPosition::none(),
+            u64::try_from(buf.len()).expect("test buffer length fits u64"),
+        )
+        .unwrap();
         assert_eq!(vol_info.major_version(), 7);
         assert_eq!(vol_info.minor_version(), 2);
     }

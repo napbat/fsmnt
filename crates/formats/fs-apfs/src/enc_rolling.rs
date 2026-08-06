@@ -111,6 +111,11 @@ impl ErState {
     /// Returns [`ApfsError::Truncated`] for a short block,
     /// [`ApfsError::InvalidMagic`] for a bad `ersb_magic`, and
     /// [`ApfsError::Unsupported`] for an unrecognized `ersb_version`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width state field ceases to fit the minimum
+    /// block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < ER_STATE_PHYS_SIZE {
             return Err(ApfsError::Truncated {
@@ -200,6 +205,11 @@ impl ErRecoveryBlock {
     /// # Errors
     ///
     /// Returns [`ApfsError::Truncated`] for a short block.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width recovery field ceases to fit the minimum
+    /// block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < OBJ_PHYS_SIZE + 16 {
             return Err(ApfsError::Truncated {
@@ -240,6 +250,11 @@ impl GeneralBitmap {
     /// # Errors
     ///
     /// Returns [`ApfsError::Truncated`] for a short block.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width bitmap field ceases to fit the minimum
+    /// block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < OBJ_PHYS_SIZE + 24 {
             return Err(ApfsError::Truncated {
@@ -264,9 +279,8 @@ impl GeneralBitmap {
 #[must_use]
 pub fn gbitmap_block_bit(block: &[u8], index: u64) -> bool {
     let field = &block[OBJ_PHYS_SIZE.min(block.len())..];
-    let byte_index = match usize::try_from(index / 8) {
-        Ok(value) => value,
-        Err(_) => return false,
+    let Ok(byte_index) = usize::try_from(index / 8) else {
+        return false;
     };
     field
         .get(byte_index)

@@ -10,70 +10,127 @@ pub type Result<T, E = FatError> = core::result::Result<T, E>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FatError {
+    /// The volume does not end its boot sector with the FAT signature.
     #[error("Invalid boot signature: expected 0xAA55, found {actual:#06x}")]
-    InvalidBootSignature { actual: u16 },
+    InvalidBootSignature {
+        /// Signature value read from the boot sector.
+        actual: u16,
+    },
 
+    /// The input is a `BitLocker` container rather than a directly readable FAT volume.
     #[error(
         "The volume is BitLocker-encrypted (OEM ID: {oem_id:?}). Decrypt the volume before parsing as FAT."
     )]
-    BitLockerEncrypted { oem_id: [u8; 8] },
+    BitLockerEncrypted {
+        /// OEM identifier that marks the `BitLocker` container.
+        oem_id: [u8; 8],
+    },
 
+    /// The BIOS parameter block specifies an unsupported sector size.
     #[error("Invalid bytes per sector: {actual} (must be 512, 1024, 2048, or 4096)")]
-    InvalidBytesPerSector { actual: u16 },
+    InvalidBytesPerSector {
+        /// Unsupported sector size from the parameter block.
+        actual: u16,
+    },
 
+    /// The BIOS parameter block specifies an invalid cluster geometry.
     #[error("Invalid sectors per cluster: {actual} (must be a power of 2)")]
-    InvalidSectorsPerCluster { actual: u8 },
+    InvalidSectorsPerCluster {
+        /// Invalid sectors-per-cluster value from the parameter block.
+        actual: u8,
+    },
 
+    /// The extended boot-sector structure could not be decoded.
     #[error("Failed to parse boot sector structure")]
     BootSectorParseFailed,
 
+    /// The BIOS parameter block could not be decoded.
     #[error("Failed to parse BPB (BIOS Parameter Block)")]
     BpbParseFailed,
 
+    /// Boot-sector geometry overflowed while deriving volume offsets.
     #[error("BPB fields cause arithmetic overflow")]
     BpbOverflow,
 
+    /// The cluster count and boot-sector layout identify conflicting FAT variants.
     #[error(
         "Invalid FAT type: cluster count {cluster_count} does not match expected FAT32 structure"
     )]
-    InvalidFatType { cluster_count: u32 },
+    InvalidFatType {
+        /// Number of data clusters derived from the boot sector.
+        cluster_count: u32,
+    },
 
+    /// A FAT32 volume declares a fixed FAT12/16 root-entry table.
     #[error("Invalid root entry count: {actual} (must be 0 for FAT32)")]
-    InvalidRootEntryCount { actual: u16 },
+    InvalidRootEntryCount {
+        /// Invalid root-entry count from the parameter block.
+        actual: u16,
+    },
 
+    /// The BIOS parameter block declares an invalid count of allocation tables.
     #[error("Invalid number of FATs: {actual} (typically 1 or 2)")]
-    InvalidNumFats { actual: u8 },
+    InvalidNumFats {
+        /// Invalid allocation-table count from the parameter block.
+        actual: u8,
+    },
 
+    /// The BIOS parameter block does not reserve any boot sectors.
     #[error("Invalid reserved sector count: {actual}")]
-    InvalidReservedSectors { actual: u16 },
+    InvalidReservedSectors {
+        /// Invalid reserved-sector count from the parameter block.
+        actual: u16,
+    },
 
+    /// The declared volume has no sectors available for file data.
     #[error("Invalid total sectors: filesystem appears to have no data area")]
     InvalidTotalSectors,
 
+    /// A cluster number lies outside the volume's data-cluster range.
     #[error("Invalid cluster number: {cluster}")]
-    InvalidCluster { cluster: u32 },
+    InvalidCluster {
+        /// Out-of-range cluster number.
+        cluster: u32,
+    },
 
+    /// A cluster chain references a cluster marked unusable by the FAT.
     #[error("Cluster {cluster} is marked as bad")]
-    BadCluster { cluster: u32 },
+    BadCluster {
+        /// Cluster number carrying the bad-cluster marker.
+        cluster: u32,
+    },
 
+    /// Traversal exceeded the maximum possible length of a valid cluster chain.
     #[error("Cluster chain loop detected (exceeded maximum of {max_clusters} clusters)")]
-    ClusterChainLoop { max_clusters: u32 },
+    ClusterChainLoop {
+        /// Maximum number of data clusters in the volume.
+        max_clusters: u32,
+    },
 
+    /// An operation that requires a directory received a regular file.
     #[error("Not a directory")]
     NotADirectory,
 
+    /// An operation that requires a regular file received a directory.
     #[error("Is a directory")]
     IsADirectory,
 
+    /// No directory entry matched the requested path.
     #[error("File or directory not found")]
     NotFound,
 
+    /// A directory record could not be decoded at its on-disk location.
     #[error("Malformed directory entry at byte offset {byte_offset:#x}")]
-    MalformedDirEntry { byte_offset: u64 },
+    MalformedDirEntry {
+        /// Absolute byte offset of the malformed record.
+        byte_offset: u64,
+    },
 
+    /// A timestamp could not be represented by FAT's 1980–2107 date range.
     #[error("Invalid time value")]
     InvalidTime,
 
+    /// Reading or seeking the underlying volume failed.
     #[error("I/O error: {0:?}")]
     Io(io::Error),
 }

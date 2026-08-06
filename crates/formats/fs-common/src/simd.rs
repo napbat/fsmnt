@@ -6,8 +6,8 @@
 //!
 //! With the `std` feature enabled, detection uses runtime CPUID
 //! probing via [`is_x86_feature_detected!`] to report AVX-512, AVX2,
-//! or SSE2 on x86_64.  Without `std`, detection is compile-time only:
-//! x86_64 maps to SSE2, everything else to Scalar.
+//! or SSE2 on `x86_64`.  Without `std`, detection is compile-time only:
+//! `x86_64` maps to SSE2, everything else to Scalar.
 
 use core::fmt;
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 pub enum SimdLevel {
     /// No SIMD — scalar code only.
     Scalar = 0,
-    /// SSE2 (128-bit). Baseline on x86_64.
+    /// SSE2 (128-bit). Baseline on `x86_64`.
     Sse2 = 1,
     /// AVX2 (256-bit). Requires Haswell (2013) or later.
     Avx2 = 2,
@@ -42,17 +42,17 @@ impl SimdLevel {
     /// The first call performs detection; subsequent calls return the
     /// cached result via a single `Relaxed` atomic load.
     ///
-    /// With the `std` feature (default), x86_64 detection uses runtime
+    /// With the `std` feature (default), `x86_64` detection uses runtime
     /// CPUID probing and can return `Avx512`, `Avx2`, or `Sse2`.
-    /// Without `std`, x86_64 conservatively returns `Sse2`.
+    /// Without `std`, `x86_64` conservatively returns `Sse2`.
     /// Non-x86 architectures always return `Scalar`.
     #[inline]
     pub fn detect() -> Self {
         let v = CACHED.load(Ordering::Relaxed);
-        if v != UNINIT {
-            Self::from_u8(v)
-        } else {
+        if v == UNINIT {
             Self::detect_cold()
+        } else {
+            Self::from_u8(v)
         }
     }
 
@@ -63,7 +63,7 @@ impl SimdLevel {
         level
     }
 
-    /// Runtime probe using CPUID on x86_64 with `std`.
+    /// Runtime probe using CPUID on `x86_64` with `std`.
     #[cfg(all(target_arch = "x86_64", feature = "std"))]
     fn probe() -> Self {
         if is_x86_feature_detected!("avx512f") {
@@ -75,8 +75,8 @@ impl SimdLevel {
         }
     }
 
-    /// Compile-time probe: x86_64 guarantees SSE2 but without `std`
-    /// we cannot do runtime CPUID checks.
+    /// Compile-time probe: `x86_64` guarantees `SSE2` but without `std`
+    /// we cannot do runtime `CPUID` checks.
     #[cfg(all(target_arch = "x86_64", not(feature = "std")))]
     #[cfg_attr(test, mutants::skip)] // cfg-gated to no_std builds; std test harness cannot exercise it.
     fn probe() -> Self {
@@ -95,6 +95,7 @@ impl SimdLevel {
     /// handled by the fallback arm — listing it explicitly would be an
     /// equivalent mutant for cargo-mutants.
     #[inline]
+    #[must_use]
     pub fn from_u8(v: u8) -> Self {
         match v {
             1 => Self::Sse2,

@@ -26,7 +26,7 @@ pub const APFS_VOL_KEYBAG_ENTRY_MAX_SIZE: usize = 512;
 pub const CP_EFFECTIVE_CLASSMASK: u32 = 0x0000_001F;
 /// The crypto-id value used by software-encrypted volumes (`CRYPTO_SW_ID`).
 pub const CRYPTO_SW_ID: u64 = 4;
-/// UUID identifying a FileVault personal recovery key entry.
+/// UUID identifying a `FileVault` personal recovery key entry.
 pub const APFS_FV_PERSONAL_RECOVERY_KEY_UUID: &str = "EBC6C064-0000-11AA-AA11-00306543ECAC";
 
 /// A keybag-entry tag (`KB_TAG_*`).
@@ -239,21 +239,29 @@ mod tests {
     fn keybag(version: u16, entries: &[([u8; 16], u16, Vec<u8>)]) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(&version.to_le_bytes());
-        b.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        b.extend_from_slice(
+            &u16::try_from(entries.len())
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         b.extend_from_slice(&0u32.to_le_bytes()); // kl_nbytes (filled below)
         b.extend_from_slice(&[0u8; 8]); // padding
         for (uuid, tag, data) in entries {
             let start = b.len();
             b.extend_from_slice(uuid);
             b.extend_from_slice(&tag.to_le_bytes());
-            b.extend_from_slice(&(data.len() as u16).to_le_bytes());
+            b.extend_from_slice(
+                &u16::try_from(data.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b.extend_from_slice(&[0u8; 4]); // padding
             b.extend_from_slice(data);
             // Pad the entry to a sixteen-byte boundary.
             let aligned = ((b.len() - start) + 15) & !15;
             b.resize(start + aligned, 0);
         }
-        let nbytes = b.len() as u32;
+        let nbytes = u32::try_from(b.len()).expect("the test fixture value fits in u32");
         b[4..8].copy_from_slice(&nbytes.to_le_bytes());
         b
     }
@@ -314,8 +322,11 @@ mod tests {
         // ke_keylen sits at offset +18 of the first entry, which begins at
         // KB_LOCKER_HEADER_SIZE.
         let keylen_off = KB_LOCKER_HEADER_SIZE + 18;
-        bag[keylen_off..keylen_off + 2]
-            .copy_from_slice(&(APFS_VOL_KEYBAG_ENTRY_MAX_SIZE as u16).to_le_bytes());
+        bag[keylen_off..keylen_off + 2].copy_from_slice(
+            &u16::try_from(APFS_VOL_KEYBAG_ENTRY_MAX_SIZE)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         assert!(matches!(
             Keybag::parse(&bag),
             Err(ApfsError::Malformed { .. })
@@ -333,8 +344,8 @@ mod tests {
         ));
     }
 
-    /// Prefixes `bag` with an obj_phys_t header whose first byte differs from
-    /// the kb_locker version's low byte. The wrapper turns a bare keybag into
+    /// Prefixes `bag` with an `obj_phys_t` header whose first byte differs from
+    /// the `kb_locker` version's low byte. The wrapper turns a bare keybag into
     /// the `media_keybag_t` form that requires header detection to skip.
     fn media_keybag(bag: Vec<u8>) -> Vec<u8> {
         let mut wrapped = vec![0u8; OBJ_PHYS_SIZE];

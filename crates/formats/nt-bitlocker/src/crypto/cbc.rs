@@ -24,7 +24,10 @@ pub struct AesCbcDecryptor {
 
 /// Holds the pre-expanded CBC key schedule.
 #[derive(Debug)]
-#[expect(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "expanded AES schedules remain inline to avoid heap allocation in sector decryption"
+)]
 enum CbcInner {
     Aes128(aes::Aes128),
     Aes256(aes::Aes256),
@@ -196,7 +199,10 @@ fn xor_sector_key_in_place(tweak_cipher: &TweakCipher, sector_num: u64, data: &m
 
 /// Pre-expanded tweak key for the Elephant diffuser.
 #[derive(Debug)]
-#[expect(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "expanded AES tweak schedules remain inline to avoid per-sector heap indirection"
+)]
 enum TweakCipher {
     Aes128(aes::Aes128),
     Aes256(aes::Aes256),
@@ -289,7 +295,6 @@ impl SectorDecryptor for AesCbcDiffuserDecryptor {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 

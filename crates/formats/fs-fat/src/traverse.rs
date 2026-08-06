@@ -20,6 +20,10 @@ impl<'n> FatDirectory<'n> {
     ///
     /// Returns `Err(FatError::NotADirectory)` if the file is not a
     /// directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FatError::NotADirectory`] when `file` is not a directory.
     pub fn new(file: FatFile<'n>) -> Result<Self> {
         if !file.is_directory() {
             return Err(FatError::NotADirectory);
@@ -28,6 +32,7 @@ impl<'n> FatDirectory<'n> {
     }
 
     /// Returns the underlying [`FatFile`].
+    #[must_use]
     pub fn into_inner(self) -> FatFile<'n> {
         self.file
     }
@@ -94,8 +99,9 @@ pub struct FatDirectoryEntry<'n> {
     fat: &'n Fat,
 }
 
-impl<'n> FatDirectoryEntry<'n> {
+impl FatDirectoryEntry<'_> {
     /// Returns a reference to the underlying [`FatDirEntry`].
+    #[must_use]
     pub fn inner(&self) -> &FatDirEntry {
         &self.entry
     }
@@ -252,22 +258,26 @@ mod tests {
         // first_cluster_high at offset 0x14
         img[off + 0x14..off + 0x16].copy_from_slice(&(cluster >> 16).to_le_bytes()[..2]);
         // first_cluster_low at offset 0x1A
-        img[off + 0x1A..off + 0x1C].copy_from_slice(&(cluster as u16).to_le_bytes());
+        img[off + 0x1A..off + 0x1C].copy_from_slice(
+            &u16::try_from(cluster)
+                .expect("test cluster fits the FAT16 field")
+                .to_le_bytes(),
+        );
         // file_size at offset 0x1C
         img[off + 0x1C..off + 0x20].copy_from_slice(&size.to_le_bytes());
     }
 
     /// Build a minimal FAT16 image.
     ///
-    /// Layout (sector_size=512, 1 sector/cluster):
+    /// Layout (`sector_size=512`, 1 sector/cluster):
     ///   Sector 0  (0x0000): Boot sector
     ///   Sector 1  (0x0200): FAT table (17 sectors)
     ///   Sector 18 (0x2400): Root directory (fixed, 16 entries)
     ///   Sector 19 (0x2600): Cluster 2 — SUBDIR contents
     ///   Sector 20 (0x2800): Cluster 3 — CHILD.TXT data
-    ///   Sector 21 (0x2A00): Cluster 4 — ROOT_F.TXT data
+    ///   Sector 21 (0x2A00): Cluster 4 — `ROOT_F.TXT` data
     ///
-    /// Root entries: SUBDIR (dir, cluster 2), ROOT_F (file, cluster 4)
+    /// Root entries: SUBDIR (dir, cluster 2), `ROOT_F` (file, cluster 4)
     /// SUBDIR:       . (cluster 2), .. (cluster 0), CHILD (file, cluster 3)
     fn build_fat16_image() -> Vec<u8> {
         // Image needs data through cluster 4 = sector 21.
@@ -322,15 +332,15 @@ mod tests {
 
     /// Build a minimal FAT32 image.
     ///
-    /// Layout (sector_size=512, 1 sector/cluster):
+    /// Layout (`sector_size=512`, 1 sector/cluster):
     ///   Sectors 0-31  : Reserved (boot at 0)
     ///   Sectors 32-543: FAT table (512 sectors)
     ///   Sector 544    : Cluster 2 — root directory
     ///   Sector 545    : Cluster 3 — SUBDIR contents
     ///   Sector 546    : Cluster 4 — NESTED.TXT data
-    ///   Sector 547    : Cluster 5 — ROOT_F.TXT data
+    ///   Sector 547    : Cluster 5 — `ROOT_F.TXT` data
     ///
-    /// Root (cluster 2): SUBDIR (dir, cluster 3), ROOT_F (file, cluster 5)
+    /// Root (cluster 2): SUBDIR (dir, cluster 3), `ROOT_F` (file, cluster 5)
     /// SUBDIR (cluster 3): . (cluster 3), .. (cluster 0), NESTED (file, cluster 4)
     fn build_fat32_image() -> Vec<u8> {
         // Image needs data through cluster 5 = sector 547.
@@ -388,7 +398,7 @@ mod tests {
         img
     }
 
-    /// Collect entry names from a walk_dir traversal.
+    /// Collect entry names from a `walk_dir` traversal.
     fn walk_names(cursor: &mut Cursor<Vec<u8>>, dir: &mut FatDirectory<'_>) -> Vec<String> {
         let mut seen = BTreeSet::new();
         let mut names = Vec::new();
@@ -468,7 +478,7 @@ mod tests {
         );
     }
 
-    /// On FAT32, an entry whose first_cluster is 0 (the conventional
+    /// On FAT32, an entry whose `first_cluster` is 0 (the conventional
     /// encoding for "parent is root") must produce the same `FsId` as
     /// the root directory itself so cycle detection works.
     #[test]
@@ -676,12 +686,8 @@ mod tests {
         let mut entries = fat.root_dir_entries();
         let mut names = Vec::new();
 
-        loop {
-            match entries.next(&mut cur) {
-                Some(Ok(entry)) => names.push(entry.short_name_string()),
-                Some(Err(_)) => break,
-                None => break,
-            }
+        while let Some(Ok(entry)) = entries.next(&mut cur) {
+            names.push(entry.short_name_string());
         }
 
         assert!(

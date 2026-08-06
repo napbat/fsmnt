@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
 
 use crate::attribute::NtfsAttributeType;
 use crate::error::Result;
@@ -22,27 +23,32 @@ pub struct NtfsChildEntry {
 
 impl NtfsChildEntry {
     /// The child's MFT record number.
+    #[must_use]
     pub fn record_number(&self) -> u64 {
         self.record_number
     }
 
     /// The child's sequence number (from its MFT record header).
+    #[must_use]
     pub fn sequence_number(&self) -> u16 {
         self.sequence_number
     }
 
     /// The parent's sequence number as recorded in the child's `$FILE_NAME`
     /// attribute (`parent_directory_reference`).
+    #[must_use]
     pub fn parent_sequence(&self) -> u16 {
         self.parent_sequence
     }
 
     /// Whether this child is a directory.
+    #[must_use]
     pub fn is_directory(&self) -> bool {
         self.is_directory
     }
 
-    /// The file name namespace (Win32, Dos, Posix, or Win32AndDos).
+    /// The file name namespace (Win32, Dos, Posix, or `Win32AndDos`).
+    #[must_use]
     pub fn namespace(&self) -> NtfsFileNamespace {
         self.namespace
     }
@@ -55,7 +61,7 @@ impl NtfsChildEntry {
 /// as their parent but do not appear in that directory's index.
 #[derive(Clone, Debug)]
 pub struct NtfsParentMap {
-    map: HashMap<u64, Vec<NtfsChildEntry>>,
+    map: BTreeMap<u64, Vec<NtfsChildEntry>>,
 }
 
 impl NtfsParentMap {
@@ -64,14 +70,17 @@ impl NtfsParentMap {
     /// For each in-use MFT entry, every `$FILE_NAME` attribute is inspected
     /// and the entry is recorded under its parent's record number. Corrupt or
     /// unreadable records are silently skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the MFT iterator cannot be initialized.
     pub fn build<T: Read + Seek>(ntfs: &Ntfs, fs: &mut T) -> Result<Self> {
         let mut iter = NtfsMftEntries::new(ntfs, fs)?;
-        let mut map: HashMap<u64, Vec<NtfsChildEntry>> = HashMap::new();
+        let mut map: BTreeMap<u64, Vec<NtfsChildEntry>> = BTreeMap::new();
 
         while let Some(result) = iter.next(ntfs, fs) {
-            let file = match result {
-                Ok(f) => f,
-                Err(_) => continue,
+            let Ok(file) = result else {
+                continue;
             };
             if !file.flags().contains(NtfsFileFlags::IN_USE) {
                 continue;
@@ -88,16 +97,14 @@ impl NtfsParentMap {
                     Ok(None) => break,
                     Err(_) => continue,
                 };
-                let attr = match item.to_attribute() {
-                    Ok(a) => a,
-                    Err(_) => continue,
+                let Ok(attr) = item.to_attribute() else {
+                    continue;
                 };
                 if attr.ty().unwrap_or(NtfsAttributeType::End) != NtfsAttributeType::FileName {
                     continue;
                 }
-                let fname = match attr.structured_value::<_, NtfsFileName>(fs) {
-                    Ok(f) => f,
-                    Err(_) => continue,
+                let Ok(fname) = attr.structured_value::<_, NtfsFileName>(fs) else {
+                    continue;
                 };
 
                 let parent_ref = fname.parent_directory_reference();
@@ -122,8 +129,7 @@ impl NtfsParentMap {
     pub fn children(&self, parent_record_number: u64) -> &[NtfsChildEntry] {
         self.map
             .get(&parent_record_number)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Returns children that claim `dir_record_number` as their parent (with a
@@ -132,11 +138,12 @@ impl NtfsParentMap {
     ///
     /// These are potential orphan files — allocated entries that the directory
     /// index no longer references.
+    #[must_use]
     pub fn orphans_for(
         &self,
         dir_record_number: u64,
         dir_sequence: u16,
-        indexed_records: &HashSet<u64>,
+        indexed_records: &BTreeSet<u64>,
     ) -> Vec<&NtfsChildEntry> {
         self.children(dir_record_number)
             .iter()
@@ -153,6 +160,7 @@ impl NtfsParentMap {
     }
 
     /// Returns `true` if the map contains no entries.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
@@ -179,7 +187,7 @@ mod tests {
         }
     }
 
-    /// Builds a parent map directly from (parent_record, children) pairs,
+    /// Builds a parent map directly from (`parent_record`, children) pairs,
     /// bypassing the MFT scan in `build`.
     fn map_from(entries: Vec<(u64, Vec<NtfsChildEntry>)>) -> NtfsParentMap {
         NtfsParentMap {
@@ -303,7 +311,7 @@ mod tests {
             ],
         )]);
 
-        let mut indexed: HashSet<u64> = HashSet::new();
+        let mut indexed: BTreeSet<u64> = BTreeSet::new();
         indexed.insert(11);
 
         let orphans = pmap.orphans_for(5, 4, &indexed);
@@ -350,7 +358,9 @@ mod tests {
 
         // All children should claim record 5 as parent (verified by the map structure).
         // Verify we can find at least one directory child.
-        let has_dir = root_children.iter().any(|c| c.is_directory());
+        let has_dir = root_children
+            .iter()
+            .any(super::NtfsChildEntry::is_directory);
         assert!(
             has_dir,
             "root directory should have at least one subdirectory child"
@@ -373,7 +383,7 @@ mod tests {
         let index = root_dir.directory_index(&mut testfs1).unwrap();
         let mut iter = index.entries();
 
-        let mut indexed: HashSet<u64> = HashSet::new();
+        let mut indexed: BTreeSet<u64> = BTreeSet::new();
         while let Some(entry) = iter.try_next(&mut testfs1).unwrap() {
             let fname = entry.key().unwrap().unwrap();
             indexed.insert(fname.parent_directory_reference().file_record_number());

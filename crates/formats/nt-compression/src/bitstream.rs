@@ -62,7 +62,7 @@ impl<'a> BitReader<'a> {
                     u16::from_le_bytes([self.data[self.byte_pos], self.data[self.byte_pos + 1]]);
                 self.byte_pos += 2;
                 let shift = 64 - self.bits_remaining - 16;
-                self.bit_buffer |= (word as u64) << shift;
+                self.bit_buffer |= u64::from(word) << shift;
                 self.bits_remaining += 16;
             } else if self.zero_fill && self.byte_pos < self.data.len() {
                 // Trailing odd byte — load as 8 bits into the MSB
@@ -72,7 +72,7 @@ impl<'a> BitReader<'a> {
                 let byte = self.data[self.byte_pos];
                 self.byte_pos += 1;
                 let shift = 64 - self.bits_remaining - 8;
-                self.bit_buffer |= (byte as u64) << shift;
+                self.bit_buffer |= u64::from(byte) << shift;
                 self.bits_remaining += 8;
             } else if self.zero_fill {
                 // Treat exhausted input as infinite zeros. The
@@ -101,7 +101,8 @@ impl<'a> BitReader<'a> {
         if count == 0 {
             return 0;
         }
-        (self.bit_buffer >> (64 - count)) as u32
+        u32::try_from(self.bit_buffer >> (64 - count))
+            .expect("peeking at most 32 bits leaves no set bits above bit 31")
     }
 
     /// Consume `count` bits from the buffer (shift them out).
@@ -285,7 +286,8 @@ impl BitWriter {
         self.accum_bits += count;
         if self.accum_bits >= 16 {
             self.accum_bits -= 16;
-            let word = (self.accum >> self.accum_bits) as u16;
+            let word = u16::try_from(self.accum >> self.accum_bits)
+                .expect("the writer flushes one 16-bit word at a time");
             let le = word.to_le_bytes();
             self.data.push(le[0]);
             self.data.push(le[1]);
@@ -306,7 +308,8 @@ impl BitWriter {
         self.accum_bits += total_bits;
         while self.accum_bits >= 16 {
             self.accum_bits -= 16;
-            let word = (self.accum >> self.accum_bits) as u16;
+            let word = u16::try_from(self.accum >> self.accum_bits)
+                .expect("the writer flushes one 16-bit word at a time");
             let le = word.to_le_bytes();
             self.data.push(le[0]);
             self.data.push(le[1]);
@@ -386,7 +389,8 @@ impl BitWriter {
     /// to fill a full 16-bit word.
     pub fn flush_bits(&mut self) {
         if self.accum_bits > 0 {
-            let word = (self.accum << (16 - self.accum_bits)) as u16;
+            let word = u16::try_from(self.accum << (16 - self.accum_bits))
+                .expect("the final writer accumulator contains at most 16 bits");
             let le = word.to_le_bytes();
             self.data.push(le[0]);
             self.data.push(le[1]);

@@ -1,6 +1,7 @@
 use core::mem;
 
 use alloc::vec::Vec;
+use fs_common::error::IoError;
 use memoffset::{offset_of, span_of};
 
 use crate::error::{NtfsError, Result};
@@ -38,10 +39,11 @@ impl Record {
         let update_sequence_number = self.update_sequence_number()?;
         let array_count = self.update_sequence_array_count()?;
 
-        let mut array_position = self.update_sequence_array_start()? as usize;
-        let array_end =
-            self.update_sequence_offset()? as usize + self.update_sequence_size()? as usize;
-        let sectors_end = array_count as usize * NTFS_BLOCK_SIZE;
+        let mut array_position = usize::from(self.update_sequence_array_start()?);
+        let update_sequence_size =
+            usize::try_from(self.update_sequence_size()?).map_err(|_| IoError::invalid_input())?;
+        let array_end = usize::from(self.update_sequence_offset()?) + update_sequence_size;
+        let sectors_end = usize::from(array_count) * NTFS_BLOCK_SIZE;
 
         if array_end > self.data.len() || sectors_end > self.data.len() {
             return Err(NtfsError::UpdateSequenceArrayExceedsRecordSize {
@@ -89,10 +91,8 @@ impl Record {
         self.data
     }
 
-    pub(crate) fn len(&self) -> u32 {
-        // A record is never larger than a u32.
-        // Usually, it shouldn't even exceed a u16, but our code could handle that.
-        self.data.len() as u32
+    pub(crate) fn len(&self) -> usize {
+        self.data.len()
     }
 
     pub(crate) fn position(&self) -> NtfsPosition {
@@ -134,11 +134,11 @@ impl Record {
 
     fn update_sequence_array_start(&self) -> Result<u16> {
         // The Update Sequence Number (USN) comes first and the array begins right after that.
-        Ok(self.update_sequence_offset()? + mem::size_of::<u16>() as u16)
+        Ok(self.update_sequence_offset()? + 2)
     }
 
     fn update_sequence_number(&self) -> Result<[u8; 2]> {
-        let start = self.update_sequence_offset()? as usize;
+        let start = usize::from(self.update_sequence_offset()?);
         let end = start + mem::size_of::<u16>();
         self.data
             .get(start..end)
@@ -162,7 +162,7 @@ impl Record {
         self.validate_header_size()?;
         let start = offset_of!(RecordHeader, update_sequence_count);
         let update_sequence_count = u16::from_le_bytes(*self.data[start..].first_chunk().unwrap());
-        Ok(update_sequence_count as u32 * mem::size_of::<u16>() as u32)
+        Ok(u32::from(update_sequence_count) * 2)
     }
 }
 
@@ -174,8 +174,8 @@ mod tests {
 
     /// Builds a synthetic NTFS fixup-protected record.
     ///
-    /// Layout: `num_sectors` sectors of 512 bytes each. The RecordHeader is
-    /// at offset 0 (signature "FILE", update_sequence_offset, count). The
+    /// Layout: `num_sectors` sectors of 512 bytes each. The `RecordHeader` is
+    /// at offset 0 (signature "FILE", `update_sequence_offset`, count). The
     /// Update Sequence Number is written at `usn_offset` and into the last
     /// two bytes of every sector. The fixup array (one 2-byte entry per
     /// sector) follows the USN; entry `i` holds the original bytes that
@@ -185,9 +185,17 @@ mod tests {
         let mut data = vec![0u8; num_sectors * NTFS_BLOCK_SIZE];
         data[0..4].copy_from_slice(b"FILE");
         // update_sequence_offset (u16) at offset 4.
-        data[4..6].copy_from_slice(&(usn_offset as u16).to_le_bytes());
+        data[4..6].copy_from_slice(
+            &u16::try_from(usn_offset)
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
         // update_sequence_count (u16) at offset 6: array_count + 1 USN slot.
-        data[6..8].copy_from_slice(&((num_sectors + 1) as u16).to_le_bytes());
+        data[6..8].copy_from_slice(
+            &u16::try_from(num_sectors + 1)
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
         // USN value.
         data[usn_offset..usn_offset + 2].copy_from_slice(&USN);
         // Fixup array entries follow the USN.
@@ -354,7 +362,11 @@ mod tests {
         let usn_offset = 516usize; // array_end = 516 + 4 = 520 == len.
         let mut data = vec![0u8; 520];
         data[0..4].copy_from_slice(b"FILE");
-        data[4..6].copy_from_slice(&(usn_offset as u16).to_le_bytes());
+        data[4..6].copy_from_slice(
+            &u16::try_from(usn_offset)
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
         data[6..8].copy_from_slice(&2u16.to_le_bytes()); // count = 2 (1 sector)
         let usn = [0xAAu8, 0xBB];
         data[usn_offset..usn_offset + 2].copy_from_slice(&usn); // USN value

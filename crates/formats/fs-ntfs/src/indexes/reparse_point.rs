@@ -7,7 +7,7 @@ use crate::types::NtfsPosition;
 use super::NtfsIndexEntryKey;
 use super::{NtfsIndexEntryHasFileReference, NtfsIndexEntryType};
 
-/// Size of the on-disk key: reparse_tag(4) + file_reference(8) = 12 bytes.
+/// Size of the on-disk key: `reparse_tag(4)` + `file_reference(8)` = 12 bytes.
 const REPARSE_POINT_INDEX_KEY_SIZE: usize = 12;
 
 /// Defines the [`NtfsIndexEntryType`] for `$R` (Reparse Point) index entries
@@ -36,11 +36,13 @@ pub struct NtfsReparsePointIndexKey {
 impl NtfsReparsePointIndexKey {
     /// Returns the reparse tag identifying the type of reparse point
     /// (e.g. `IO_REPARSE_TAG_SYMLINK`, `IO_REPARSE_TAG_MOUNT_POINT`).
+    #[must_use]
     pub fn reparse_tag(&self) -> u32 {
         self.reparse_tag
     }
 
     /// Returns the file reference of the file that owns this reparse point.
+    #[must_use]
     pub fn file_reference(&self) -> NtfsFileReference {
         self.file_reference
     }
@@ -90,7 +92,7 @@ mod tests {
         let mut buf = [0u8; 12];
         buf[0..4].copy_from_slice(&tag.to_le_bytes());
         let packed: u64 =
-            (record_number & 0x0000_ffff_ffff_ffff) | ((sequence_number as u64) << 48);
+            (record_number & 0x0000_ffff_ffff_ffff) | (u64::from(sequence_number) << 48);
         buf[4..12].copy_from_slice(&packed.to_le_bytes());
         buf
     }

@@ -44,6 +44,11 @@ const NEJ_EXTENTS_OFFSET: usize = OBJ_PHYS_SIZE + 16 + 128;
 /// # Errors
 ///
 /// Propagates I/O errors.
+///
+/// # Panics
+///
+/// Panics only if the fixed superblock-magic offsets cease to fit the
+/// compile-time-sized probe buffer.
 pub fn is_apfs_container<T: Read + Seek>(reader: &mut T) -> Result<bool> {
     reader.seek(SeekFrom::Start(0))?;
     let mut probe = [0u8; NX_MINIMUM_BLOCK_SIZE as usize];
@@ -80,6 +85,11 @@ impl EfiJumpstart {
     /// Returns [`ApfsError::Truncated`] for a short block,
     /// [`ApfsError::InvalidMagic`] for a bad `nej_magic`, or
     /// [`ApfsError::Unsupported`] for an unrecognized version.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the fixed-width EFI fields cease to match the minimum
+    /// block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < NEJ_EXTENTS_OFFSET {
             return Err(ApfsError::Truncated {
@@ -157,7 +167,11 @@ mod tests {
         b[0x20..0x24].copy_from_slice(&magic.to_le_bytes());
         b[0x24..0x28].copy_from_slice(&version.to_le_bytes());
         b[0x28..0x2C].copy_from_slice(&4096u32.to_le_bytes()); // nej_efi_file_len
-        b[0x2C..0x30].copy_from_slice(&(extents.len() as u32).to_le_bytes());
+        b[0x2C..0x30].copy_from_slice(
+            &u32::try_from(extents.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         for (i, &(start, count)) in extents.iter().enumerate() {
             let off = NEJ_EXTENTS_OFFSET + i * PRANGE_SIZE;
             b[off..off + 8].copy_from_slice(&start.to_le_bytes());

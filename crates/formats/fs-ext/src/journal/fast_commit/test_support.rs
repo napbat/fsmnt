@@ -69,12 +69,12 @@ impl FcTxBuilder {
     }
 
     pub(crate) fn head(mut self, features: u32) -> Self {
-        self.push_crc_tlv(fc_head(features, self.tid));
+        self.push_crc_tlv(&fc_head(features, self.tid));
         self
     }
 
     pub(crate) fn pad(mut self, len: u16) -> Self {
-        self.push_crc_tlv(fc_tlv(FC_TAG_PAD, &alloc::vec![0u8; usize::from(len)]));
+        self.push_crc_tlv(&fc_tlv(FC_TAG_PAD, &alloc::vec![0u8; usize::from(len)]));
         self
     }
 
@@ -86,7 +86,7 @@ impl FcTxBuilder {
         let mut payload = Vec::with_capacity(4 + raw_inode.len());
         payload.extend_from_slice(&inum.to_le_bytes());
         payload.extend_from_slice(raw_inode);
-        self.push_crc_tlv(fc_tlv(FC_TAG_INODE, &payload));
+        self.push_crc_tlv(&fc_tlv(FC_TAG_INODE, &payload));
         self
     }
 
@@ -107,7 +107,7 @@ impl FcTxBuilder {
         let ee_start_lo = (ee_pblk & 0xFFFF_FFFF) as u32;
         payload[10..12].copy_from_slice(&ee_start_hi.to_le_bytes());
         payload[12..16].copy_from_slice(&ee_start_lo.to_le_bytes());
-        self.push_crc_tlv(fc_tlv(FC_TAG_ADD_RANGE, &payload));
+        self.push_crc_tlv(&fc_tlv(FC_TAG_ADD_RANGE, &payload));
         self
     }
 
@@ -116,7 +116,7 @@ impl FcTxBuilder {
         payload[0..4].copy_from_slice(&inum.to_le_bytes());
         payload[4..8].copy_from_slice(&lblk.to_le_bytes());
         payload[8..12].copy_from_slice(&len.to_le_bytes());
-        self.push_crc_tlv(fc_tlv(FC_TAG_DEL_RANGE, &payload));
+        self.push_crc_tlv(&fc_tlv(FC_TAG_DEL_RANGE, &payload));
         self
     }
 
@@ -172,13 +172,13 @@ impl FcTxBuilder {
         payload.extend_from_slice(&parent.to_le_bytes());
         payload.extend_from_slice(&child.to_le_bytes());
         payload.extend_from_slice(name);
-        self.push_crc_tlv(fc_tlv(tag, &payload));
+        self.push_crc_tlv(&fc_tlv(tag, &payload));
         self
     }
 
-    fn push_crc_tlv(&mut self, tlv: Vec<u8>) {
-        self.running_crc = fc_crc(self.running_crc, &tlv);
-        self.bytes.extend_from_slice(&tlv);
+    fn push_crc_tlv(&mut self, tlv: &[u8]) {
+        self.running_crc = fc_crc(self.running_crc, tlv);
+        self.bytes.extend_from_slice(tlv);
     }
 
     fn tail_crc_input(&self, fc_len: u16) -> Vec<u8> {

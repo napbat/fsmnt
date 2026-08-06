@@ -1,6 +1,6 @@
 //! EFSRPC Metadata Version 2 (EFS versions 4-5, Windows Vista and later).
 //!
-//! A 52-byte header followed by DDF/DRF protector lists and a FekInfo
+//! A 52-byte header followed by DDF/DRF protector lists and a `FekInfo`
 //! datum. Everything below the header is built from tagged **EFSX datum**
 //! structures (§2.2.2.2.2): an 8-byte header carrying a `StructureSize`,
 //! `Role`, `Type`, and `Flags`, optionally containing nested datums.
@@ -22,7 +22,7 @@ const EFS_ID_OFFSET: usize = 0x10;
 const DDF_OFFSET_FIELD: usize = 0x20;
 /// Offset of the `DRF_Offset` field in the V2 header.
 const DRF_OFFSET_FIELD: usize = 0x24;
-/// Offset where the FekInfo datum begins in the V2 header.
+/// Offset where the `FekInfo` datum begins in the V2 header.
 const FEK_INFO_OFFSET: usize = 0x28;
 
 /// Size of an EFSX datum header (`StructureSize`, `Role`, `Type`, `Flags`).
@@ -42,7 +42,7 @@ const TYPE_KEY_PROTECTOR: u16 = 0x0003;
 const TYPE_PROTECTOR_INFO: u16 = 0x0004;
 /// EFSX datum type: key agreement data (§2.2.2.2.7).
 const TYPE_KEY_AGMT_DATA: u16 = 0x0005;
-/// EFSX datum type: FekInfo (§2.2.2.2.8).
+/// EFSX datum type: `FekInfo` (§2.2.2.2.8).
 const TYPE_FEK_INFO: u16 = 0x0006;
 
 /// EFSX `Role` for the datum holding the encrypted FEK (§2.2.2.2.2).
@@ -50,10 +50,17 @@ const ROLE_ENCRYPTED_FEK: u16 = 0x000A;
 /// EFSX `Role` for the datum holding the file initialization vector.
 const ROLE_FILE_IV: u16 = 0x000B;
 
+fn usize_from_u32(value: u32, position: NtfsPosition) -> Result<usize> {
+    usize::try_from(value).map_err(|_| NtfsError::InvalidEfsMetadata {
+        position,
+        reason: "32-bit EFS offset or length does not fit the target address space",
+    })
+}
+
 /// A tagged EFSX datum (§2.2.2.2.2), with any nested datums parsed.
 ///
 /// `payload` is every byte after the 8-byte header. For complex container
-/// datums it begins with a small type-specific prefix (e.g. the FekInfo
+/// datums it begins with a small type-specific prefix (e.g. the `FekInfo`
 /// `AlgorithmID`); [`Self::children`] holds the datums that follow it.
 #[derive(Clone, Debug)]
 pub struct EfsxDatum {
@@ -67,37 +74,44 @@ pub struct EfsxDatum {
 
 impl EfsxDatum {
     /// The `Role` tag describing what this datum is used for.
+    #[must_use]
     pub fn role(&self) -> u16 {
         self.role
     }
 
     /// The `Type` tag describing this datum's structure.
+    #[must_use]
     pub fn datum_type(&self) -> u16 {
         self.datum_type
     }
 
     /// The raw `Flags` field.
+    #[must_use]
     pub fn flags(&self) -> u16 {
         self.flags
     }
 
     /// Whether this datum advertises nested datum structures.
+    #[must_use]
     pub fn is_complex(&self) -> bool {
         self.flags & EFSX_FLAG_COMPLEX != 0
     }
 
     /// Every byte after the 8-byte EFSX header.
+    #[must_use]
     pub fn payload(&self) -> &[u8] {
         &self.payload
     }
 
     /// The nested datums of a complex container datum.
+    #[must_use]
     pub fn children(&self) -> &[EfsxDatum] {
         &self.children
     }
 
     /// For a Blob datum (§2.2.2.2.3), the opaque `Blob_Data` after the
     /// `BlobType`/`BlobFlags` prefix; `None` for any other datum type.
+    #[must_use]
     pub fn blob_data(&self) -> Option<&[u8]> {
         if self.datum_type == TYPE_BLOB {
             self.payload.get(4..)
@@ -108,6 +122,7 @@ impl EfsxDatum {
 
     /// For a Key Protector datum (§2.2.2.2.5), the `ProtectorType` value;
     /// `None` for any other datum type.
+    #[must_use]
     pub fn protector_type(&self) -> Option<u16> {
         if self.datum_type == TYPE_KEY_PROTECTOR && self.payload.len() >= 2 {
             Some(u16::from_le_bytes([self.payload[0], self.payload[1]]))
@@ -117,6 +132,7 @@ impl EfsxDatum {
     }
 
     /// Recursively finds the first descendant datum with the given `Role`.
+    #[must_use]
     pub fn find_by_role(&self, role: u16) -> Option<&EfsxDatum> {
         for child in &self.children {
             if child.role == role {
@@ -134,7 +150,7 @@ impl EfsxDatum {
 /// or `None` for datum types that never carry nested datums.
 ///
 /// The prefix is the fixed fields between the EFSX header and the nested
-/// datums: FekInfo `AlgorithmID` (4), Key Protector `ProtectorType` +
+/// datums: `FekInfo` `AlgorithmID` (4), Key Protector `ProtectorType` +
 /// `ProtectorFlags` (4), Key Agreement `KeyAgmtFlags` (2).
 fn container_prefix_len(datum_type: u16) -> Option<usize> {
     match datum_type {
@@ -159,8 +175,9 @@ fn parse_datum(
         });
     }
 
-    let structure_size = read_u16(data, offset, position)? as usize;
-    if structure_size < EFSX_HEADER_LEN {
+    let structure_size = read_u16(data, offset, position)?;
+    let structure_size_usize = usize::from(structure_size);
+    if structure_size_usize < EFSX_HEADER_LEN {
         return Err(NtfsError::InvalidEfsMetadata {
             position,
             reason: "EFSX datum smaller than its 8-byte header",
@@ -171,7 +188,7 @@ fn parse_datum(
     let flags = read_u16(data, offset + 6, position)?;
 
     let end = offset
-        .checked_add(structure_size)
+        .checked_add(structure_size_usize)
         .ok_or(NtfsError::InvalidEfsMetadata {
             position,
             reason: "EFSX datum offset arithmetic overflowed",
@@ -194,7 +211,7 @@ fn parse_datum(
     }
 
     Ok(EfsxDatum {
-        structure_size: structure_size as u16,
+        structure_size,
         role,
         datum_type,
         flags,
@@ -219,7 +236,7 @@ fn parse_datum_list(
     let mut out = Vec::new();
     let mut cursor = start;
     while cursor + EFSX_HEADER_LEN <= data.len() {
-        let structure_size = read_u16(data, cursor, position)? as usize;
+        let structure_size = usize::from(read_u16(data, cursor, position)?);
         if structure_size < EFSX_HEADER_LEN {
             if data.len() - cursor > EFSX_HEADER_LEN {
                 return Err(NtfsError::InvalidEfsMetadata {
@@ -247,7 +264,7 @@ fn parse_protector_list(
     offset: usize,
     position: NtfsPosition,
 ) -> Result<Vec<EfsxDatum>> {
-    let struct_size = read_u32(data, offset, position)? as usize;
+    let struct_size = usize_from_u32(read_u32(data, offset, position)?, position)?;
     let count = read_u16(data, offset + 4, position)?;
     let list_end = offset
         .checked_add(struct_size)
@@ -274,12 +291,12 @@ fn parse_protector_list(
     let mut cursor = offset + PROTECTOR_LIST_HEADER_LEN;
     for _ in 0..count {
         let datum = parse_datum(data, cursor, 0, position)?;
-        cursor = cursor.checked_add(datum.structure_size as usize).ok_or(
-            NtfsError::InvalidEfsMetadata {
+        cursor = cursor
+            .checked_add(usize::from(datum.structure_size))
+            .ok_or(NtfsError::InvalidEfsMetadata {
                 position,
                 reason: "protector list entry offset arithmetic overflowed",
-            },
-        )?;
+            })?;
         if cursor > list_end {
             return Err(NtfsError::InvalidEfsMetadata {
                 position,
@@ -315,8 +332,10 @@ impl EfsMetadataV2 {
         }
 
         let efs_id = read_guid(data, EFS_ID_OFFSET, position)?;
-        let ddf_offset = read_u32(data, DDF_OFFSET_FIELD, position)? as usize;
-        let drf_offset = read_u32(data, DRF_OFFSET_FIELD, position)? as usize;
+        let decryptors_offset =
+            usize_from_u32(read_u32(data, DDF_OFFSET_FIELD, position)?, position)?;
+        let recovery_offset =
+            usize_from_u32(read_u32(data, DRF_OFFSET_FIELD, position)?, position)?;
 
         let fek_info = parse_datum(data, FEK_INFO_OFFSET, 0, position)?;
         // The FekInfo container prefix is the 4-byte AlgorithmID (§2.2.2.2.8).
@@ -325,11 +344,11 @@ impl EfsMetadataV2 {
             None => EfsAlgorithm::Unknown(0),
         };
 
-        let ddf_protectors = parse_protector_list(data, ddf_offset, position)?;
-        let drf_protectors = if drf_offset == 0 {
+        let decryptor_protectors = parse_protector_list(data, decryptors_offset, position)?;
+        let recovery_protectors = if recovery_offset == 0 {
             Vec::new()
         } else {
-            parse_protector_list(data, drf_offset, position)?
+            parse_protector_list(data, recovery_offset, position)?
         };
 
         Ok(Self {
@@ -337,34 +356,38 @@ impl EfsMetadataV2 {
             efs_id,
             fek_algorithm,
             fek_info,
-            ddf_protectors,
-            drf_protectors,
+            ddf_protectors: decryptor_protectors,
+            drf_protectors: recovery_protectors,
             position,
         })
     }
 
     /// The `EFS_Version` header field (4, or 5 for the DPAPI-NG variant).
+    #[must_use]
     pub fn efs_version(&self) -> u32 {
         self.efs_version
     }
 
     /// The `EFS_ID` GUID of the machine that created the metadata.
+    #[must_use]
     pub fn efs_id(&self) -> &NtfsGuid {
         &self.efs_id
     }
 
     /// The symmetric algorithm used to encrypt file content with the FEK.
+    #[must_use]
     pub fn fek_algorithm(&self) -> EfsAlgorithm {
         self.fek_algorithm
     }
 
-    /// The FekInfo datum (§2.2.2.2.8): `AlgorithmID` plus the wrapped FEK
+    /// The `FekInfo` datum (§2.2.2.2.8): `AlgorithmID` plus the wrapped FEK
     /// and file IV blobs.
+    #[must_use]
     pub fn fek_info(&self) -> &EfsxDatum {
         &self.fek_info
     }
 
-    /// The AES-keywrapped FEK blob, if present in the FekInfo datum.
+    /// The AES-keywrapped FEK blob, if present in the `FekInfo` datum.
     ///
     /// This is ciphertext; recovering the plaintext FEK requires the File
     /// Master Key and is out of scope for this read-only parser.
@@ -382,16 +405,19 @@ impl EfsMetadataV2 {
     }
 
     /// The DDF protector list — key protectors for authorized users.
+    #[must_use]
     pub fn ddf_protectors(&self) -> &[EfsxDatum] {
         &self.ddf_protectors
     }
 
     /// The DRF protector list — key protectors for Data Recovery Agents.
+    #[must_use]
     pub fn drf_protectors(&self) -> &[EfsxDatum] {
         &self.drf_protectors
     }
 
     /// The absolute byte position of the `$EFS` attribute, if known.
+    #[must_use]
     pub fn position(&self) -> NtfsPosition {
         self.position
     }
@@ -404,7 +430,7 @@ mod tests {
 
     /// Builds an EFSX datum: 8-byte header + `payload`.
     fn datum(role: u16, datum_type: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
-        let size = (EFSX_HEADER_LEN + payload.len()) as u16;
+        let size = u16::try_from(EFSX_HEADER_LEN + payload.len()).expect("test value fits u16");
         let mut buf = Vec::new();
         buf.extend_from_slice(&size.to_le_bytes());
         buf.extend_from_slice(&role.to_le_bytes());
@@ -423,7 +449,7 @@ mod tests {
         datum(role, TYPE_BLOB, 0, &payload)
     }
 
-    /// Builds a FekInfo datum holding the encrypted FEK and file IV blobs.
+    /// Builds a `FekInfo` datum holding the encrypted FEK and file IV blobs.
     fn fek_info_datum(alg_id: u32, fek: &[u8], iv: &[u8]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&alg_id.to_le_bytes()); // AlgorithmID prefix
@@ -440,14 +466,15 @@ mod tests {
         let entry = datum(0, TYPE_KEY_PROTECTOR, EFSX_FLAG_COMPLEX, &prot_payload);
 
         let mut buf = Vec::new();
-        let struct_size = (PROTECTOR_LIST_HEADER_LEN + entry.len()) as u32;
+        let struct_size =
+            u32::try_from(PROTECTOR_LIST_HEADER_LEN + entry.len()).expect("test value fits u32");
         buf.extend_from_slice(&struct_size.to_le_bytes());
         buf.extend_from_slice(&1u16.to_le_bytes()); // ProtectorsCount
         buf.extend_from_slice(&entry);
         buf
     }
 
-    /// Builds full V2 metadata with a FekInfo datum and a DDF protector list.
+    /// Builds full V2 metadata with a `FekInfo` datum and a DDF protector list.
     fn build_v2(alg_id: u32, fek: &[u8], iv: &[u8]) -> Vec<u8> {
         let fek_info = fek_info_datum(alg_id, fek, iv);
         let ddf = protector_list();
@@ -456,7 +483,8 @@ mod tests {
         buf[0x08..0x0C].copy_from_slice(&4u32.to_le_bytes()); // EFS_Version 4
         // The FekInfo datum starts inside the header at 0x28 and runs past
         // it; the DDF protector list follows it.
-        let ddf_offset = (FEK_INFO_OFFSET + fek_info.len()) as u32;
+        let ddf_offset =
+            u32::try_from(FEK_INFO_OFFSET + fek_info.len()).expect("test value fits u32");
         buf[0x20..0x24].copy_from_slice(&ddf_offset.to_le_bytes());
         // DRF offset stays 0 (absent).
         buf.truncate(FEK_INFO_OFFSET);
@@ -524,7 +552,10 @@ mod tests {
     fn rejects_empty_protector_list() {
         let mut buf = build_v2(0x6610, &[0; 16], &[0; 16]);
         // Overwrite the DDF protector list's ProtectorsCount with zero.
-        let ddf_offset = u32::from_le_bytes([buf[0x20], buf[0x21], buf[0x22], buf[0x23]]) as usize;
+        let ddf_offset = usize::try_from(u32::from_le_bytes([
+            buf[0x20], buf[0x21], buf[0x22], buf[0x23],
+        ]))
+        .expect("test DDF offset fits usize");
         buf[ddf_offset + 4..ddf_offset + 6].copy_from_slice(&0u16.to_le_bytes());
         assert!(NtfsEfsMetadata::parse(&buf, NtfsPosition::none()).is_err());
     }
@@ -546,7 +577,7 @@ mod tests {
     fn rejects_protector_list_past_buffer() {
         let mut buf = build_v2(0x6610, &[0; 16], &[0; 16]);
         // Point the DDF offset one byte before the end of the buffer.
-        let bad = (buf.len() - 1) as u32;
+        let bad = u32::try_from(buf.len() - 1).expect("test value fits u32");
         buf[0x20..0x24].copy_from_slice(&bad.to_le_bytes());
         assert!(NtfsEfsMetadata::parse(&buf, NtfsPosition::none()).is_err());
     }
@@ -614,9 +645,9 @@ mod tests {
         );
     }
 
-    /// Builds a chain of `depth` nested complex KEY_PROTECTOR datums, the
+    /// Builds a chain of `depth` nested complex `KEY_PROTECTOR` datums, the
     /// innermost carrying `leaf` as a child. Each level adds the 4-byte
-    /// KEY_PROTECTOR prefix before its single nested datum.
+    /// `KEY_PROTECTOR` prefix before its single nested datum.
     fn nested_protectors(depth: usize, leaf: &[u8]) -> Vec<u8> {
         let mut current = leaf.to_vec();
         for _ in 0..depth {
@@ -765,7 +796,11 @@ mod tests {
         let entry = datum(0, TYPE_KEY_PROTECTOR, 0, &[0u8; 8]); // 16-byte entry
         let declared_list = PROTECTOR_LIST_HEADER_LEN + 4; // shorter than 6 + 16
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(declared_list as u32).to_le_bytes()); // struct_size
+        buf.extend_from_slice(
+            &u32::try_from(declared_list)
+                .expect("test value fits u32")
+                .to_le_bytes(),
+        ); // struct_size
         buf.extend_from_slice(&1u16.to_le_bytes()); // count = 1
         buf.extend_from_slice(&entry);
         // list_end = declared_list (10). After parsing the 16-byte entry,
@@ -858,8 +893,9 @@ mod tests {
 
         let mut buf = alloc::vec![0u8; V2_HEADER_LEN];
         buf[0x08..0x0C].copy_from_slice(&4u32.to_le_bytes());
-        let ddf_offset = (FEK_INFO_OFFSET + fek_info.len()) as u32;
-        let drf_offset = ddf_offset + ddf.len() as u32;
+        let ddf_offset =
+            u32::try_from(FEK_INFO_OFFSET + fek_info.len()).expect("test value fits u32");
+        let drf_offset = ddf_offset + u32::try_from(ddf.len()).expect("test value fits u32");
         buf[0x20..0x24].copy_from_slice(&ddf_offset.to_le_bytes());
         buf[0x24..0x28].copy_from_slice(&drf_offset.to_le_bytes());
         buf.truncate(FEK_INFO_OFFSET);

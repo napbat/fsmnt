@@ -19,14 +19,7 @@ repos:
         pass_filenames: false
       - id: cargo-clippy
         name: cargo clippy (pedantic, deny warnings)
-        # Vendored parsers under crates/formats/ keep their own lint config
-        # and are excluded from this gate; see AGENTS.md "Vendored crates".
-        entry: >-
-          cargo clippy --workspace --all-targets --all-features
-          --exclude fs-common --exclude fs-ntfs --exclude fs-fat
-          --exclude fs-ext --exclude fs-apfs --exclude fs-exfat
-          --exclude nt-compression --exclude nt-bitlocker
-          -- -D warnings
+        entry: cargo clippy --workspace --all-targets --all-features -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
@@ -35,5 +28,9 @@ repos:
         entry: python scripts/check_max_lines.py
         language: python
         types: [rust]
-        # Vendored filesystem-format parsers are exempt until refactored.
-        exclude: ^crates/formats/
+      - id: formats-no-std
+        name: filesystem format crates stay no_std
+        entry: python scripts/check_formats_no_std.py
+        language: python
+        files: ^(Cargo\.toml|Cargo\.lock|crates/formats/.+\.(rs|toml)|scripts/check_formats_no_std\.py)$
+        pass_filenames: false

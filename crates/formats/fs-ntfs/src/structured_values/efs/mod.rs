@@ -64,6 +64,7 @@ pub enum EfsAlgorithm {
 
 impl EfsAlgorithm {
     /// Maps a raw 32-bit `ALG_ID` to a known algorithm.
+    #[must_use]
     pub fn from_alg_id(alg_id: u32) -> Self {
         match alg_id {
             0x6601 => Self::Des,
@@ -89,6 +90,11 @@ impl NtfsEfsMetadata {
     ///
     /// Dispatches on the `EFS_Version` field at offset 0x08, which occupies
     /// the same position in both header formats (MS-EFSR §2.2.2.1/§2.2.2.2).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metadata exceeds the EFSRPC size limit, is
+    /// truncated, declares an unsupported version, or contains invalid offsets.
     pub fn parse(data: &[u8], position: NtfsPosition) -> Result<Self> {
         if data.len() > MAX_EFS_METADATA_SIZE {
             return Err(NtfsError::InvalidEfsMetadata {
@@ -111,6 +117,7 @@ impl NtfsEfsMetadata {
     }
 
     /// Returns the `EFS_Version` recorded in the metadata header.
+    #[must_use]
     pub fn efs_version(&self) -> u32 {
         match self {
             Self::V1(m) => m.efs_version(),
@@ -119,6 +126,7 @@ impl NtfsEfsMetadata {
     }
 
     /// Returns the `EFS_ID` GUID of the machine that created the metadata.
+    #[must_use]
     pub fn efs_id(&self) -> &NtfsGuid {
         match self {
             Self::V1(m) => m.efs_id(),

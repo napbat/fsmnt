@@ -14,7 +14,7 @@ pub const TOTAL_SECTORS: usize = 103;
 /// Writes a valid exFAT boot sector into `buf` at the given byte
 /// offset.
 pub fn write_boot_sector(buf: &mut [u8], base: usize) {
-    let total_sectors: u64 = TOTAL_SECTORS as u64;
+    let total_sectors = u64::try_from(TOTAL_SECTORS).expect("test sector count fits u64");
     buf[base] = 0xEB;
     buf[base + 1] = 0x76;
     buf[base + 2] = 0x90;
@@ -43,7 +43,7 @@ pub fn make_image() -> Vec<u8> {
     let mut image = vec![0u8; TOTAL_SECTORS * BPS];
     write_boot_sector(&mut image, 0);
 
-    let checksum = compute_boot_checksum(&image[..BPS * 11], BPS as u32);
+    let checksum = compute_boot_checksum(&image[..BPS * 11], BPS);
     let cs_bytes = checksum.to_le_bytes();
     for i in 0..(BPS / 4) {
         let off = BPS * 11 + i * 4;
@@ -54,16 +54,18 @@ pub fn make_image() -> Vec<u8> {
 
 /// Writes a u32 FAT entry for the given cluster.
 pub fn set_fat_entry(image: &mut [u8], cluster: u32, value: u32) {
-    let off = BPS + cluster as usize * 4;
+    let cluster = usize::try_from(cluster).expect("test cluster fits usize");
+    let off = BPS + cluster * 4;
     image[off..off + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Returns the byte offset of the given cluster in the image.
 pub fn cluster_heap_offset(cluster: u32) -> usize {
-    3 * BPS + (cluster as usize - 2) * BPS
+    let cluster = usize::try_from(cluster).expect("test cluster fits usize");
+    3 * BPS + (cluster - 2) * BPS
 }
 
-/// Creates an ExFat from the given image and returns both.
+/// Creates an `ExFat` from the given image and returns both.
 pub fn make_exfat(image: Vec<u8>) -> (ExFat, std::io::Cursor<Vec<u8>>) {
     let mut cursor = std::io::Cursor::new(image);
     let exfat = ExFat::new(&mut cursor).unwrap();

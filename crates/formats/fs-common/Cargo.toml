@@ -11,8 +11,11 @@ zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 # Placeholder so `#[mutants::skip]` annotations compile under cargo-mutants.
-mutants = "0.0.4"
+mutants = { workspace = true }
 
 [features]
-default = ["std"]
+default = []
 std = ["zerocopy/std"]
+
+[lints]
+workspace = true

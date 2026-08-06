@@ -41,11 +41,13 @@ impl NtfsEaInformation {
     where
         T: Read,
     {
-        if value_length < EA_INFORMATION_SIZE as u64 {
+        let required_size =
+            u64::try_from(EA_INFORMATION_SIZE).expect("the fixed EA-information size fits u64");
+        if value_length < required_size {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::EAInformation,
-                expected: EA_INFORMATION_SIZE as u64,
+                expected: required_size,
                 actual: value_length,
             });
         }
@@ -57,18 +59,21 @@ impl NtfsEaInformation {
 
     /// Returns the combined packed size of all extended attributes,
     /// in bytes.
+    #[must_use]
     pub fn packed_ea_size(&self) -> u16 {
         self.info.packed_ea_size.get()
     }
 
     /// Returns the number of extended attributes that have the
     /// `FILE_NEED_EA` flag set.
+    #[must_use]
     pub fn need_ea_count(&self) -> u16 {
         self.info.need_ea_count.get()
     }
 
     /// Returns the combined unpacked size of all extended attributes,
     /// in bytes.
+    #[must_use]
     pub fn unpacked_ea_size(&self) -> u32 {
         self.info.unpacked_ea_size.get()
     }
@@ -76,7 +81,7 @@ impl NtfsEaInformation {
 
 impl_structured_value_via_new!(NtfsEaInformation, NtfsAttributeType::EAInformation);
 
-impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsEaInformation {
+impl<'f> NtfsStructuredValueFromResidentAttributeValue<'_, 'f> for NtfsEaInformation {
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self> {
         let position = value.data_position();
         let value_length = value.len();
@@ -111,8 +116,12 @@ mod tests {
             0x40, 0x00, 0x00, 0x00, // unpacked_ea_size
         ];
         let mut cursor = ReadOnlyCursor::new(&data);
-        let ea_info = NtfsEaInformation::new(&mut cursor, NtfsPosition::none(), data.len() as u64)
-            .expect("should parse valid EA_INFORMATION");
+        let ea_info = NtfsEaInformation::new(
+            &mut cursor,
+            NtfsPosition::none(),
+            u64::try_from(data.len()).expect("test EA-information length fits u64"),
+        )
+        .expect("should parse valid EA_INFORMATION");
 
         assert_eq!(ea_info.packed_ea_size(), 32);
         assert_eq!(ea_info.need_ea_count(), 1);
@@ -126,7 +135,7 @@ mod tests {
         let result = NtfsEaInformation::new(
             &mut cursor,
             NtfsPosition::new(0x100),
-            short_data.len() as u64,
+            u64::try_from(short_data.len()).expect("test EA-information length fits u64"),
         );
         assert!(result.is_err());
     }
@@ -142,8 +151,12 @@ mod tests {
             0x00, 0x00, 0x01, 0x00, // unpacked_ea_size
         ];
         let mut cursor = ReadOnlyCursor::new(&data);
-        let ea_info = NtfsEaInformation::new(&mut cursor, NtfsPosition::none(), data.len() as u64)
-            .expect("should parse valid EA_INFORMATION");
+        let ea_info = NtfsEaInformation::new(
+            &mut cursor,
+            NtfsPosition::none(),
+            u64::try_from(data.len()).expect("test EA-information length fits u64"),
+        )
+        .expect("should parse valid EA_INFORMATION");
 
         assert_eq!(ea_info.packed_ea_size(), 0xFF00);
         assert_eq!(ea_info.need_ea_count(), 3);
@@ -154,8 +167,12 @@ mod tests {
     fn test_ea_information_zero_values() {
         let data = [0u8; 8];
         let mut cursor = ReadOnlyCursor::new(&data);
-        let ea_info = NtfsEaInformation::new(&mut cursor, NtfsPosition::none(), data.len() as u64)
-            .expect("should parse zero-filled EA_INFORMATION");
+        let ea_info = NtfsEaInformation::new(
+            &mut cursor,
+            NtfsPosition::none(),
+            u64::try_from(data.len()).expect("test EA-information length fits u64"),
+        )
+        .expect("should parse zero-filled EA_INFORMATION");
 
         assert_eq!(ea_info.packed_ea_size(), 0);
         assert_eq!(ea_info.need_ea_count(), 0);

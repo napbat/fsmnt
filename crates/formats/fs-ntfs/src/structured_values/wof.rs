@@ -99,6 +99,7 @@ impl WofAlgorithm {
     }
 
     /// Decompressed chunk size in bytes.
+    #[must_use]
     pub fn chunk_size(self) -> u32 {
         match self {
             Self::Xpress4K => 4096,
@@ -134,6 +135,7 @@ impl NtfsReparsePoint {
     ///
     /// Returns `None` if the tag is not `IO_REPARSE_TAG_WOF`.
     /// Returns `Some(Err(_))` if the tag matches but the data is malformed.
+    #[must_use]
     pub fn wof_info(&self) -> Option<Result<WofInfo>> {
         if self.tag() != reparse_tags::WOF {
             return None;
@@ -214,7 +216,9 @@ mod tests {
     /// Build raw WOF reparse point bytes (header + data) for testing.
     fn make_wof_reparse_bytes(reparse_data: &[u8]) -> alloc::vec::Vec<u8> {
         let tag = reparse_tags::WOF.to_le_bytes();
-        let data_len = (reparse_data.len() as u16).to_le_bytes();
+        let data_len = u16::try_from(reparse_data.len())
+            .expect("test value fits u16")
+            .to_le_bytes();
         let reserved = [0u8; 2];
 
         let mut buf = alloc::vec::Vec::new();

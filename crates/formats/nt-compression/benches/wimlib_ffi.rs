@@ -9,15 +9,21 @@ use std::sync::Arc;
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug)]
+/// Compression formats supported by the wimlib comparison helpers.
 pub enum WimlibCompressionType {
+    /// XPRESS Huffman compression.
     Xpress = 1,
+    /// LZX compression.
     Lzx = 2,
     #[allow(dead_code, reason = "will be used by LZMS cross-validation (#66)")]
+    /// LZMS compression.
     Lzms = 3,
 }
 
 #[derive(Debug)]
+/// Error status returned by a wimlib operation.
 pub struct WimlibError {
+    /// Native wimlib error code.
     pub code: i32,
 }
 
@@ -60,6 +66,7 @@ type DecompressFn = unsafe extern "C" fn(
 
 type FreeDecompressorFn = unsafe extern "C" fn(decompressor: *mut c_void);
 
+/// Dynamically loaded wimlib API.
 pub struct Wimlib {
     _library: libloading::Library,
     create_compressor: CreateCompressorFn,
@@ -95,6 +102,8 @@ fn library_candidates() -> &'static [&'static str] {
 }
 
 impl Wimlib {
+    /// Load the first available platform-specific wimlib shared library.
+    #[must_use]
     pub fn load() -> Option<Arc<Self>> {
         let library = library_candidates()
             .iter()
@@ -129,6 +138,7 @@ impl Wimlib {
     }
 }
 
+/// Owned wimlib compressor handle.
 pub struct WimlibCompressor {
     wimlib: Arc<Wimlib>,
     handle: *mut c_void,
@@ -141,6 +151,11 @@ pub struct WimlibCompressor {
 unsafe impl Send for WimlibCompressor {}
 
 impl WimlibCompressor {
+    /// Create a compressor for `ctype` and the requested maximum block size.
+    ///
+    /// # Errors
+    ///
+    /// Returns the native wimlib error when the compressor cannot be created.
     pub fn new(
         wimlib: &Arc<Wimlib>,
         ctype: WimlibCompressionType,
@@ -148,7 +163,7 @@ impl WimlibCompressor {
     ) -> Result<Self, WimlibError> {
         let mut handle: *mut c_void = std::ptr::null_mut();
         let ret =
-            unsafe { (wimlib.create_compressor)(ctype as i32, max_block_size, 0, &mut handle) };
+            unsafe { (wimlib.create_compressor)(ctype as i32, max_block_size, 0, &raw mut handle) };
         if ret != 0 {
             return Err(WimlibError { code: ret });
         }
@@ -158,6 +173,7 @@ impl WimlibCompressor {
         })
     }
 
+    /// Compress `src` into `dst`, returning the number of bytes written.
     pub fn compress(&self, src: &[u8], dst: &mut [u8]) -> usize {
         unsafe {
             (self.wimlib.compress)(
@@ -179,6 +195,7 @@ impl Drop for WimlibCompressor {
     }
 }
 
+/// Owned wimlib decompressor handle.
 pub struct WimlibDecompressor {
     wimlib: Arc<Wimlib>,
     handle: *mut c_void,
@@ -189,6 +206,11 @@ pub struct WimlibDecompressor {
 unsafe impl Send for WimlibDecompressor {}
 
 impl WimlibDecompressor {
+    /// Create a decompressor for `ctype` and the requested maximum block size.
+    ///
+    /// # Errors
+    ///
+    /// Returns the native wimlib error when the decompressor cannot be created.
     pub fn new(
         wimlib: &Arc<Wimlib>,
         ctype: WimlibCompressionType,
@@ -196,7 +218,7 @@ impl WimlibDecompressor {
     ) -> Result<Self, WimlibError> {
         let mut handle: *mut c_void = std::ptr::null_mut();
         let ret =
-            unsafe { (wimlib.create_decompressor)(ctype as i32, max_block_size, &mut handle) };
+            unsafe { (wimlib.create_decompressor)(ctype as i32, max_block_size, &raw mut handle) };
         if ret != 0 {
             return Err(WimlibError { code: ret });
         }
@@ -206,6 +228,11 @@ impl WimlibDecompressor {
         })
     }
 
+    /// Decompress `src` into `dst`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the native wimlib error when the stream cannot be decoded.
     pub fn decompress(&self, src: &[u8], dst: &mut [u8]) -> Result<usize, WimlibError> {
         let ret = unsafe {
             (self.wimlib.decompress)(

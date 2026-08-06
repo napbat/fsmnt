@@ -54,6 +54,7 @@ pub enum HsmTag {
 impl HsmTag {
     /// Maps a raw reparse tag constant to an [`HsmTag`] variant, or
     /// `None` for any non-HSM tag.
+    #[must_use]
     pub fn from_raw(raw_tag: u32) -> Option<Self> {
         match raw_tag {
             reparse_tags::HSM => Some(Self::V1),
@@ -63,6 +64,7 @@ impl HsmTag {
     }
 
     /// Returns the raw reparse tag value for this variant.
+    #[must_use]
     pub fn as_u32(self) -> u32 {
         match self {
             Self::V1 => reparse_tags::HSM,
@@ -82,21 +84,25 @@ pub struct HsmV1Header {
 
 impl HsmV1Header {
     /// The HSM v1 format version.
+    #[must_use]
     pub fn version(&self) -> u32 {
         self.version
     }
 
     /// The reserved header field.
+    #[must_use]
     pub fn reserved(&self) -> u32 {
         self.reserved
     }
 
     /// The GUID identifying the migrated data stream in the remote store.
+    #[must_use]
     pub fn data_stream_id(&self) -> &NtfsGuid {
         &self.data_stream_id
     }
 
     /// The offset of the migrated content within the remote data stream.
+    #[must_use]
     pub fn data_stream_offset(&self) -> u64 {
         self.data_stream_offset
     }
@@ -169,12 +175,14 @@ impl NtfsHsmReparsePoint {
     }
 
     /// Returns which HSM tag this reparse point uses.
+    #[must_use]
     pub fn tag(&self) -> HsmTag {
         self.tag
     }
 
     /// Returns the documented HSM v1 header, or `None` for an HSM v2
     /// reparse point (which has no documented header).
+    #[must_use]
     pub fn v1_header(&self) -> Option<&HsmV1Header> {
         self.v1_header.as_ref()
     }
@@ -183,6 +191,7 @@ impl NtfsHsmReparsePoint {
     ///
     /// For HSM v1 this is the bytes after the 32-byte header; for HSM v2
     /// it is the entire reparse data buffer.
+    #[must_use]
     pub fn provider_data(&self) -> &[u8] {
         &self.provider_data
     }
@@ -213,6 +222,7 @@ impl HsmMigrationState {
     /// `RECALL_ON_DATA_ACCESS` and `RECALL_ON_OPEN` take precedence over
     /// a bare `OFFLINE` flag, since they describe how the migrated
     /// content is brought back.
+    #[must_use]
     pub fn from_attributes(flags: NtfsFileAttributeFlags) -> Self {
         if flags.contains(NtfsFileAttributeFlags::RECALL_ON_DATA_ACCESS) {
             Self::RecallOnDataAccess
@@ -226,6 +236,7 @@ impl HsmMigrationState {
     }
 
     /// Returns `true` if the file's content is not present locally.
+    #[must_use]
     pub fn is_migrated(self) -> bool {
         !matches!(self, Self::Online)
     }
@@ -237,11 +248,16 @@ impl NtfsReparsePoint {
     /// Succeeds for both `IO_REPARSE_TAG_HSM` (v1) and
     /// `IO_REPARSE_TAG_HSM2` (v2); returns an error for any other tag,
     /// or if an HSM v1 buffer is too small for its header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-HSM tag or a truncated HSM payload.
     pub fn as_hsm(&self) -> Result<NtfsHsmReparsePoint> {
         NtfsHsmReparsePoint::from_reparse_point(self)
     }
 
     /// Returns `true` if this is an HSM-family reparse point (v1 or v2).
+    #[must_use]
     pub fn is_hsm(&self) -> bool {
         matches!(self.tag(), reparse_tags::HSM | reparse_tags::HSM2)
     }
@@ -255,7 +271,11 @@ mod tests {
     fn make_reparse_bytes(tag: u32, reparse_data: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&tag.to_le_bytes());
-        buf.extend_from_slice(&(reparse_data.len() as u16).to_le_bytes());
+        buf.extend_from_slice(
+            &u16::try_from(reparse_data.len())
+                .expect("test value fits u16")
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(&[0u8; 2]); // reserved
         buf.extend_from_slice(reparse_data);
         buf

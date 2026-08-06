@@ -28,11 +28,13 @@ pub struct ExFatDirectory<'e> {
 
 impl<'e> ExFatDirectory<'e> {
     /// Creates a directory handle for the given cluster.
+    #[must_use]
     pub fn new(exfat: &'e ExFat, cluster: u32) -> Self {
         Self { exfat, cluster }
     }
 
     /// Creates a directory handle for the root directory.
+    #[must_use]
     pub fn root(exfat: &'e ExFat) -> Self {
         Self::new(exfat, exfat.root_directory_cluster())
     }
@@ -93,9 +95,11 @@ impl<'e, R: Read + Seek> FsTryIterator<R> for ExFatDirectoryIter<'e> {
                         exfat: self.exfat,
                     }));
                 }
-                Some(Ok(ExFatDirItem::VolumeLabel(_))) => continue,
-                Some(Ok(ExFatDirItem::BenignEntry { .. })) => continue,
-                Some(Ok(ExFatDirItem::DeletedEntry { .. })) => continue,
+                Some(Ok(
+                    ExFatDirItem::VolumeLabel(_)
+                    | ExFatDirItem::BenignEntry { .. }
+                    | ExFatDirItem::DeletedEntry { .. },
+                )) => {}
                 Some(Err(e)) => return Err(e),
                 None => return Ok(None),
             }
@@ -114,8 +118,9 @@ pub struct ExFatTraversalEntry<'e> {
     exfat: &'e ExFat,
 }
 
-impl<'e> ExFatTraversalEntry<'e> {
+impl ExFatTraversalEntry<'_> {
     /// Returns a reference to the underlying [`ExFatEntrySet`].
+    #[must_use]
     pub fn inner(&self) -> &ExFatEntrySet {
         &self.entry_set
     }
@@ -220,7 +225,7 @@ mod tests {
         raw[4] = 0x20; // ARCHIVE
         raw[32] = ENTRY_TYPE_STREAM;
         raw[33] = 0x01;
-        raw[35] = utf16.len() as u8;
+        raw[35] = u8::try_from(utf16.len()).expect("test name fits the exFAT length field");
         raw[36..38].copy_from_slice(&hash.to_le_bytes());
         raw[52..56].copy_from_slice(&cluster.to_le_bytes());
         raw[56..64].copy_from_slice(&0u64.to_le_bytes());
@@ -336,7 +341,7 @@ mod tests {
                 raw[4] = if is_dir { 0x10 } else { 0x20 };
                 raw[32] = ENTRY_TYPE_STREAM;
                 raw[33] = 0x01;
-                raw[35] = utf16.len() as u8;
+                raw[35] = u8::try_from(utf16.len()).expect("test name fits the exFAT length field");
                 raw[36..38].copy_from_slice(&hash.to_le_bytes());
                 raw[52..56].copy_from_slice(&cluster.to_le_bytes());
                 raw[56..64].copy_from_slice(&512u64.to_le_bytes());

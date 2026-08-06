@@ -32,6 +32,10 @@ pub struct OverlayReader<'r, 'p, R, S = super::replay::JournalReplay> {
               from external callers, and no external type can name S to satisfy it"
 )]
 impl<'r, 'p, R: Read + Seek, S: OverlaySource> OverlayReader<'r, 'p, R, S> {
+    /// Wraps a filesystem reader with the supplied replay overlay.
+    ///
+    /// Reads intersecting an overlaid block use recovered content; all other
+    /// reads are forwarded to `inner`.
     pub fn new(inner: &'r mut R, source: &'p S) -> Self {
         Self {
             inner,
@@ -49,7 +53,7 @@ fn make_invalid_input() -> io::Error {
     private_bounds,
     reason = "OverlaySource is pub(crate); see OverlayReader::new allow above"
 )]
-impl<'r, 'p, R: Read + Seek, S: OverlaySource> Seek for OverlayReader<'r, 'p, R, S> {
+impl<R: Read + Seek, S: OverlaySource> Seek for OverlayReader<'_, '_, R, S> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let new_cursor = match pos {
             SeekFrom::Start(n) => n,
@@ -76,7 +80,7 @@ impl<'r, 'p, R: Read + Seek, S: OverlaySource> Seek for OverlayReader<'r, 'p, R,
     private_bounds,
     reason = "OverlaySource is pub(crate); see OverlayReader::new allow above"
 )]
-impl<'r, 'p, R: Read + Seek, S: OverlaySource> Read for OverlayReader<'r, 'p, R, S> {
+impl<R: Read + Seek, S: OverlaySource> Read for OverlayReader<'_, '_, R, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -87,8 +91,10 @@ impl<'r, 'p, R: Read + Seek, S: OverlaySource> Read for OverlayReader<'r, 'p, R,
         }
         let cursor = self.cursor;
         let current_block = cursor / block_size;
-        let bs_off = (cursor % block_size) as usize;
-        let to_block_end = (block_size as usize).saturating_sub(bs_off);
+        let bs_off = usize::try_from(cursor % block_size).map_err(|_| make_invalid_input())?;
+        let to_block_end = usize::try_from(block_size)
+            .map_err(|_| make_invalid_input())?
+            .saturating_sub(bs_off);
         let n = buf.len().min(to_block_end);
 
         let wrote = if current_block == self.source.sb_host_block() {
@@ -108,7 +114,9 @@ impl<'r, 'p, R: Read + Seek, S: OverlaySource> Read for OverlayReader<'r, 'p, R,
             self.inner.read(&mut buf[..n])?
         };
 
-        self.cursor = self.cursor.saturating_add(wrote as u64);
+        self.cursor = self
+            .cursor
+            .saturating_add(u64::try_from(wrote).map_err(|_| make_invalid_input())?);
         Ok(wrote)
     }
 }
@@ -149,7 +157,9 @@ mod tests {
         let probe_offset = u64::from(BLOCK_SIZE) * 10;
 
         // Read 16 bytes directly from the image at the probe offset.
-        let raw = img[probe_offset as usize..probe_offset as usize + 16].to_vec();
+        let raw = img[usize::try_from(probe_offset).expect("the test fixture value fits in usize")
+            ..usize::try_from(probe_offset).expect("the test fixture value fits in usize") + 16]
+            .to_vec();
 
         let mut fs = std::io::Cursor::new(img);
         let mut overlay = OverlayReader::new(&mut fs, &replay);
@@ -165,12 +175,12 @@ mod tests {
     fn overlay_reader_dispatches_via_overlay_source_trait() {
         // This test verifies the compile-time contract: OverlayReader::new
         // accepts any &S where S: OverlaySource.
-        fn _assert_overlay_source<S: OverlaySource>(_: &S) {}
+        fn assert_overlay_source<S: OverlaySource>(_: &S) {}
 
         let img = load_image_bytes();
         let sb_content = alloc::vec![0u8; BLOCK_SIZE as usize].into_boxed_slice();
         let replay = make_replay(alloc::collections::BTreeMap::new(), u64::MAX, sb_content);
-        _assert_overlay_source(&replay);
+        assert_overlay_source(&replay);
 
         let mut fs = std::io::Cursor::new(img);
         let _overlay = OverlayReader::new(&mut fs, &replay);

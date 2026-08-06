@@ -1,4 +1,4 @@
-﻿use core::cmp;
+use core::cmp;
 
 use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 
@@ -26,7 +26,7 @@ impl<'a> ReadOnlyCursor<'a> {
     }
 }
 
-impl<'a> Read for ReadOnlyCursor<'a> {
+impl Read for ReadOnlyCursor<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let bytes_to_read = cmp::min(self.0.len(), buf.len());
         buf[..bytes_to_read].copy_from_slice(&self.0[..bytes_to_read]);
@@ -37,7 +37,7 @@ impl<'a> Read for ReadOnlyCursor<'a> {
 }
 
 /// Reads a plain old data structure that implements `zerocopy` traits via `crate::io::Read`.
-#[inline(always)]
+#[inline]
 #[track_caller]
 pub(crate) fn read_pod<T, Pod, const LEN: usize>(r: &mut T) -> Result<Pod>
 where
@@ -88,17 +88,14 @@ pub mod tests {
         const PATH: &str = "testdata/testfs1";
         static WARNED: Once = Once::new();
 
-        let mut file = match File::open(PATH) {
-            Ok(f) => f,
-            Err(_) => {
-                WARNED.call_once(|| {
-                    eprintln!(
-                        "skipping fs-ntfs tests that need {PATH}: \
-                         fixture not generated (run testdata/create-testfs1.sh)"
-                    );
-                });
-                return None;
-            }
+        let Ok(mut file) = File::open(PATH) else {
+            WARNED.call_once(|| {
+                eprintln!(
+                    "skipping fs-ntfs tests that need {PATH}: \
+                     fixture not generated (run testdata/create-testfs1.sh)"
+                );
+            });
+            return None;
         };
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).ok()?;

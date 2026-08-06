@@ -55,6 +55,11 @@ impl SiblingLink {
 /// # Errors
 ///
 /// Propagates catalog-walk and parsing errors.
+///
+/// # Panics
+///
+/// Panics only if a catalog value slice returned for an exact eight-byte
+/// range does not contain eight bytes.
 pub fn resolve_sibling<T: Read + Seek>(
     catalog: &Catalog,
     reader: &mut T,
@@ -195,18 +200,42 @@ mod tests {
     fn catalog_leaf(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0003u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -215,7 +244,7 @@ mod tests {
     }
 
     fn key_for(obj_id: u64, kind: JObjType) -> Vec<u8> {
-        (((kind.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        ((u64::from(kind.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec()
     }
@@ -225,7 +254,10 @@ mod tests {
         key.extend_from_slice(&sibling_id.to_le_bytes());
         let mut value = Vec::new();
         value.extend_from_slice(&parent.to_le_bytes());
-        value.extend_from_slice(&(name.len() as u16 + 1).to_le_bytes());
+        value.extend_from_slice(
+            &(u16::try_from(name.len()).expect("the test fixture value fits in u16") + 1)
+                .to_le_bytes(),
+        );
         value.extend_from_slice(name.as_bytes());
         value.push(0);
         (key, value)
@@ -244,7 +276,12 @@ mod tests {
         image.extend(catalog_leaf(records));
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(90), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(90),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             Cursor::new(image),
         )
     }

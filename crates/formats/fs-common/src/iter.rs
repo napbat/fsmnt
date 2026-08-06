@@ -31,6 +31,10 @@ pub trait FsTryIteratorType {
 pub trait FsTryIterator<R: Read + Seek>: FsTryIteratorType {
     /// Advances the iterator and returns the next item, or `None` if
     /// exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns the iterator's error when the next item cannot be read.
     fn try_next<'a>(&'a mut self, r: &mut R) -> Result<Option<Self::Item<'a>>, Self::Error>;
 }
 
@@ -40,6 +44,10 @@ pub trait FsTryIterator<R: Read + Seek>: FsTryIteratorType {
 /// impl.
 pub trait FsTryIteratorExt<R: Read + Seek>: FsTryIterator<R> {
     /// Counts the number of items remaining in the iterator.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered while advancing the iterator.
     fn count(&mut self, r: &mut R) -> Result<usize, Self::Error> {
         let mut n = 0;
         while self.try_next(r)?.is_some() {
@@ -49,6 +57,10 @@ pub trait FsTryIteratorExt<R: Read + Seek>: FsTryIterator<R> {
     }
 
     /// Applies `f` to each remaining item.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered while advancing the iterator.
     fn for_each<F>(&mut self, r: &mut R, mut f: F) -> Result<(), Self::Error>
     where
         F: for<'a> FnMut(Self::Item<'a>),
@@ -60,6 +72,10 @@ pub trait FsTryIteratorExt<R: Read + Seek>: FsTryIterator<R> {
     }
 
     /// Returns `true` if any remaining item satisfies `predicate`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered while advancing the iterator.
     fn any<P>(&mut self, r: &mut R, mut predicate: P) -> Result<bool, Self::Error>
     where
         P: for<'a> FnMut(Self::Item<'a>) -> bool,
@@ -77,6 +93,10 @@ pub trait FsTryIteratorExt<R: Read + Seek>: FsTryIterator<R> {
     /// With lending iterators, `find` cannot return the item directly
     /// (items may borrow from `&mut self`). Use continuation-passing
     /// instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first error encountered while advancing the iterator.
     fn find_map<F, T>(&mut self, r: &mut R, mut f: F) -> Result<Option<T>, Self::Error>
     where
         F: for<'a> FnMut(Self::Item<'a>) -> Option<T>,
@@ -180,7 +200,7 @@ mod tests {
     impl<R: Read + Seek> FsTryIterator<R> for LendingIter {
         fn try_next<'a>(&'a mut self, _r: &mut R) -> Result<Option<&'a [u8]>, Self::Error> {
             if self.pos < self.data.len() {
-                let slice = &self.data[self.pos..self.pos + 1];
+                let slice = &self.data[self.pos..=self.pos];
                 self.pos += 1;
                 Ok(Some(slice))
             } else {

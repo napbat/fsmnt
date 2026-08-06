@@ -6,11 +6,14 @@ use alloc::vec::Vec;
 ///
 /// Same rotate-right-by-1 u32 + add algorithm as the VBR boot
 /// checksum, but without any byte-skipping.
+#[must_use]
 pub fn compute_upcase_checksum(data: &[u8]) -> u32 {
     let mut checksum: u32 = 0;
     for &byte in data {
         let bit0 = if checksum & 1 != 0 { 0x8000_0000u32 } else { 0 };
-        checksum = bit0.wrapping_add(checksum >> 1).wrapping_add(byte as u32);
+        checksum = bit0
+            .wrapping_add(checksum >> 1)
+            .wrapping_add(u32::from(byte));
     }
     checksum
 }
@@ -23,7 +26,7 @@ pub fn compute_upcase_checksum(data: &[u8]) -> u32 {
 /// - Value equal to current index -> identity mapping (stored as 0)
 /// - Other value -> non-identity mapping (store the value)
 fn decompress_upcase_table(compressed: &[u8]) -> Result<Vec<u16>> {
-    let mut table = vec![0u16; 65536];
+    let mut table = vec![0u16; 65_536];
     let mut index: usize = 0;
     let mut i = 0;
     let mut skip = false;
@@ -33,9 +36,9 @@ fn decompress_upcase_table(compressed: &[u8]) -> Result<Vec<u16>> {
         i += 2;
 
         if skip {
-            index += value as usize;
+            index += usize::from(value);
             skip = false;
-        } else if value == index as u16 {
+        } else if usize::from(value) == index {
             // Identity mapping — table[index] is already 0.
             // Must check before 0xFFFF marker so that U+FFFF at
             // index 0xFFFF is treated as identity, not a marker.
@@ -72,6 +75,11 @@ impl ExFatUpcaseTable {
     ///
     /// Computes the checksum over the raw (compressed) bytes, compares
     /// it to `expected_checksum`, then decompresses the table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checksum differs or the compressed data
+    /// does not describe the complete 65,536-code-unit table.
     pub fn load(raw_data: &[u8], expected_checksum: u32) -> Result<Self> {
         let actual = compute_upcase_checksum(raw_data);
         if actual != expected_checksum {
@@ -94,12 +102,14 @@ impl ExFatUpcaseTable {
     ///
     /// If the table stores 0 for the given character, it is
     /// identity-mapped (character maps to itself).
+    #[must_use]
     pub fn upcase(&self, ch: u16) -> u16 {
-        let mapped = self.table[ch as usize];
+        let mapped = self.table[usize::from(ch)];
         if mapped != 0 { mapped } else { ch }
     }
 
-    /// Computes the NameHash for a file name (applies upcase first).
+    /// Computes the `NameHash` for a file name (applies upcase first).
+    #[must_use]
     pub fn name_hash_for_name(&self, name: &[u16]) -> u16 {
         let upcased: Vec<u16> = name.iter().map(|&ch| self.upcase(ch)).collect();
         compute_name_hash(&upcased)
@@ -107,6 +117,7 @@ impl ExFatUpcaseTable {
 
     /// Compares two UTF-16 names case-insensitively using the
     /// upcase table.
+    #[must_use]
     pub fn names_equal(&self, a: &[u16], b: &[u16]) -> bool {
         if a.len() != b.len() {
             return false;
@@ -119,6 +130,7 @@ impl ExFatUpcaseTable {
     /// Compares a UTF-16 name against a `&str` case-insensitively.
     ///
     /// Avoids heap allocation by using `str::encode_utf16` iterator.
+    #[must_use]
     pub fn name_equals_str(&self, name: &[u16], s: &str) -> bool {
         let mut name_iter = name.iter().copied();
         let mut str_iter = s.encode_utf16();
@@ -136,20 +148,21 @@ impl ExFatUpcaseTable {
     }
 }
 
-/// Computes the NameHash checksum over up-cased UTF-16LE bytes.
+/// Computes the `NameHash` checksum over up-cased UTF-16LE bytes.
 ///
 /// The input must already be up-cased. The algorithm is the same
 /// 16-bit rotate-right-by-1 + add as the entry set checksum, but
 /// without any byte-skipping, and operates on the LE byte
 /// representation of each UTF-16 code unit.
+#[must_use]
 pub fn compute_name_hash(upcased_name: &[u16]) -> u16 {
     let mut hash: u16 = 0;
     for &ch in upcased_name {
         let [lo, hi] = ch.to_le_bytes();
         let bit0 = if hash & 1 != 0 { 0x8000u16 } else { 0u16 };
-        hash = bit0.wrapping_add(hash >> 1).wrapping_add(lo as u16);
+        hash = bit0.wrapping_add(hash >> 1).wrapping_add(u16::from(lo));
         let bit0 = if hash & 1 != 0 { 0x8000u16 } else { 0u16 };
-        hash = bit0.wrapping_add(hash >> 1).wrapping_add(hi as u16);
+        hash = bit0.wrapping_add(hash >> 1).wrapping_add(u16::from(hi));
     }
     hash
 }
@@ -184,7 +197,7 @@ mod tests {
     fn decompress_basic() {
         let compressed = make_test_compressed_table();
         let table = decompress_upcase_table(&compressed).unwrap();
-        assert_eq!(table.len(), 65536);
+        assert_eq!(table.len(), 65_536);
         // Identity-mapped chars stored as 0
         assert_eq!(table[0x0041], 0); // 'A' -> identity
         // Non-identity mappings
@@ -221,7 +234,7 @@ mod tests {
     #[test]
     fn load_rejects_bad_checksum() {
         let compressed = make_test_compressed_table();
-        let result = ExFatUpcaseTable::load(&compressed, 0xDEADBEEF);
+        let result = ExFatUpcaseTable::load(&compressed, 0xDEAD_BEEF);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -304,7 +317,7 @@ mod tests {
         compressed.extend_from_slice(&[0xAA, 0xBB]);
         let table = decompress_upcase_table(&compressed)
             .expect("trailing bytes after a complete table must be ignored");
-        assert_eq!(table.len(), 65536);
+        assert_eq!(table.len(), 65_536);
     }
 
     /// An odd-length compressed slice cannot form a complete u16

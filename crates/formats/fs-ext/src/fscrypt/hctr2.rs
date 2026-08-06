@@ -118,12 +118,12 @@ impl Hctr2Cipher {
         let has_remainder = !bulk_len.is_multiple_of(BLOCK);
 
         // Step 2: h_TV over the ciphertext bulk V.
-        let mut h_tv = polyval_hash(&self.h, has_remainder, tweak, &buf[BLOCK..]);
+        let mut ciphertext_bulk_hash = polyval_hash(&self.h, has_remainder, tweak, &buf[BLOCK..]);
 
         // Step 3: UU = U ⊕ h_TV
         let mut uu = [0u8; BLOCK];
         for i in 0..BLOCK {
-            uu[i] = buf[i] ^ h_tv[i];
+            uu[i] = buf[i] ^ ciphertext_bulk_hash[i];
         }
 
         // Step 4: MM = D(UU)
@@ -143,16 +143,16 @@ impl Hctr2Cipher {
         }
 
         // Step 7: h_TN over the now-recovered plaintext bulk N.
-        let h_tn = polyval_hash(&self.h, has_remainder, tweak, &buf[BLOCK..]);
+        let plaintext_bulk_hash = polyval_hash(&self.h, has_remainder, tweak, &buf[BLOCK..]);
 
         // Step 8: M = MM ⊕ h_TN. Overwrite the first 16 bytes of buf.
         for i in 0..BLOCK {
-            buf[i] = mm[i] ^ h_tn[i];
+            buf[i] = mm[i] ^ plaintext_bulk_hash[i];
         }
 
         // Scrub locals that held secret intermediates. `s` is already
         // in a `Zeroizing` wrapper.
-        h_tv.zeroize();
+        ciphertext_bulk_hash.zeroize();
         uu.zeroize();
         mm.zeroize();
 
@@ -203,10 +203,10 @@ fn polyval_hash(
     // Bulk: full blocks.
     let n_full = bulk.len() / BLOCK;
     for i in 0..n_full {
-        let blk: [u8; BLOCK] = bulk[i * BLOCK..(i + 1) * BLOCK]
+        let block_bytes: [u8; BLOCK] = bulk[i * BLOCK..(i + 1) * BLOCK]
             .try_into()
             .expect("16-byte chunk");
-        update_one_block(&mut polyval, &blk);
+        update_one_block(&mut polyval, &block_bytes);
     }
 
     // Bulk remainder: HCTR2 pads the trailing partial block with
@@ -235,20 +235,25 @@ fn update_one_block(polyval: &mut Polyval, block: &[u8; BLOCK]) {
 /// XCTR in place over `buf`. Per kernel `crypto_xctr_crypt_inplace`:
 ///   for each 16-byte block i (0-indexed):
 ///     ctr32 = (i + 1) as little-endian u32
-///     iv_xor = S; iv_xor[0..4] ^= ctr32
-///     keystream = AES_E_K(iv_xor)
-///     buf_block ^= keystream
+///     `iv_xor` = S; `iv_xor`[0..4] ^= ctr32
+///     keystream = `AES_E_K(iv_xor)`
+///     `buf_block` ^= keystream
 ///   For a partial trailing block, same with truncation.
 fn xctr_in_place(aes: &Aes256, s: &[u8; BLOCK], buf: &mut [u8]) {
     let n_full = buf.len() / BLOCK;
     let tail = buf.len() % BLOCK;
     for i in 0..n_full {
-        apply_xctr_block(aes, s, (i as u32) + 1, &mut buf[i * BLOCK..(i + 1) * BLOCK]);
+        let counter =
+            u32::try_from(i).expect("one fscrypt data unit cannot contain u32::MAX AES blocks") + 1;
+        apply_xctr_block(aes, s, counter, &mut buf[i * BLOCK..(i + 1) * BLOCK]);
     }
     if tail > 0 {
         let start = n_full * BLOCK;
         let mut iv_xor = *s;
-        let ctr_le = ((n_full as u32) + 1).to_le_bytes();
+        let ctr_le = (u32::try_from(n_full)
+            .expect("one fscrypt data unit cannot contain u32::MAX AES blocks")
+            + 1)
+        .to_le_bytes();
         for j in 0..4 {
             iv_xor[j] ^= ctr_le[j];
         }
@@ -289,7 +294,7 @@ mod tests {
     }
 
     /// Kernel `aes_hctr2_tv_template` first AES-256 vector (klen=32,
-    /// len=16, bulk_len=0 → no XCTR call, no remainder). Source:
+    /// len=16, `bulk_len=0` → no XCTR call, no remainder). Source:
     /// `crypto/testmgr.h` (linux 6.17).
     #[test]
     fn decrypt_matches_kernel_testmgr_aes256_len16() {
@@ -306,7 +311,7 @@ mod tests {
     }
 
     /// Kernel `aes_hctr2_tv_template` AES-256 + len=17 vector
-    /// (bulk_len=1 byte, has_remainder=1; exercises POLYVAL HCTR2
+    /// (`bulk_len=1` byte, `has_remainder=1`; exercises POLYVAL HCTR2
     /// padding and the XCTR partial-block tail simultaneously).
     #[test]
     fn decrypt_matches_kernel_testmgr_aes256_len17() {
@@ -324,7 +329,7 @@ mod tests {
     }
 
     /// Kernel `aes_hctr2_tv_template` AES-256 + len=31 vector
-    /// (bulk_len=15, has_remainder=1; exercises XCTR over a 15-byte
+    /// (`bulk_len=15`, `has_remainder=1`; exercises XCTR over a 15-byte
     /// trailing tail directly with no full bulk block).
     #[test]
     fn decrypt_matches_kernel_testmgr_aes256_len31() {

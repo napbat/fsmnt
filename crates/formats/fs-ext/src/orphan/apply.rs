@@ -275,8 +275,11 @@ pub(crate) fn clear_block_bitmap_bit<T: Read + Seek>(
     if block < first_data_block {
         return Ok(());
     }
-    let group = ((block - first_data_block) / u64::from(ext.blocks_per_group)) as u32;
-    let bit_in_group = ((block - first_data_block) % u64::from(ext.blocks_per_group)) as usize;
+    let group = u32::try_from((block - first_data_block) / u64::from(ext.blocks_per_group))
+        .expect("the test fixture value fits in u32");
+    let bit_in_group =
+        usize::try_from((block - first_data_block) % u64::from(ext.blocks_per_group))
+            .expect("the test fixture value fits in usize");
 
     if group as usize >= ext.group_descs.len() {
         return Err(crate::error::ExtError::BlockOutOfRange { block });
@@ -378,8 +381,8 @@ pub(crate) fn finalize_group_descriptors<T: Read + Seek>(
     for group in &groups {
         let gdt_block = crate::block_group::descriptor_block_for_group(&ext.gdt_layout, *group);
         let gdt_off = u64::from(*group % ext.gdt_layout.desc_per_block()) * desc_size;
-        let gdt_in_block = gdt_off as usize;
-        let desc_size_u = desc_size as usize;
+        let gdt_in_block = usize::try_from(gdt_off).expect("the test fixture value fits in usize");
+        let desc_size_u = usize::try_from(desc_size).expect("the test fixture value fits in usize");
 
         let inodes_freed = scratch
             .inodes_freed_by_group
@@ -510,11 +513,12 @@ pub(crate) fn inode_block_and_offset(ext: &Ext, inum: u32) -> Result<(u64, usize
     let byte_in_table = index_in_group * inode_size;
     let block_size = u64::from(ext.block_size());
     let block = table_block + byte_in_table / block_size;
-    let offset_in_block = (byte_in_table % block_size) as usize;
+    let offset_in_block =
+        usize::try_from(byte_in_table % block_size).expect("the test fixture value fits in usize");
     Ok((block, offset_in_block))
 }
 
-/// Patch `i_dtime = 0` on a TruncateDeferred legacy entry's inode scratch
+/// Patch `i_dtime = 0` on a `TruncateDeferred` legacy entry's inode scratch
 /// copy and recompute the inode checksum. Preserves every other inode field.
 #[cfg(test)]
 pub(crate) fn clear_legacy_linkage<T: Read + Seek>(
@@ -718,7 +722,7 @@ mod tests {
     ) -> crate::orphan::plan::OrphanPlan {
         use crate::orphan::parse::{scan_orphan_file, walk_legacy_chain};
         let mut plan = crate::orphan::plan::OrphanPlan::default();
-        let head = ext.last_orphan(cursor).expect("s_last_orphan");
+        let head = Ext::read_last_orphan(cursor).expect("s_last_orphan");
         walk_legacy_chain(ext, cursor, head, &mut plan).expect("walk");
         if plan.stop.is_none() {
             scan_orphan_file(ext, cursor, &mut plan).expect("scan");
@@ -855,7 +859,7 @@ mod tests {
 
     // ---- Mutation-phase tests (Task 27) ----
 
-    /// Run the full OrphanReplay::build pipeline against a fixture.
+    /// Run the full `OrphanReplay::build` pipeline against a fixture.
     fn run_orphan_replay(name: &str) -> Option<crate::orphan::replay::OrphanReplay> {
         let Some((ext, mut cursor)) = load_dirty_fixture(name) else {
             eprintln!("skipping: {name} not present");

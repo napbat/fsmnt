@@ -39,16 +39,16 @@ struct Ntfs3Fields {
     usn: U64<LittleEndian>,
 }
 
-/// Structure of a $STANDARD_INFORMATION attribute.
+/// Structure of a $`STANDARD_INFORMATION` attribute.
 ///
 /// Among other things, this is the place where the file times and "File Attributes"
 /// (Read-Only, Hidden, System, Archive, etc.) are stored.
 ///
-/// A $STANDARD_INFORMATION attribute is always resident.
+/// A $`STANDARD_INFORMATION` attribute is always resident.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/attributes/standard_information.html>
 ///
-/// Spec reference: MS-FSCC Section 2.4.7 (FileBasicInformation) for field semantics (timestamps, file attributes).
+/// Spec reference: MS-FSCC Section 2.4.7 (`FileBasicInformation`) for field semantics (timestamps, file attributes).
 #[derive(Clone, Debug)]
 pub struct NtfsStandardInformation {
     ntfs1_data: Ntfs1Fields,
@@ -60,11 +60,13 @@ impl NtfsStandardInformation {
     where
         T: Read,
     {
-        if value_length < NTFS1_FIELDS_SIZE as u64 {
+        let ntfs1_size =
+            u64::try_from(NTFS1_FIELDS_SIZE).expect("the fixed NTFS 1.x field size fits u64");
+        if value_length < ntfs1_size {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::StandardInformation,
-                expected: NTFS1_FIELDS_SIZE as u64,
+                expected: ntfs1_size,
                 actual: value_length,
             });
         }
@@ -72,7 +74,9 @@ impl NtfsStandardInformation {
         let ntfs1_data = read_pod::<T, Ntfs1Fields, NTFS1_FIELDS_SIZE>(r)?;
 
         let mut ntfs3_data = None;
-        if value_length >= (NTFS1_FIELDS_SIZE + ADDITIONAL_NTFS3_FIELDS_SIZE) as u64 {
+        let ntfs3_size = u64::try_from(NTFS1_FIELDS_SIZE + ADDITIONAL_NTFS3_FIELDS_SIZE)
+            .expect("the fixed NTFS 3.x field size fits u64");
+        if value_length >= ntfs3_size {
             ntfs3_data = Some(read_pod::<T, Ntfs3Fields, ADDITIONAL_NTFS3_FIELDS_SIZE>(r)?);
         }
 
@@ -83,22 +87,26 @@ impl NtfsStandardInformation {
     }
 
     /// Returns the time this file was last accessed.
+    #[must_use]
     pub fn access_time(&self) -> NtfsTime {
         self.ntfs1_data.access_time
     }
 
     /// Returns the Class ID of the file.
+    #[must_use]
     pub fn class_id(&self) -> u32 {
         self.ntfs1_data.class_id.get()
     }
 
     /// Returns the time this file was created.
+    #[must_use]
     pub fn creation_time(&self) -> NtfsTime {
         self.ntfs1_data.creation_time
     }
 
     /// Returns flags that a user can set for a file (Read-Only, Hidden, System, Archive, etc.).
     /// Commonly called "File Attributes" in Windows Explorer.
+    #[must_use]
     pub fn file_attributes(&self) -> NtfsFileAttributeFlags {
         NtfsFileAttributeFlags::from_bits_truncate(self.ntfs1_data.file_attributes.get())
     }
@@ -106,36 +114,43 @@ impl NtfsStandardInformation {
     /// Returns the maximum allowed versions for this file.
     ///
     /// A value of zero means that versioning is disabled for this file.
+    #[must_use]
     pub fn maximum_versions(&self) -> u32 {
         self.ntfs1_data.maximum_versions.get()
     }
 
     /// Returns the time the MFT record of this file was last modified.
+    #[must_use]
     pub fn mft_record_modification_time(&self) -> NtfsTime {
         self.ntfs1_data.mft_record_modification_time
     }
 
     /// Returns the time this file was last modified.
+    #[must_use]
     pub fn modification_time(&self) -> NtfsTime {
         self.ntfs1_data.modification_time
     }
 
     /// Returns the Owner ID of the file, if stored via NTFS 3.x file information.
+    #[must_use]
     pub fn owner_id(&self) -> Option<u32> {
         self.ntfs3_data.as_ref().map(|x| x.owner_id.get())
     }
 
     /// Returns the quota charged by this file, if stored via NTFS 3.x file information.
+    #[must_use]
     pub fn quota_charged(&self) -> Option<u64> {
         self.ntfs3_data.as_ref().map(|x| x.quota_charged.get())
     }
 
     /// Returns the Security ID of the file, if stored via NTFS 3.x file information.
+    #[must_use]
     pub fn security_id(&self) -> Option<u32> {
         self.ntfs3_data.as_ref().map(|x| x.security_id.get())
     }
 
     /// Returns the Update Sequence Number (USN) of the file, if stored via NTFS 3.x file information.
+    #[must_use]
     pub fn usn(&self) -> Option<u64> {
         self.ntfs3_data.as_ref().map(|x| x.usn.get())
     }
@@ -143,6 +158,7 @@ impl NtfsStandardInformation {
     /// Returns the version of the file.
     ///
     /// This will be zero if versioning is disabled for this file.
+    #[must_use]
     pub fn version(&self) -> u32 {
         self.ntfs1_data.version.get()
     }
@@ -159,11 +175,16 @@ impl NtfsStandardInformation {
     pub(crate) fn from_bytes_for_test(data: &[u8]) -> Self {
         let position = NtfsPosition::none();
         let mut cursor = ReadOnlyCursor::new(data);
-        Self::new(&mut cursor, position, data.len() as u64).expect("test SI construction failed")
+        Self::new(
+            &mut cursor,
+            position,
+            u64::try_from(data.len()).expect("test standard-information length fits u64"),
+        )
+        .expect("test SI construction failed")
     }
 }
 
-impl<'n, 'f> NtfsStructuredValueFromResidentAttributeValue<'n, 'f> for NtfsStandardInformation {
+impl<'f> NtfsStructuredValueFromResidentAttributeValue<'_, 'f> for NtfsStandardInformation {
     fn from_resident_attribute_value(value: NtfsResidentAttributeValue<'f>) -> Result<Self> {
         let position = value.data_position();
         let value_length = value.len();
@@ -201,8 +222,10 @@ impl<'a> arbitrary::Arbitrary<'a> for NtfsStandardInformation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::KnownNtfsFileRecordNumber;
     use crate::ntfs::Ntfs;
+
+    const MFT_RECORD_NUMBER: u64 = 0;
+    const ROOT_DIRECTORY_RECORD_NUMBER: u64 = 5;
 
     #[test]
     fn test_standard_information() {
@@ -210,9 +233,7 @@ mod tests {
             return;
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
+        let mft = ntfs.file(&mut testfs1, MFT_RECORD_NUMBER).unwrap();
         let mut mft_attributes = mft.attributes_raw();
 
         // Check the StandardInformation attribute of the MFT.
@@ -314,9 +335,7 @@ mod tests {
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
         // Read $STANDARD_INFORMATION from the MFT (which has 72-byte SI = NTFS 3.x).
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
+        let mft = ntfs.file(&mut testfs1, MFT_RECORD_NUMBER).unwrap();
         let info = mft.info().unwrap();
 
         // NTFS 3.x extended fields should be present (72-byte SI).
@@ -335,9 +354,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
+        let mft = ntfs.file(&mut testfs1, MFT_RECORD_NUMBER).unwrap();
         let info = mft.info().unwrap();
 
         // 72-byte SI should have the USN field.
@@ -355,10 +372,7 @@ mod tests {
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
         let root_dir = ntfs
-            .file(
-                &mut testfs1,
-                KnownNtfsFileRecordNumber::RootDirectory as u64,
-            )
+            .file(&mut testfs1, ROOT_DIRECTORY_RECORD_NUMBER)
             .unwrap();
         let info = root_dir.info().unwrap();
 
@@ -380,17 +394,12 @@ mod tests {
         // (that flag is only in $FILE_NAME attributes). But it should be flagged as a directory
         // via the file record flags.
         let root_dir = ntfs
-            .file(
-                &mut testfs1,
-                KnownNtfsFileRecordNumber::RootDirectory as u64,
-            )
+            .file(&mut testfs1, ROOT_DIRECTORY_RECORD_NUMBER)
             .unwrap();
         assert!(root_dir.is_directory());
 
         // The $MFT should not be a directory.
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
+        let mft = ntfs.file(&mut testfs1, MFT_RECORD_NUMBER).unwrap();
         assert!(!mft.is_directory());
 
         // Verify the file attributes field is accessible.
@@ -406,9 +415,7 @@ mod tests {
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
         // Use MFT which has 72-byte SI (NTFS 3.x extended fields).
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
+        let mft = ntfs.file(&mut testfs1, MFT_RECORD_NUMBER).unwrap();
         let info = mft.info().unwrap();
 
         // 72-byte SI should have these fields present.
@@ -423,9 +430,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
+        let mft = ntfs.file(&mut testfs1, MFT_RECORD_NUMBER).unwrap();
         let info = mft.info().unwrap();
 
         // These are typically zero.
@@ -434,20 +439,20 @@ mod tests {
         let _max_versions = info.maximum_versions();
     }
 
-    /// Builds a synthetic 72-byte $STANDARD_INFORMATION buffer (NTFS 3.x).
+    /// Builds a synthetic 72-byte $`STANDARD_INFORMATION` buffer (NTFS 3.x).
     ///
     /// Layout (offsets within the attribute value):
-    /// - 0..8   creation_time
-    /// - 8..16  modification_time
-    /// - 16..24 mft_record_modification_time
-    /// - 24..32 access_time
-    /// - 32..36 file_attributes
-    /// - 36..40 maximum_versions
+    /// - 0..8   `creation_time`
+    /// - 8..16  `modification_time`
+    /// - 16..24 `mft_record_modification_time`
+    /// - 24..32 `access_time`
+    /// - 32..36 `file_attributes`
+    /// - 36..40 `maximum_versions`
     /// - 40..44 version
-    /// - 44..48 class_id
-    /// - 48..52 owner_id
-    /// - 52..56 security_id
-    /// - 56..64 quota_charged
+    /// - 44..48 `class_id`
+    /// - 48..52 `owner_id`
+    /// - 52..56 `security_id`
+    /// - 56..64 `quota_charged`
     /// - 64..72 usn
     fn synthetic_si_ntfs3() -> [u8; 72] {
         let mut buf = [0u8; 72];

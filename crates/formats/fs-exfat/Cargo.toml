@@ -14,10 +14,14 @@ time = { workspace = true, optional = true }
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-mutants = "0.0.4"
+fsmnt-testkit = { workspace = true }
+mutants = { workspace = true }
 
 [features]
-default = ["std"]
+default = []
 std = ["fs-common/std", "thiserror/std", "zerocopy/std"]
 chrono = ["dep:chrono"]
 time = ["dep:time"]
+
+[lints]
+workspace = true

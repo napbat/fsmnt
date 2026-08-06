@@ -7,7 +7,7 @@
 //!
 //! All multi-byte reads use `.to_le()` after `read_unaligned` so
 //! they return correct little-endian values on any target endianness.
-//! On LE targets (x86, x86_64, aarch64) `.to_le()` is a no-op.
+//! On LE targets (x86, `x86_64`, aarch64) `.to_le()` is a no-op.
 #![allow(unsafe_code)]
 
 /// Read a `u16` from `data[pos..pos+2]` in little-endian order.
@@ -15,7 +15,7 @@
 /// # Safety
 /// Caller must ensure `pos + 2 <= data.len()`.
 #[cfg(any(feature = "xpress-huffman", feature = "lzx"))]
-#[inline(always)]
+#[inline]
 pub(crate) unsafe fn read_u16_le(data: &[u8], pos: usize) -> u16 {
     debug_assert!(pos + 2 <= data.len());
     unsafe { core::ptr::read_unaligned(data.as_ptr().add(pos).cast::<u16>()).to_le() }
@@ -25,7 +25,7 @@ pub(crate) unsafe fn read_u16_le(data: &[u8], pos: usize) -> u16 {
 ///
 /// # Safety
 /// Caller must ensure `pos + 4 <= data.len()`.
-#[inline(always)]
+#[inline]
 pub(crate) unsafe fn read_u32_le(data: &[u8], pos: usize) -> u32 {
     debug_assert!(pos + 4 <= data.len());
     unsafe { core::ptr::read_unaligned(data.as_ptr().add(pos).cast::<u32>()).to_le() }
@@ -35,7 +35,7 @@ pub(crate) unsafe fn read_u32_le(data: &[u8], pos: usize) -> u32 {
 ///
 /// # Safety
 /// Caller must ensure `pos + 8 <= data.len()`.
-#[inline(always)]
+#[inline]
 #[allow(dead_code)]
 pub(crate) unsafe fn read_u64_le(data: &[u8], pos: usize) -> u64 {
     debug_assert!(pos + 8 <= data.len());
@@ -55,7 +55,7 @@ pub(crate) unsafe fn read_u64_le(data: &[u8], pos: usize) -> u64 {
 /// - `distance > 0`
 /// - `out_pos >= distance` (source is in bounds)
 /// - `out_pos + length <= output.len()` (dest is in bounds)
-#[inline(always)]
+#[inline]
 #[allow(dead_code)] // used by simd.rs on non-x86_64 targets and in tests
 pub(crate) unsafe fn copy_match_unchecked(
     output: &mut [u8],
@@ -160,7 +160,8 @@ pub(crate) unsafe fn match_length_unchecked(
             let xor = wa ^ wb;
             if xor != 0 {
                 len += (xor.trailing_zeros() / 8) as usize;
-                return len.min(max_len) as u32;
+                return u32::try_from(len.min(max_len))
+                    .expect("the match finder passes a max_len originating from its u32 config");
             }
             len += 8;
         }
@@ -171,7 +172,7 @@ pub(crate) unsafe fn match_length_unchecked(
             len += 1;
         }
     }
-    len as u32
+    u32::try_from(len).expect("the match finder passes a max_len originating from its u32 config")
 }
 
 #[cfg(test)]
@@ -319,7 +320,12 @@ mod tests {
         // SAFETY: distance=8, out_pos=8, 8>=8, 8+24<=32
         unsafe { copy_match_unchecked(&mut buf, 8, 8, 24) };
         for (i, &byte) in buf.iter().enumerate() {
-            assert_eq!(byte, (i % 8 + 1) as u8, "mismatch at {i}");
+            assert_eq!(
+                byte,
+                u8::try_from(i % 8 + 1)
+                    .expect("the expected pattern ranges from one through eight"),
+                "mismatch at {i}"
+            );
         }
     }
 
@@ -327,7 +333,7 @@ mod tests {
     fn copy_match_large_non_overlapping() {
         let mut buf = [0u8; 256];
         for (i, byte) in buf[..64].iter_mut().enumerate() {
-            *byte = i as u8;
+            *byte = u8::try_from(i).expect("the test buffer is shorter than 256 bytes");
         }
         // SAFETY: distance=128, out_pos=128, 128>=128, 128+64<=256
         unsafe { copy_match_unchecked(&mut buf, 128, 128, 64) };

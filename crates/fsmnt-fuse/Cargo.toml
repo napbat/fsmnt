@@ -6,7 +6,7 @@ edition.workspace = true
 # All dependencies are Unix-only: on other targets this crate compiles to
 # an empty library so workspace-wide builds work everywhere.
 [target.'cfg(unix)'.dependencies]
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["std"] }
 ctrlc = { workspace = true }
 fsmnt-core = { workspace = true }
 fuser = { workspace = true }

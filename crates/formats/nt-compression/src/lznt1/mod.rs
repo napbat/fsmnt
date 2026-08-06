@@ -1,5 +1,6 @@
 #[cfg(feature = "compress-lznt1")]
 mod compress;
+/// LZNT1 decompression routines.
 pub mod decompress;
 
 #[cfg(feature = "compress-lznt1")]
@@ -12,7 +13,7 @@ pub(super) const CHUNK_SIZE: usize = 4096;
 /// Expected signature in bits [14:12] of the chunk header.
 pub(super) const CHUNK_SIGNATURE: u16 = 0b011;
 
-/// Compute displacement_bits from the current position within the
+/// Compute `displacement_bits` from the current position within the
 /// chunk. Returns `(length_bits, displacement_bits)`.
 ///
 /// At positions 0..=15 the shift is clamped to 12 (4 displacement

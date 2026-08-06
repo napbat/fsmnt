@@ -34,16 +34,16 @@ impl VolumeHeader {
             BitLockerError::InvalidMetadata {
                 block_index: 0,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: VOLUME_HEADER_SIZE as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(VOLUME_HEADER_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             },
         )?)
         .map_err(|_| BitLockerError::InvalidMetadata {
             block_index: 0,
             reason: MetadataFailure::SizeBoundsExceeded {
-                declared: VOLUME_HEADER_SIZE as u64,
-                available: buf.len() as u64,
+                declared: u64::try_from(VOLUME_HEADER_SIZE).unwrap_or(u64::MAX),
+                available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
             },
         })?;
 
@@ -86,38 +86,43 @@ impl VolumeHeader {
     }
 
     #[must_use]
+    /// Returns `true`; construction succeeds only for a validated FVE header.
     pub fn is_bitlocker(&self) -> bool {
         true // Validated in from_bytes
     }
 
     #[must_use]
+    /// Returns the logical sector size declared by the volume header.
     pub fn bytes_per_sector(&self) -> u16 {
         self.bytes_per_sector
     }
 
     #[must_use]
+    /// Returns the number of sectors in each allocation cluster.
     pub fn sectors_per_cluster(&self) -> u8 {
         self.sectors_per_cluster
     }
 
     #[must_use]
+    /// Returns the total number of logical sectors in the volume.
     pub fn total_sectors(&self) -> u64 {
         self.total_sectors
     }
 
     #[must_use]
+    /// Returns the volume serial number stored in the boot sector.
     pub fn volume_serial_number(&self) -> u64 {
         self.volume_serial_number
     }
 
     #[must_use]
+    /// Returns the byte offsets of the three redundant FVE metadata blocks.
     pub fn fve_metadata_offsets(&self) -> [u64; 3] {
         self.fve_metadata_offsets
     }
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 

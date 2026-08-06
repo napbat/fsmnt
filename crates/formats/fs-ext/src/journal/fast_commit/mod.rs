@@ -1,4 +1,4 @@
-//! INCOMPAT_FAST_COMMIT replay engine for ext4 journals.
+//! `INCOMPAT_FAST_COMMIT` replay engine for ext4 journals.
 //!
 //! See `docs/superpowers/specs/2026-04-25-fs-ext-fast-commit-design.md`
 //! for the design.

@@ -5,7 +5,7 @@
 
 mod wimlib_ffi;
 
-use wimlib_ffi::*;
+use wimlib_ffi::Wimlib;
 
 fn main() {
     if Wimlib::load().is_none() {
@@ -22,7 +22,7 @@ mod lzx_wim {
     use alloc::vec::Vec;
     use divan::counter::BytesCount;
 
-    use crate::wimlib_ffi::*;
+    use crate::wimlib_ffi::{Wimlib, WimlibCompressionType, WimlibCompressor, WimlibDecompressor};
 
     const LZX_WIM_BLOCK_SIZE: usize = 32_768;
     const SIZES: &[usize] = &[4_096, 16_384, 32_768];
@@ -31,9 +31,9 @@ mod lzx_wim {
         let mut buf = vec![0u8; n];
         for (i, byte) in buf.iter_mut().enumerate() {
             *byte = if i < n / 2 {
-                (i % 64) as u8
+                u8::try_from(i % 64).expect("the modulus limits values below 64")
             } else {
-                ((i * 7 + 13) % 251) as u8
+                u8::try_from((i * 7 + 13) % 251).expect("the modulus limits values below 251")
             };
         }
         buf
@@ -45,7 +45,10 @@ mod lzx_wim {
 
     #[divan::bench_group]
     mod lzx_wim_compress {
-        use super::*;
+        use super::{
+            BytesCount, LZX_WIM_BLOCK_SIZE, SIZES, Wimlib, WimlibCompressionType, WimlibCompressor,
+            mixed, vec,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -80,7 +83,10 @@ mod lzx_wim {
 
     #[divan::bench_group]
     mod lzx_wim_decompress {
-        use super::*;
+        use super::{
+            BytesCount, LZX_WIM_BLOCK_SIZE, SIZES, Wimlib, WimlibCompressionType, WimlibCompressor,
+            WimlibDecompressor, mixed, vec,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -131,7 +137,7 @@ mod xpress_huffman {
     use alloc::vec::Vec;
     use divan::counter::BytesCount;
 
-    use crate::wimlib_ffi::*;
+    use crate::wimlib_ffi::{Wimlib, WimlibCompressionType, WimlibCompressor, WimlibDecompressor};
 
     const XPRESS_HUFF_BLOCK_SIZE: usize = 65_536;
     const SIZES: &[usize] = &[4_096, 16_384, 65_536];
@@ -140,9 +146,9 @@ mod xpress_huffman {
         let mut buf = vec![0u8; n];
         for (i, byte) in buf.iter_mut().enumerate() {
             *byte = if i < n / 2 {
-                (i % 64) as u8
+                u8::try_from(i % 64).expect("the modulus limits values below 64")
             } else {
-                ((i * 7 + 13) % 251) as u8
+                u8::try_from((i * 7 + 13) % 251).expect("the modulus limits values below 251")
             };
         }
         buf
@@ -154,7 +160,10 @@ mod xpress_huffman {
 
     #[divan::bench_group]
     mod xpress_huff_compress {
-        use super::*;
+        use super::{
+            BytesCount, SIZES, Wimlib, WimlibCompressionType, WimlibCompressor,
+            XPRESS_HUFF_BLOCK_SIZE, mixed, vec,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {
@@ -189,7 +198,10 @@ mod xpress_huffman {
 
     #[divan::bench_group]
     mod xpress_huff_decompress {
-        use super::*;
+        use super::{
+            BytesCount, SIZES, Wimlib, WimlibCompressionType, WimlibCompressor, WimlibDecompressor,
+            XPRESS_HUFF_BLOCK_SIZE, mixed, vec,
+        };
 
         #[divan::bench(args = SIZES)]
         fn ours(bencher: divan::Bencher<'_, '_>, len: usize) {

@@ -40,6 +40,11 @@ pub trait FscryptKeyUnwrapper: Send + Sync {
     /// Convert a wrapped blob into the raw fscrypt master-key bytes.
     /// Errors surface to the caller as
     /// [`ExtError::FscryptKeyUnwrapFailed`] with the supplied reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an implementation-defined [`FscryptKeyUnwrapError`] when the
+    /// wrapped blob cannot be authenticated or unwrapped.
     fn unwrap_key(
         &self,
         wrapped: &[u8],
@@ -50,10 +55,12 @@ pub trait FscryptKeyUnwrapper: Send + Sync {
 #[derive(Debug, thiserror::Error)]
 #[error("{reason}")]
 pub struct FscryptKeyUnwrapError {
+    /// Operator-facing explanation returned by the unwrap implementation.
     pub reason: String,
 }
 
 impl FscryptKeyUnwrapError {
+    /// Creates an unwrap failure with the supplied operator-facing reason.
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -126,8 +133,8 @@ impl FscryptKeystore {
         );
     }
 
-    pub(crate) fn get_v1(&self, descriptor: &FscryptKeyDescriptor) -> Option<&FscryptMasterKey> {
-        self.v1.get(descriptor)
+    pub(crate) fn get_v1(&self, descriptor: FscryptKeyDescriptor) -> Option<&FscryptMasterKey> {
+        self.v1.get(&descriptor)
     }
 
     /// Look up a v2 master key by identifier. Returns:
@@ -219,7 +226,7 @@ mod tests {
         let key = FscryptMasterKey::from_array([0xEE; 64]);
         store.add_v1(desc, key.clone());
         assert_eq!(
-            store.get_v1(&desc).map(|k| k.as_bytes() == key.as_bytes()),
+            store.get_v1(desc).map(|k| k.as_bytes() == key.as_bytes()),
             Some(true)
         );
     }

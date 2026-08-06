@@ -9,11 +9,16 @@ use super::{CHUNK_SIGNATURE, CHUNK_SIZE, bit_widths};
 /// Returns the number of bytes written to `output`, or an error if the
 /// input is malformed. The caller must pre-allocate `output` to the
 /// expected decompressed size.
+///
+/// # Errors
+///
+/// Returns an error when the input is malformed or the output buffer cannot
+/// hold the decoded chunk.
 pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     let mut in_pos = 0;
     let mut out_pos = 0;
 
-    while let Some(header) = read_chunk_header(input, in_pos)? {
+    while let Some(header) = read_chunk_header(input, in_pos) {
         in_pos += 2;
 
         validate_chunk_signature(header, in_pos - 2)?;
@@ -86,23 +91,21 @@ pub fn decompress_lenient(input: &[u8], output: &mut [u8]) -> LenientResult {
         in_pos += chunk_data_size;
 
         if is_compressed {
-            match decompress_chunk_strict(chunk_data, output, out_pos) {
-                Ok(new_pos) => out_pos = new_pos,
-                Err(_) => {
-                    had_errors = true;
-                    let fill = CHUNK_SIZE.min(output.len() - out_pos);
-                    // Region is already zeroed from the initial fill.
-                    out_pos += fill;
-                }
+            if let Ok(new_pos) = decompress_chunk_strict(chunk_data, output, out_pos) {
+                out_pos = new_pos;
+            } else {
+                had_errors = true;
+                let fill = CHUNK_SIZE.min(output.len() - out_pos);
+                // Region is already zeroed from the initial fill.
+                out_pos += fill;
             }
         } else {
-            match copy_uncompressed_chunk(chunk_data, output, out_pos) {
-                Ok(new_pos) => out_pos = new_pos,
-                Err(_) => {
-                    had_errors = true;
-                    let fill = chunk_data_size.min(output.len() - out_pos);
-                    out_pos += fill;
-                }
+            if let Ok(new_pos) = copy_uncompressed_chunk(chunk_data, output, out_pos) {
+                out_pos = new_pos;
+            } else {
+                had_errors = true;
+                let fill = chunk_data_size.min(output.len() - out_pos);
+                out_pos += fill;
             }
         }
     }
@@ -116,15 +119,15 @@ pub fn decompress_lenient(input: &[u8], output: &mut [u8]) -> LenientResult {
 /// Read and validate a 2-byte chunk header.
 /// Returns `None` for a zero header (end of stream) or if there are
 /// fewer than 2 bytes remaining.
-fn read_chunk_header(input: &[u8], offset: usize) -> Result<Option<u16>> {
+fn read_chunk_header(input: &[u8], offset: usize) -> Option<u16> {
     if offset + 2 > input.len() {
-        return Ok(None);
+        return None;
     }
     let header = u16::from_le_bytes([input[offset], input[offset + 1]]);
     if header == 0 {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(header))
+    Some(header)
 }
 
 /// Validate the 3-bit signature in bits [14:12].
@@ -195,7 +198,7 @@ fn decompress_chunk_strict(chunk_data: &[u8], output: &mut [u8], out_pos: usize)
                 cp += 2;
 
                 let pos_in_chunk = wp - chunk_start;
-                let (displacement, length) = decode_match(word, pos_in_chunk)?;
+                let (displacement, length) = decode_match(word, pos_in_chunk);
 
                 if displacement > pos_in_chunk {
                     return Err(Error::InvalidData {
@@ -229,14 +232,14 @@ fn decompress_chunk_strict(chunk_data: &[u8], output: &mut [u8], out_pos: usize)
 }
 
 /// Decode a 2-byte match into `(displacement, length)`.
-fn decode_match(word: u16, pos_in_chunk: usize) -> Result<(usize, usize)> {
+fn decode_match(word: u16, pos_in_chunk: usize) -> (usize, usize) {
     let (length_bits, _disp_bits) = bit_widths(pos_in_chunk);
     let length_mask = (1u16 << length_bits) - 1;
 
     let displacement = ((word >> length_bits) as usize) + 1;
     let length = (word & length_mask) as usize + 3;
 
-    Ok((displacement, length))
+    (displacement, length)
 }
 
 #[cfg(test)]
@@ -247,7 +250,7 @@ mod tests {
 
     /// Build an uncompressed LZNT1 chunk (bit 15 = 0, sig = 0b011).
     fn make_uncompressed_chunk(data: &[u8]) -> alloc::vec::Vec<u8> {
-        let size = data.len() as u16;
+        let size = u16::try_from(data.len()).expect("test chunks are smaller than 64 KiB");
         let header = ((size - 1) & 0x0FFF) | (CHUNK_SIGNATURE << 12);
         let mut buf = alloc::vec::Vec::new();
         buf.extend_from_slice(&header.to_le_bytes());
@@ -257,7 +260,7 @@ mod tests {
 
     /// Build a compressed LZNT1 chunk from raw chunk body bytes.
     fn make_compressed_chunk(body: &[u8]) -> alloc::vec::Vec<u8> {
-        let size = body.len() as u16;
+        let size = u16::try_from(body.len()).expect("test chunks are smaller than 64 KiB");
         let header = ((size - 1) & 0x0FFF) | (CHUNK_SIGNATURE << 12) | 0x8000;
         let mut buf = alloc::vec::Vec::new();
         buf.extend_from_slice(&header.to_le_bytes());
@@ -301,7 +304,7 @@ mod tests {
     #[test]
     fn truncated_chunk_returns_error() {
         // Header claims 100 bytes, but only 5 present.
-        let header: u16 = 99 & 0x0FFF | (CHUNK_SIGNATURE << 12);
+        let header: u16 = 0x0063 | (CHUNK_SIGNATURE << 12);
         let mut stream = alloc::vec::Vec::new();
         stream.extend_from_slice(&header.to_le_bytes());
         stream.extend_from_slice(&[0xAA; 5]);
@@ -321,7 +324,8 @@ mod tests {
         // At position 0: length_bits=12, so word>>12 = disp-1.
         // displacement = 1, but position is 0 → error.
         let word: u16 = 0; // disp-1=0, len=0+3
-        let body = [0x01, word as u8, (word >> 8) as u8];
+        let [word_lo, word_hi] = word.to_le_bytes();
+        let body = [0x01, word_lo, word_hi];
         let mut stream = make_compressed_chunk(&body);
         terminate(&mut stream);
 
@@ -354,8 +358,8 @@ mod tests {
             b'B',
             b'C',
             b'D',
-            word as u8,
-            (word >> 8) as u8,
+            word.to_le_bytes()[0],
+            word.to_le_bytes()[1],
         ];
         let mut stream = make_compressed_chunk(&body);
         terminate(&mut stream);
@@ -379,8 +383,8 @@ mod tests {
         let body = [
             0x02, // flag: bit 0 literal, bit 1 match
             b'X',
-            word as u8,
-            (word >> 8) as u8,
+            word.to_le_bytes()[0],
+            word.to_le_bytes()[1],
         ];
         let mut stream = make_compressed_chunk(&body);
         terminate(&mut stream);
@@ -445,7 +449,7 @@ mod tests {
         let d1 = b"GoodData";
         let mut stream = make_uncompressed_chunk(d1);
         // Append a header claiming 200 bytes but only 3 present.
-        let header: u16 = 199 & 0x0FFF | (CHUNK_SIGNATURE << 12);
+        let header: u16 = 0x00C7 | (CHUNK_SIGNATURE << 12);
         stream.extend_from_slice(&header.to_le_bytes());
         stream.extend_from_slice(&[0xBB; 3]);
 
@@ -478,7 +482,8 @@ mod tests {
     fn lenient_compressed_valid_data_matches_strict() {
         // Also test with a compressed chunk to exercise both paths.
         let word: u16 = (3 << 12) | 1;
-        let body = [0x10, b'A', b'B', b'C', b'D', word as u8, (word >> 8) as u8];
+        let [word_lo, word_hi] = word.to_le_bytes();
+        let body = [0x10, b'A', b'B', b'C', b'D', word_lo, word_hi];
         let mut stream = make_compressed_chunk(&body);
         terminate(&mut stream);
 

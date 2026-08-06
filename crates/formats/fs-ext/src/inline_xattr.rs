@@ -7,8 +7,8 @@ const XATTR_MAGIC: u32 = 0xEA02_0000;
 /// Name index for `system.*` namespace.
 const SYSTEM_NAME_INDEX: u8 = 7;
 
-/// Xattr entry header size: e_name_len(1) + e_name_index(1) +
-/// e_value_offs(2) + e_value_inum(4) + e_value_size(4) + e_hash(4)
+/// Xattr entry header size: `e_name_len(1)` + `e_name_index(1)` +
+/// `e_value_offs(2)` + `e_value_inum(4)` + `e_value_size(4)` + `e_hash(4)`
 /// = 16 bytes.
 const ENTRY_HEADER_SIZE: usize = 16;
 
@@ -136,7 +136,7 @@ mod tests {
         value_inum: u32,
         value_size: u32,
     ) -> usize {
-        buf[pos] = name.len() as u8;
+        buf[pos] = (name.len()).to_le_bytes()[0];
         buf[pos + 1] = name_index;
         buf[pos + 2..pos + 4].copy_from_slice(&value_offs.to_le_bytes());
         buf[pos + 4..pos + 8].copy_from_slice(&value_inum.to_le_bytes());
@@ -151,7 +151,7 @@ mod tests {
     fn place_value(buf: &mut [u8], data: &[u8]) -> u16 {
         let value_start = INODE_SIZE as usize - data.len();
         buf[value_start..value_start + data.len()].copy_from_slice(data);
-        (value_start - FIRST_ENTRY) as u16
+        u16::try_from(value_start - FIRST_ENTRY).expect("the test fixture value fits in u16")
     }
 
     // --- system.data present ---
@@ -168,7 +168,7 @@ mod tests {
             b"data",
             offs,
             0,
-            data.len() as u32,
+            u32::try_from(data.len()).expect("the test fixture value fits in u32"),
         );
 
         let result = find_system_data(&buf, EXTRA_ISIZE, TEST_INODE);
@@ -202,7 +202,7 @@ mod tests {
             b"other",
             offs,
             0,
-            data.len() as u32,
+            u32::try_from(data.len()).expect("the test fixture value fits in u32"),
         );
         // Terminate with zero entry
         buf[next] = 0;
@@ -226,7 +226,7 @@ mod tests {
             b"data",
             offs,
             999, // e_value_inum != 0
-            data.len() as u32,
+            u32::try_from(data.len()).expect("the test fixture value fits in u32"),
         );
 
         let result = find_system_data(&buf, EXTRA_ISIZE, TEST_INODE);
@@ -269,7 +269,8 @@ mod tests {
         // Place value_start inside the buffer but value_size overflows.
         // value_start = FIRST_ENTRY + offs. Use offs that puts start
         // near the end, then claim a large size.
-        let offs = (INODE_SIZE as usize - FIRST_ENTRY - 4) as u16;
+        let offs = u16::try_from(INODE_SIZE as usize - FIRST_ENTRY - 4)
+            .expect("the test fixture value fits in u16");
         write_entry(
             &mut buf,
             FIRST_ENTRY,
@@ -298,7 +299,8 @@ mod tests {
         // like a terminator, but leave no room for a full header
         // by claiming the inode is only slightly larger than the
         // magic offset.
-        let short_inode_size: u16 = (FIRST_ENTRY + 4) as u16;
+        let short_inode_size: u16 =
+            u16::try_from(FIRST_ENTRY + 4).expect("the test fixture value fits in u16");
         let mut short_buf = buf[..short_inode_size as usize].to_vec();
         // Non-zero name_len so it's not a terminator
         short_buf[FIRST_ENTRY] = 5;
@@ -316,7 +318,8 @@ mod tests {
     #[test]
     fn truncated_entry_name_is_error() {
         // Header fits but claimed name length extends past inode end
-        let short_inode_size: u16 = (FIRST_ENTRY + ENTRY_HEADER_SIZE + 2) as u16;
+        let short_inode_size: u16 = u16::try_from(FIRST_ENTRY + ENTRY_HEADER_SIZE + 2)
+            .expect("the test fixture value fits in u16");
         let mut buf = vec![0u8; short_inode_size as usize];
         buf[XATTR_START..XATTR_START + 4].copy_from_slice(&XATTR_MAGIC.to_le_bytes());
         // name_len=10 but only 2 bytes available after header
@@ -349,7 +352,7 @@ mod tests {
             b"comment",
             offs1,
             0,
-            val1.len() as u32,
+            u32::try_from(val1.len()).expect("the test fixture value fits in u32"),
         );
 
         // Entry 2: system.data
@@ -362,7 +365,7 @@ mod tests {
             b"data",
             offs2,
             0,
-            val2.len() as u32,
+            u32::try_from(val2.len()).expect("the test fixture value fits in u32"),
         );
 
         let result = find_system_data(&buf, EXTRA_ISIZE, TEST_INODE);
@@ -383,7 +386,8 @@ mod tests {
         let val1 = b"unconfined_t";
         let v1_start = big_inode as usize - val1.len();
         buf[v1_start..v1_start + val1.len()].copy_from_slice(val1);
-        let offs1 = (v1_start - first_entry) as u16;
+        let offs1 =
+            u16::try_from(v1_start - first_entry).expect("the test fixture value fits in u16");
         let next = write_entry(
             &mut buf,
             first_entry,
@@ -391,14 +395,15 @@ mod tests {
             b"selinux",
             offs1,
             0,
-            val1.len() as u32,
+            u32::try_from(val1.len()).expect("the test fixture value fits in u32"),
         );
 
         // Entry 2: system.data
         let val2 = b"THE_INLINE_DATA";
         let v2_start = v1_start - val2.len();
         buf[v2_start..v2_start + val2.len()].copy_from_slice(val2);
-        let offs2 = (v2_start - first_entry) as u16;
+        let offs2 =
+            u16::try_from(v2_start - first_entry).expect("the test fixture value fits in u16");
         let next = write_entry(
             &mut buf,
             next,
@@ -406,15 +411,24 @@ mod tests {
             b"data",
             offs2,
             0,
-            val2.len() as u32,
+            u32::try_from(val2.len()).expect("the test fixture value fits in u32"),
         );
 
         // Entry 3: user.tag (index=1, name="tag")
         let val3 = b"important";
         let v3_start = v2_start - val3.len();
         buf[v3_start..v3_start + val3.len()].copy_from_slice(val3);
-        let offs3 = (v3_start - first_entry) as u16;
-        let next = write_entry(&mut buf, next, 1, b"tag", offs3, 0, val3.len() as u32);
+        let offs3 =
+            u16::try_from(v3_start - first_entry).expect("the test fixture value fits in u16");
+        let next = write_entry(
+            &mut buf,
+            next,
+            1,
+            b"tag",
+            offs3,
+            0,
+            u32::try_from(val3.len()).expect("the test fixture value fits in u32"),
+        );
 
         // Terminate
         buf[next] = 0;
@@ -429,7 +443,8 @@ mod tests {
     #[test]
     fn xattr_region_too_small_returns_none() {
         // inode_size barely fits the base + extra, no room for magic
-        let tiny_inode: u16 = (128 + EXTRA_ISIZE as usize + 2) as u16;
+        let tiny_inode: u16 = u16::try_from(128 + EXTRA_ISIZE as usize + 2)
+            .expect("the test fixture value fits in u16");
         let buf = vec![0u8; tiny_inode as usize];
 
         let result = find_system_data(&buf, EXTRA_ISIZE, TEST_INODE);

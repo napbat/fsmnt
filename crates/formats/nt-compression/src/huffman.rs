@@ -68,7 +68,8 @@ impl HuffmanTable {
     /// length of zero means the symbol does not appear. `max_bits`
     /// controls the direct-table width (e.g. 11 for XPRESS Huffman).
     pub fn from_code_lengths(lengths: &[u8], max_bits: u32) -> Result<Self> {
-        let table_bits = max_bits.min(MAX_CODE_LEN as u32);
+        let table_bits = max_bits
+            .min(u32::try_from(MAX_CODE_LEN).expect("the maximum Huffman code length is 16"));
 
         validate_lengths(lengths)?;
         let counts = count_per_length(lengths);
@@ -106,7 +107,9 @@ impl HuffmanTable {
         reader.consume_bits(self.table_bits);
         let mut node_idx = root_index as usize;
 
-        for _ in self.table_bits..MAX_CODE_LEN as u32 {
+        for _ in self.table_bits
+            ..u32::try_from(MAX_CODE_LEN).expect("the maximum Huffman code length is 16")
+        {
             reader.ensure_bits(1)?;
             let bit = reader.peek_bits(1);
             reader.consume_bits(1);
@@ -130,7 +133,7 @@ impl HuffmanTable {
         })
     }
 
-    /// Decode one symbol from a raw bit buffer without using BitReader.
+    /// Decode one symbol from a raw bit buffer without using `BitReader`.
     ///
     /// `next_bits` contains bits MSB-aligned in a `u32` (the top
     /// `table_bits` are used for the direct lookup). Returns
@@ -151,7 +154,9 @@ impl HuffmanTable {
         let mut node_idx = entry.symbol as usize;
         let mut bits_used = self.table_bits;
 
-        for _ in self.table_bits..MAX_CODE_LEN as u32 {
+        for _ in self.table_bits
+            ..u32::try_from(MAX_CODE_LEN).expect("the maximum Huffman code length is 16")
+        {
             let bit = (next_bits >> (31 - bits_used)) & 1;
             bits_used += 1;
 
@@ -186,7 +191,7 @@ pub(crate) fn validate_lengths(lengths: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Count how many symbols exist at each code length (1..=MAX_CODE_LEN).
+/// Count how many symbols exist at each code length (`1..=MAX_CODE_LEN`).
 ///
 /// `counts[0]` is always 0 -- symbols with length 0 are excluded.
 pub(crate) fn count_per_length(lengths: &[u8]) -> [u32; MAX_CODE_LEN + 1] {
@@ -206,14 +211,15 @@ pub(crate) fn count_per_length(lengths: &[u8]) -> [u32; MAX_CODE_LEN + 1] {
 pub(crate) fn validate_code_space(counts: &[u32; MAX_CODE_LEN + 1]) -> Result<()> {
     // Kraft inequality: sum(count[i] * 2^(max - i)) <= 2^max
     // We use max = MAX_CODE_LEN and work in integer units.
-    let max = MAX_CODE_LEN as u32;
+    let max = u32::try_from(MAX_CODE_LEN).expect("the maximum Huffman code length is 16");
     let mut kraft: u64 = 0;
 
     for (len, &count) in counts.iter().enumerate().skip(1) {
         if len > MAX_CODE_LEN {
             break;
         }
-        kraft += u64::from(count) << (max - len as u32);
+        kraft += u64::from(count)
+            << (max - u32::try_from(len).expect("Huffman code lengths are at most 16 bits"));
     }
 
     let capacity = 1u64 << max;
@@ -263,7 +269,7 @@ pub(crate) fn assign_canonical_codes(
     dead_code,
     reason = "used by compress-xpress-huffman and compress-lzx when those features are enabled"
 )]
-pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Result<Vec<u8>> {
+pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
     use alloc::collections::BinaryHeap;
     use core::cmp::Reverse;
 
@@ -276,7 +282,7 @@ pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Result<Vec<u8>>
         .collect();
 
     if non_zero.is_empty() {
-        return Ok(vec![0u8; num_symbols]);
+        return vec![0u8; num_symbols];
     }
 
     if non_zero.len() == 1 {
@@ -286,9 +292,9 @@ pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Result<Vec<u8>>
         // Huffman tree (Kraft sum = 1.0). Without this, decoders
         // like wimlib reject the incomplete code.
         let real_sym = non_zero[0].0;
-        let dummy = if real_sym == 0 { 1 } else { 0 };
+        let dummy = usize::from(real_sym == 0);
         lengths[dummy] = 1;
-        return Ok(lengths);
+        return lengths;
     }
 
     // Build Huffman tree using a min-heap of (frequency, node_id).
@@ -297,10 +303,14 @@ pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Result<Vec<u8>>
     let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
 
     for &(sym, freq) in &non_zero {
-        heap.push(Reverse((u64::from(freq), sym as u32)));
+        heap.push(Reverse((
+            u64::from(freq),
+            u32::try_from(sym).expect("the symbol table is bounded by the input slice"),
+        )));
     }
 
-    let mut next_internal = num_symbols as u32;
+    let mut next_internal =
+        u32::try_from(num_symbols).expect("the symbol table has fewer than u32::MAX entries");
     while heap.len() > 1 {
         let Reverse((f1, n1)) = heap.pop().expect("heap underflow");
         let Reverse((f2, n2)) = heap.pop().expect("heap underflow");
@@ -318,7 +328,8 @@ pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Result<Vec<u8>>
     let mut lengths = vec![0u8; num_symbols];
     for (sym, _) in &non_zero {
         let mut depth = 0u8;
-        let mut node = *sym as u32;
+        let mut node =
+            u32::try_from(*sym).expect("the symbol index came from the bounded frequency table");
         while parent[node as usize] != u32::MAX {
             depth += 1;
             node = parent[node as usize];
@@ -329,14 +340,14 @@ pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Result<Vec<u8>>
     // Limit code lengths to max_bits using Kraft-based redistribution.
     limit_code_lengths(&mut lengths, max_bits);
 
-    Ok(lengths)
+    lengths
 }
 
 /// Limit code lengths to `max_bits` using package-merge-style
 /// redistribution: push overlong codes down to `max_bits`, then
 /// fix the Kraft inequality by shortening the shortest codes.
 fn limit_code_lengths(lengths: &mut [u8], max_bits: u8) {
-    let max = max_bits as u32;
+    let max = u32::from(max_bits);
 
     // Check if any code exceeds max_bits.
     let overlong = lengths.iter().any(|l| *l > max_bits);
@@ -379,7 +390,8 @@ fn limit_code_lengths(lengths: &mut [u8], max_bits: u8) {
         // reduces kraft sum by 2^(max - min_len) - 2^(max - min_len - 1)
         // = 2^(max - min_len - 1)
         let reduction_per = 1u64 << (max - u32::from(min_len) - 1);
-        let needed = excess.div_ceil(reduction_per) as usize;
+        let needed = usize::try_from(excess.div_ceil(reduction_per))
+            .expect("the redistribution count cannot exceed the symbol table");
 
         let mut count = 0;
         for len in lengths.iter_mut() {
@@ -413,7 +425,7 @@ fn build_tables(
         if len == 0 {
             continue;
         }
-        let sym = sym as u16;
+        let sym = u16::try_from(sym).expect("Huffman tables contain at most u16::MAX symbols");
         if u32::from(len) <= table_bits {
             fill_short_code(&mut table, sym, code, len, table_bits);
         } else {
@@ -483,7 +495,8 @@ fn insert_long_code(
                 reason: "overflow table exceeds u16 index space",
             });
         }
-        let idx = overflow.len() as u16;
+        let idx = u16::try_from(overflow.len())
+            .expect("the Huffman overflow table is capped below u16::MAX entries");
         overflow.push(OverflowNode {
             symbol: NO_SYMBOL,
             child0: u32::MAX,
@@ -505,7 +518,8 @@ fn insert_long_code(
         let child = if bit == 0 { node.child0 } else { node.child1 };
 
         if child == u32::MAX {
-            let new_idx = overflow.len() as u32;
+            let new_idx = u32::try_from(overflow.len())
+                .expect("the Huffman overflow table is bounded by the input symbol table");
             overflow.push(OverflowNode {
                 symbol: NO_SYMBOL,
                 child0: u32::MAX,
@@ -550,7 +564,8 @@ mod tests {
 
             while accum_bits >= 16 {
                 accum_bits -= 16;
-                let word = (accum >> accum_bits) as u16;
+                let word = u16::try_from(accum >> accum_bits)
+                    .expect("the test encoder flushes one 16-bit word at a time");
                 let le = word.to_le_bytes();
                 bits.push(le[0]);
                 bits.push(le[1]);
@@ -560,7 +575,8 @@ mod tests {
 
         // Flush remaining bits, padded with zeros.
         if accum_bits > 0 {
-            let word = (accum << (16 - accum_bits)) as u16;
+            let word = u16::try_from(accum << (16 - accum_bits))
+                .expect("the final test-encoder accumulator contains at most 16 bits");
             let le = word.to_le_bytes();
             bits.push(le[0]);
             bits.push(le[1]);
@@ -741,7 +757,7 @@ mod tests {
     fn build_uniform_distribution() {
         // 8 symbols, equal frequency → all should get length 3.
         let freqs = [10u32; 8];
-        let lengths = build_code_lengths(&freqs, 15).expect("build failed");
+        let lengths = build_code_lengths(&freqs, 15);
         for &l in &lengths {
             assert_eq!(l, 3);
         }
@@ -753,7 +769,7 @@ mod tests {
     fn build_power_of_two_skew() {
         // Frequencies that form a natural Huffman tree.
         let freqs = [8u32, 4, 2, 1, 1, 0, 0, 0];
-        let lengths = build_code_lengths(&freqs, 15).expect("build failed");
+        let lengths = build_code_lengths(&freqs, 15);
         assert_eq!(lengths[0], 1); // most frequent
         assert_eq!(lengths[1], 2);
         assert_eq!(lengths[2], 3);
@@ -766,7 +782,7 @@ mod tests {
     #[test]
     fn build_single_symbol() {
         let freqs = [0u32, 0, 0, 100, 0];
-        let lengths = build_code_lengths(&freqs, 15).expect("build failed");
+        let lengths = build_code_lengths(&freqs, 15);
         // The real symbol gets codelen 1.
         assert_eq!(lengths[3], 1);
         // A dummy symbol (the first available, index 0) also gets
@@ -785,7 +801,7 @@ mod tests {
     #[test]
     fn build_all_zero_frequencies() {
         let freqs = [0u32; 16];
-        let lengths = build_code_lengths(&freqs, 15).expect("build failed");
+        let lengths = build_code_lengths(&freqs, 15);
         assert!(lengths.iter().all(|&l| l == 0));
     }
 
@@ -802,7 +818,7 @@ mod tests {
         freqs[5] = 1;
         freqs[6] = 1;
         freqs[7] = 1;
-        let lengths = build_code_lengths(&freqs, 4).expect("build failed");
+        let lengths = build_code_lengths(&freqs, 4);
         for &l in &lengths {
             assert!(l <= 4, "code length {l} exceeds max_bits 4");
         }
@@ -815,7 +831,7 @@ mod tests {
     fn build_roundtrip_with_huffman_table() {
         // Build lengths, create a HuffmanTable, encode, and decode.
         let freqs = [50u32, 30, 20, 10, 5, 3, 2, 1];
-        let lengths = build_code_lengths(&freqs, 15).expect("build failed");
+        let lengths = build_code_lengths(&freqs, 15);
         let table = HuffmanTable::from_code_lengths(&lengths, 11).expect("valid table");
 
         let symbols: Vec<u16> = (0..8).collect();

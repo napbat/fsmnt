@@ -28,7 +28,7 @@ use crate::time::ExFatTimestamp;
 ///
 /// The algorithm rotates the 16-bit accumulator right by one bit
 /// (with carry) and adds each byte, skipping bytes 2 and 3 which
-/// hold the SetChecksum field itself in the primary entry.
+/// hold the `SetChecksum` field itself in the primary entry.
 pub(crate) fn compute_set_checksum(entries: &[u8]) -> u16 {
     let mut checksum: u16 = 0;
     for (i, &byte) in entries.iter().enumerate() {
@@ -36,7 +36,9 @@ pub(crate) fn compute_set_checksum(entries: &[u8]) -> u16 {
             continue;
         }
         let bit0 = if checksum & 1 != 0 { 0x8000u16 } else { 0u16 };
-        checksum = bit0.wrapping_add(checksum >> 1).wrapping_add(byte as u16);
+        checksum = bit0
+            .wrapping_add(checksum >> 1)
+            .wrapping_add(u16::from(byte));
     }
     checksum
 }
@@ -55,7 +57,7 @@ pub enum ExFatDirItem {
     FileEntry(ExFatEntrySet),
     /// The volume label decoded from a 0x83 entry.
     VolumeLabel(String),
-    /// A benign entry (e.g., Volume GUID, TexFAT Padding,
+    /// A benign entry (e.g., Volume GUID, `TexFAT` Padding,
     /// Vendor Extension, Vendor Allocation).
     ///
     /// Only yielded when the iterator's `include_benign` option
@@ -131,17 +133,20 @@ impl ExFatEntrySet {
     // --------------------------------------------------------
 
     /// Returns the raw UTF-16 code units of the file name.
+    #[must_use]
     pub fn name(&self) -> &[u16] {
         &self.name_chars
     }
 
     /// Returns the file name as raw UTF-16LE bytes.
+    #[must_use]
     pub fn name_utf16le(&self) -> &[u8] {
         &self.name_utf16le
     }
 
     /// Returns the file name as a Rust `String`, replacing invalid
     /// UTF-16 sequences with the Unicode replacement character.
+    #[must_use]
     pub fn name_string(&self) -> String {
         String::from_utf16_lossy(&self.name_chars)
     }
@@ -151,11 +156,13 @@ impl ExFatEntrySet {
     // --------------------------------------------------------
 
     /// Returns the file attribute flags.
+    #[must_use]
     pub fn file_attributes(&self) -> ExFatFileAttributes {
         ExFatFileAttributes::from_bits_truncate(self.file_entry.file_attributes.get())
     }
 
     /// Returns `true` if this entry represents a directory.
+    #[must_use]
     pub fn is_directory(&self) -> bool {
         self.file_attributes()
             .contains(ExFatFileAttributes::DIRECTORY)
@@ -165,32 +172,37 @@ impl ExFatEntrySet {
     // Stream info accessors
     // --------------------------------------------------------
 
-    /// Returns the stored NameHash from the stream extension entry.
+    /// Returns the stored `NameHash` from the stream extension entry.
     ///
     /// This is the hash of the up-cased file name as stored on disk.
     /// Use [`crate::upcase::compute_name_hash`] to compute a hash
     /// for comparison during directory search.
+    #[must_use]
     pub fn name_hash(&self) -> u16 {
         self.stream_entry.name_hash.get()
     }
 
     /// Returns the first cluster of the data stream.
+    #[must_use]
     pub fn first_cluster(&self) -> u32 {
         self.stream_entry.first_cluster.get()
     }
 
     /// Returns the allocated data length in bytes.
+    #[must_use]
     pub fn data_length(&self) -> u64 {
         self.stream_entry.data_length.get()
     }
 
     /// Returns the valid data length in bytes.
+    #[must_use]
     pub fn valid_data_length(&self) -> u64 {
         self.stream_entry.valid_data_length.get()
     }
 
-    /// Returns `true` if the NoFatChain flag is set (contiguous
+    /// Returns `true` if the `NoFatChain` flag is set (contiguous
     /// allocation, no FAT chain traversal needed).
+    #[must_use]
     pub fn no_fat_chain(&self) -> bool {
         self.stream_entry.general_flags & 0x02 != 0
     }
@@ -200,12 +212,14 @@ impl ExFatEntrySet {
     // --------------------------------------------------------
 
     /// Returns `true` if the computed checksum matches the stored
-    /// SetChecksum value.
+    /// `SetChecksum` value.
+    #[must_use]
     pub fn checksum_valid(&self) -> bool {
         self.checksum_valid
     }
 
     /// Returns the number of secondary entries in this set.
+    #[must_use]
     pub fn secondary_count(&self) -> u8 {
         self.file_entry.secondary_count
     }
@@ -215,6 +229,7 @@ impl ExFatEntrySet {
     // --------------------------------------------------------
 
     /// Returns the creation timestamp.
+    #[must_use]
     pub fn create_timestamp(&self) -> ExFatTimestamp {
         ExFatTimestamp::new(
             self.file_entry.create_date.get(),
@@ -225,6 +240,7 @@ impl ExFatEntrySet {
     }
 
     /// Returns the last modification timestamp.
+    #[must_use]
     pub fn modify_timestamp(&self) -> ExFatTimestamp {
         ExFatTimestamp::new(
             self.file_entry.modify_date.get(),
@@ -238,6 +254,7 @@ impl ExFatEntrySet {
     ///
     /// Access timestamps have no 10ms increment field, so
     /// `ten_ms` is always zero.
+    #[must_use]
     pub fn access_timestamp(&self) -> ExFatTimestamp {
         ExFatTimestamp::new(
             self.file_entry.access_date.get(),
@@ -258,7 +275,7 @@ impl ExFatEntrySet {
 /// The `name_length` from the stream extension entry limits the
 /// total number of characters extracted.
 fn assemble_file_name(entries: &[FileNameEntry], name_length: u8) -> Vec<u16> {
-    let limit = name_length as usize;
+    let limit = usize::from(name_length);
     let mut chars = Vec::with_capacity(limit);
     for entry in entries {
         for i in 0..15 {
@@ -283,7 +300,7 @@ fn assemble_file_name(entries: &[FileNameEntry], name_length: u8) -> Vec<u16> {
 /// The label is stored as UTF-16LE with up to 11 characters
 /// (22 bytes). The `character_count` field limits extraction.
 pub(crate) fn decode_volume_label(entry: &VolumeLabelEntry) -> String {
-    let count = entry.character_count.min(11) as usize;
+    let count = usize::from(entry.character_count.min(11));
     let mut chars = Vec::with_capacity(count);
     for i in 0..count {
         let lo = entry.volume_label[i * 2];
@@ -467,7 +484,7 @@ mod tests {
         // Stream (0xC0)
         raw[32] = ENTRY_TYPE_STREAM;
         raw[33] = general_flags;
-        raw[35] = utf16.len() as u8;
+        raw[35] = u8::try_from(utf16.len()).expect("test name fits the exFAT length field");
         raw[40..48].copy_from_slice(&valid_data_length.to_le_bytes());
 
         // Name (0xC1)

@@ -21,12 +21,16 @@ pub(crate) mod huffman;
 ))]
 pub(crate) mod lz77;
 #[cfg(feature = "lznt1")]
+/// LZNT1 compression and decompression.
 pub mod lznt1;
 #[cfg(feature = "lzx")]
+/// WIM-flavoured LZX compression and decompression.
 pub mod lzx;
 #[cfg(feature = "lzx-cab")]
+/// Microsoft Cabinet LZX decompression.
 pub mod lzx_cab;
 #[cfg(feature = "lzxd")]
+/// Exchange Server LZXD delta decompression.
 pub mod lzxd;
 #[cfg(any(
     feature = "xpress",
@@ -47,8 +51,10 @@ pub(crate) mod raw;
 ))]
 pub(crate) mod simd;
 #[cfg(feature = "xpress")]
+/// Plain XPRESS compression and decompression.
 pub mod xpress;
 #[cfg(feature = "xpress-huffman")]
+/// Huffman-coded XPRESS compression and decompression.
 pub mod xpress_huffman;
 
 #[cfg(test)]
@@ -108,6 +114,11 @@ impl core::fmt::Display for Algorithm {
 ///
 /// `output` must be pre-allocated to the expected decompressed size.
 /// Returns the number of bytes written to `output`.
+///
+/// # Errors
+///
+/// Returns [`Error`] when the selected algorithm is disabled, the input is
+/// malformed, or the output buffer is too small.
 #[allow(unused_variables)]
 pub fn decompress(algorithm: Algorithm, input: &[u8], output: &mut [u8]) -> Result<usize> {
     match algorithm {
@@ -157,6 +168,11 @@ pub fn decompress_lenient(algorithm: Algorithm, input: &[u8], output: &mut [u8])
 ///
 /// `output` must be at least `compress_bound(algorithm, input.len())`
 /// bytes. Returns the number of bytes written to `output`.
+///
+/// # Errors
+///
+/// Returns [`Error`] when compression is disabled for the selected algorithm
+/// or the output buffer is too small.
 #[allow(unused_variables)]
 pub fn compress(algorithm: Algorithm, input: &[u8], output: &mut [u8]) -> Result<usize> {
     match algorithm {
@@ -179,6 +195,7 @@ pub fn compress(algorithm: Algorithm, input: &[u8], output: &mut [u8]) -> Result
 /// Worst-case compressed size for the given algorithm and input length.
 ///
 /// Callers should allocate output buffers of at least this size.
+#[must_use]
 pub fn compress_bound(algorithm: Algorithm, input_len: usize) -> usize {
     match algorithm {
         #[cfg(feature = "compress-lznt1")]
@@ -281,7 +298,9 @@ mod tests {
     #[test]
     #[cfg(feature = "compress-xpress-huffman")]
     fn dispatch_compress_xpress_huffman_roundtrip() {
-        let input: alloc::vec::Vec<u8> = (0..200).map(|i| (i % 127) as u8).collect();
+        let input: alloc::vec::Vec<u8> = (0..200)
+            .map(|i| u8::try_from(i % 127).expect("the modulus limits values below 127"))
+            .collect();
         let bound = compress_bound(Algorithm::XpressHuffman, input.len());
         let mut compressed = alloc::vec![0u8; bound];
         let c_len = compress(Algorithm::XpressHuffman, &input, &mut compressed).expect("compress");
@@ -295,7 +314,9 @@ mod tests {
     #[test]
     #[cfg(feature = "compress-lzx")]
     fn dispatch_compress_lzx_roundtrip() {
-        let input: alloc::vec::Vec<u8> = (0..300).map(|i| (i % 200) as u8).collect();
+        let input: alloc::vec::Vec<u8> = (0..300)
+            .map(|i| u8::try_from(i % 200).expect("the modulus limits values below 200"))
+            .collect();
         let bound = compress_bound(Algorithm::Lzx, input.len());
         let mut compressed = alloc::vec![0u8; bound];
         let c_len = compress(Algorithm::Lzx, &input, &mut compressed).expect("compress");

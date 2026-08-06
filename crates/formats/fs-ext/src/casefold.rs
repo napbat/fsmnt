@@ -1,17 +1,17 @@
-//! Casefolding for ext4 CASEFOLD_FL directories.
+//! Casefolding for ext4 `CASEFOLD_FL` directories.
 //!
 //! Non-encrypted casefolded directories hash the casefolded form of
 //! the lookup name. The kernel applies `utf8_casefold()` which does
-//! NFD normalization + Unicode Simple CaseFold.
+//! NFD normalization + Unicode Simple `CaseFold`.
 //!
 //! **Default (no_std-safe):** ASCII casefolding only. Non-ASCII
 //! names fall back to sequential scan with `eq_ignore_ascii_case`.
 //!
 //! **With `unicode-casefold` feature:** Full Unicode NFD +
-//! CaseFold for both sequential-scan comparison *and* htree hashing.
+//! `CaseFold` for both sequential-scan comparison *and* htree hashing.
 //! `casefold_for_hash` folds non-ASCII names through the same
 //! `NFD + Simple/Full CaseFold` pipeline the kernel's `utf8_casefold`
-//! applies, so non-ASCII lookups in CASEFOLD_FL directories can take
+//! applies, so non-ASCII lookups in `CASEFOLD_FL` directories can take
 //! the htree fast path. A fold that diverges from the kernel only
 //! costs the htree speedup — `htree_lookup` already falls back to
 //! sequential scan on a leaf miss — so this can never mis-resolve a
@@ -21,6 +21,10 @@ use alloc::borrow::Cow;
 #[cfg(feature = "unicode-casefold")]
 use alloc::string::String;
 use alloc::vec::Vec;
+#[cfg(feature = "unicode-casefold")]
+use unicode_casefold::UnicodeCaseFold;
+#[cfg(feature = "unicode-casefold")]
+use unicode_normalization::UnicodeNormalization;
 
 /// Casefold a directory entry name for htree hashing.
 ///
@@ -57,7 +61,7 @@ pub(crate) fn casefold_for_hash(name: &[u8]) -> Option<Cow<'_, [u8]>> {
     }
 }
 
-/// Prepared lookup key for matching names in a CASEFOLD_FL directory.
+/// Prepared lookup key for matching names in a `CASEFOLD_FL` directory.
 ///
 /// The query is normalized once per lookup so repeated candidate
 /// comparisons do not need to rebuild the same folded form.
@@ -118,27 +122,24 @@ pub(crate) fn prepare_lookup_name(name: &[u8], casefold: bool) -> PreparedLookup
     }
 }
 
-/// Compare two names for case-insensitive equality in a CASEFOLD_FL
+/// Compare two names for case-insensitive equality in a `CASEFOLD_FL`
 /// directory.
 ///
 /// Without the `unicode-casefold` feature, uses ASCII case-insensitive
 /// comparison. With the feature, uses Unicode NFD normalization +
-/// CaseFold for proper UTF-8 handling.
+/// `CaseFold` for proper UTF-8 handling.
 #[cfg(test)]
 pub(crate) fn casefold_eq(a: &[u8], b: &[u8]) -> bool {
     prepare_lookup_name(b, true).matches(a)
 }
 
-/// Unicode NFD + CaseFold equality comparison.
+/// Unicode NFD + `CaseFold` equality comparison.
 ///
 /// Both inputs are treated as UTF-8. Invalid UTF-8 sequences fall
 /// back to byte-exact comparison (a non-matching pair of invalid
 /// sequences will never falsely match).
 #[cfg(feature = "unicode-casefold")]
 fn unicode_casefold_string(name: &str) -> String {
-    use unicode_casefold::UnicodeCaseFold;
-    use unicode_normalization::UnicodeNormalization;
-
     name.nfd().case_fold().collect()
 }
 
@@ -148,9 +149,6 @@ fn unicode_casefold_matches(candidate: &[u8], query: &str) -> bool {
     let Ok(candidate_str) = core::str::from_utf8(candidate) else {
         return false;
     };
-
-    use unicode_casefold::UnicodeCaseFold;
-    use unicode_normalization::UnicodeNormalization;
 
     candidate_str.nfd().case_fold().eq(query.chars())
 }
@@ -191,7 +189,7 @@ mod tests {
         assert!(casefold_for_hash(&[0xFF, 0xFE, 0x80]).is_none());
     }
 
-    /// Every name in a CASEFOLD_FL directory hashes the *folded* form,
+    /// Every name in a `CASEFOLD_FL` directory hashes the *folded* form,
     /// so any two names that the kernel treats as equal must produce
     /// byte-identical `casefold_for_hash` output. These pairs span the
     /// Unicode edge cases the issue calls out: combining marks,

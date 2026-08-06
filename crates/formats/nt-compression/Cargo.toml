@@ -26,9 +26,9 @@ compress-xpress-huffman = ["xpress-huffman"]
 compress-lzx = ["lzx"]
 
 [dev-dependencies]
-divan = "0.1"
-libloading = "0.9"
-proptest = "1"
+divan = { workspace = true }
+libloading = { workspace = true }
+proptest = { workspace = true }
 
 [[test]]
 name = "fast_path_differential"
@@ -75,6 +75,9 @@ required-features = [
     "lzx",
     "xpress-huffman",
 ]
+
+[lints]
+workspace = true
 
 [[test]]
 name = "wimlib_cross"

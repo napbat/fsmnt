@@ -1,7 +1,7 @@
 //! File data reader for exFAT.
 //!
 //! [`ExFatFile`] provides seekable, read-only access to a file's data
-//! stream. It supports both FAT-chained and contiguous (NoFatChain)
+//! stream. It supports both FAT-chained and contiguous (`NoFatChain`)
 //! cluster layouts.
 
 use alloc::vec::Vec;
@@ -41,6 +41,11 @@ impl<'e> ExFatFile<'e> {
     /// For FAT-chained files, resolves the full cluster chain
     /// upfront by walking the FAT. For contiguous files, no FAT
     /// access is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the FAT chain cannot be read, contains an
+    /// invalid cluster, or is shorter than `data_length` requires.
     pub fn new<T>(
         exfat: &'e ExFat,
         fs: &mut T,
@@ -61,9 +66,9 @@ impl<'e> ExFatFile<'e> {
             }
 
             // Validate chain covers the declared data length
-            let cluster_size = exfat.cluster_size() as u64;
+            let cluster_size = u64::from(exfat.cluster_size());
             let clusters_needed = data_length.saturating_add(cluster_size - 1) / cluster_size;
-            if (chain.len() as u64) < clusters_needed {
+            if u64::try_from(chain.len()).unwrap_or(u64::MAX) < clusters_needed {
                 return Err(ExFatError::InvalidEntrySet {
                     reason: "FAT chain too short for declared data length",
                     byte_offset: 0,
@@ -85,8 +90,12 @@ impl<'e> ExFatFile<'e> {
 
     /// Returns the cluster number containing the given byte offset.
     fn cluster_at_offset(&self, offset: u64) -> Result<u32> {
-        let cluster_size = self.exfat.cluster_size() as u64;
-        let cluster_index = (offset / cluster_size) as usize;
+        let cluster_size = u64::from(self.exfat.cluster_size());
+        let cluster_index =
+            usize::try_from(offset / cluster_size).map_err(|_| ExFatError::InvalidEntrySet {
+                reason: "file offset exceeds addressable memory",
+                byte_offset: offset,
+            })?;
 
         if self.contiguous {
             let idx = u32::try_from(cluster_index).map_err(|_| ExFatError::InvalidCluster {
@@ -108,22 +117,25 @@ impl<'e> ExFatFile<'e> {
     }
 
     /// Logical position within this file's data stream.
+    #[must_use]
     pub fn stream_position(&self) -> u64 {
         self.position
     }
 
     /// Total length of the file data in bytes.
+    #[must_use]
     pub fn len(&self) -> u64 {
         self.data_length
     }
 
     /// Returns `true` if the file has zero data length.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.data_length == 0
     }
 }
 
-impl<'e, R: Read + Seek> FsReadSeek<R> for ExFatFile<'e> {
+impl<R: Read + Seek> FsReadSeek<R> for ExFatFile<'_> {
     type Error = ExFatError;
 
     fn read(&mut self, fs: &mut R, buf: &mut [u8]) -> core::result::Result<usize, ExFatError> {
@@ -131,16 +143,22 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExFatFile<'e> {
             return Ok(0);
         }
 
-        let remaining = self.data_length - self.position;
-        let to_read = remaining.min(buf.len() as u64) as usize;
+        let remaining = usize::try_from(self.data_length - self.position).unwrap_or(usize::MAX);
+        let to_read = remaining.min(buf.len());
 
-        let cluster_size = self.exfat.cluster_size() as u64;
+        let cluster_size = u64::from(self.exfat.cluster_size());
         let mut bytes_read = 0usize;
 
         while bytes_read < to_read {
             let cluster = self.cluster_at_offset(self.position)?;
             let offset_in_cluster = self.position % cluster_size;
-            let cluster_remaining = (cluster_size - offset_in_cluster) as usize;
+            let cluster_remaining =
+                usize::try_from(cluster_size - offset_in_cluster).map_err(|_| {
+                    ExFatError::InvalidEntrySet {
+                        reason: "cluster size exceeds addressable memory",
+                        byte_offset: self.position,
+                    }
+                })?;
             let chunk = (to_read - bytes_read).min(cluster_remaining);
 
             let disk_offset = self.exfat.cluster_offset(cluster)? + offset_in_cluster;
@@ -148,7 +166,10 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExFatFile<'e> {
             fs.read_exact(&mut buf[bytes_read..bytes_read + chunk])?;
 
             bytes_read += chunk;
-            self.position += chunk as u64;
+            self.position += u64::try_from(chunk).map_err(|_| ExFatError::InvalidEntrySet {
+                reason: "read length exceeds the supported range",
+                byte_offset: self.position,
+            })?;
         }
 
         Ok(bytes_read)
@@ -167,7 +188,7 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExFatFile<'e> {
             SeekFrom::End(offset) => {
                 if offset >= 0 {
                     self.data_length
-                        .checked_add(offset as u64)
+                        .checked_add(offset.unsigned_abs())
                         .ok_or_else(invalid)?
                 } else {
                     self.data_length
@@ -178,7 +199,7 @@ impl<'e, R: Read + Seek> FsReadSeek<R> for ExFatFile<'e> {
             SeekFrom::Current(offset) => {
                 if offset >= 0 {
                     self.position
-                        .checked_add(offset as u64)
+                        .checked_add(offset.unsigned_abs())
                         .ok_or_else(invalid)?
                 } else {
                     self.position
@@ -216,7 +237,7 @@ mod tests {
         // Write file data in clusters 5 and 6 (contiguous)
         let data_off = cluster_heap_offset(5);
         for i in 0..1024 {
-            image[data_off + i] = (i % 256) as u8;
+            image[data_off + i] = u8::try_from(i % 256).expect("the remainder fits in one byte");
         }
 
         let mut cursor = Cursor::new(image);
@@ -232,7 +253,11 @@ mod tests {
         assert_eq!(n, 1024);
 
         for (i, &byte) in buf.iter().enumerate() {
-            assert_eq!(byte, (i % 256) as u8, "mismatch at byte {i}");
+            assert_eq!(
+                byte,
+                u8::try_from(i % 256).expect("the remainder fits in one byte"),
+                "mismatch at byte {i}"
+            );
         }
 
         assert_eq!(file.stream_position(), 1024);
@@ -290,13 +315,20 @@ mod tests {
         // Write recognizable data in cluster 5
         let off = cluster_heap_offset(5);
         for i in 0..BPS {
-            image[off + i] = i as u8;
+            image[off + i] = u8::try_from(i % 256).expect("the remainder fits in one byte");
         }
 
         let mut cursor = Cursor::new(image);
         let exfat = ExFat::new(&mut cursor).unwrap();
 
-        let mut file = ExFatFile::new(&exfat, &mut cursor, 5, BPS as u64, true).unwrap();
+        let mut file = ExFatFile::new(
+            &exfat,
+            &mut cursor,
+            5,
+            u64::try_from(BPS).expect("BPS fits u64"),
+            true,
+        )
+        .unwrap();
 
         // Seek to offset 100
         let pos = file.seek(&mut cursor, SeekFrom::Start(100)).unwrap();
@@ -313,7 +345,10 @@ mod tests {
 
         // Seek from end
         file.seek(&mut cursor, SeekFrom::End(-10)).unwrap();
-        assert_eq!(file.stream_position(), BPS as u64 - 10);
+        assert_eq!(
+            file.stream_position(),
+            u64::try_from(BPS).expect("BPS fits u64") - 10
+        );
     }
 
     #[test]
@@ -365,7 +400,14 @@ mod tests {
         let mut cursor = Cursor::new(image);
         let exfat = ExFat::new(&mut cursor).unwrap();
 
-        let mut file = ExFatFile::new(&exfat, &mut cursor, 5, (2 * BPS) as u64, true).unwrap();
+        let mut file = ExFatFile::new(
+            &exfat,
+            &mut cursor,
+            5,
+            u64::try_from(2 * BPS).expect("test length fits u64"),
+            true,
+        )
+        .unwrap();
 
         // Seek to 500 (12 bytes before cluster boundary at 512)
         file.seek(&mut cursor, SeekFrom::Start(500)).unwrap();
@@ -493,7 +535,14 @@ mod tests {
 
         let mut cursor = Cursor::new(image);
         let exfat = ExFat::new(&mut cursor).unwrap();
-        let mut file = ExFatFile::new(&exfat, &mut cursor, 5, 2 * BPS as u64, false).unwrap();
+        let mut file = ExFatFile::new(
+            &exfat,
+            &mut cursor,
+            5,
+            u64::try_from(2 * BPS).expect("test length fits u64"),
+            false,
+        )
+        .unwrap();
 
         // Seek to within cluster 5 (offset 500); read across the
         // 5 -> 8 boundary. Correct chain-following read yields
@@ -526,11 +575,18 @@ mod tests {
         set_fat_entry(&mut image, 5, 0xFFFF_FFFF);
         let off = cluster_heap_offset(5);
         for i in 0..BPS {
-            image[off + i] = (i % 256) as u8;
+            image[off + i] = u8::try_from(i % 256).expect("the remainder fits in one byte");
         }
         let mut cursor = Cursor::new(image);
         let exfat = ExFat::new(&mut cursor).unwrap();
-        let mut file = ExFatFile::new(&exfat, &mut cursor, 5, BPS as u64, false).unwrap();
+        let mut file = ExFatFile::new(
+            &exfat,
+            &mut cursor,
+            5,
+            u64::try_from(BPS).expect("BPS fits u64"),
+            false,
+        )
+        .unwrap();
 
         let mut buf = vec![0u8; BPS];
         let n = file

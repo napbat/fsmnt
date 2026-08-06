@@ -115,6 +115,11 @@ fn parse_snapshot(xid: u64, value: &[u8]) -> Result<Snapshot> {
 /// # Errors
 ///
 /// Propagates tree-walk errors.
+///
+/// # Panics
+///
+/// Panics only if a snapshot value slice returned for an exact eight-byte
+/// range does not contain eight bytes.
 pub fn snapshot_xid_by_name<T: Read + Seek>(
     snap_meta_tree: &Catalog,
     reader: &mut T,
@@ -170,6 +175,11 @@ impl SnapMetaExt {
     /// # Errors
     ///
     /// Returns [`ApfsError::Truncated`] for a short buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width snapshot field ceases to fit the minimum
+    /// body length checked before parsing.
     pub fn parse(body: &[u8]) -> Result<Self> {
         if body.len() < SNAP_META_EXT_SIZE {
             return Err(ApfsError::Truncated {
@@ -338,18 +348,42 @@ mod tests {
     fn catalog_leaf(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0003u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -358,11 +392,14 @@ mod tests {
     }
 
     fn snap_metadata_record(xid: u64, name: &str) -> (Vec<u8>, Vec<u8>) {
-        let key = (((JObjType::SnapMetadata.as_value() as u64) << OBJ_TYPE_SHIFT) | xid)
+        let key = ((u64::from(JObjType::SnapMetadata.as_value()) << OBJ_TYPE_SHIFT) | xid)
             .to_le_bytes()
             .to_vec();
         let mut value = vec![0u8; J_SNAP_METADATA_VAL_SIZE];
-        value[48..50].copy_from_slice(&(name.len() as u16 + 1).to_le_bytes());
+        value[48..50].copy_from_slice(
+            &(u16::try_from(name.len()).expect("the test fixture value fits in u16") + 1)
+                .to_le_bytes(),
+        );
         value.extend_from_slice(name.as_bytes());
         value.push(0);
         (key, value)
@@ -372,10 +409,10 @@ mod tests {
     /// `name_len` (`u16`) and the null-terminated name; the value is the
     /// snapshot's 8-byte transaction id.
     fn snap_name_record(name: &str, xid: u64) -> (Vec<u8>, Vec<u8>) {
-        let mut key = (((JObjType::SnapName.as_value() as u64) << OBJ_TYPE_SHIFT) | xid)
+        let mut key = ((u64::from(JObjType::SnapName.as_value()) << OBJ_TYPE_SHIFT) | xid)
             .to_le_bytes()
             .to_vec();
-        let name_len = name.len() as u16 + 1;
+        let name_len = u16::try_from(name.len()).expect("the test fixture value fits in u16") + 1;
         key.extend_from_slice(&name_len.to_le_bytes());
         key.extend_from_slice(name.as_bytes());
         key.push(0);
@@ -393,7 +430,12 @@ mod tests {
         image.extend(omap_tree(300, 2));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let tree = Catalog::new(Oid(300), omap, BLK as u32, Xid(1));
+        let tree = Catalog::new(
+            Oid(300),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         let snaps = Snapshot::list(&tree, &mut reader).unwrap();
@@ -409,7 +451,12 @@ mod tests {
         image.extend(omap_tree(300, 2));
         image.extend(catalog_leaf(&[]));
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let tree = Catalog::new(Oid(300), omap, BLK as u32, Xid(1));
+        let tree = Catalog::new(
+            Oid(300),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
         assert!(Snapshot::list(&tree, &mut reader).unwrap().is_empty());
     }
@@ -428,7 +475,12 @@ mod tests {
         image.extend(omap_tree(300, 2));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let tree = Catalog::new(Oid(300), omap, BLK as u32, Xid(1));
+        let tree = Catalog::new(
+            Oid(300),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         assert_eq!(
@@ -456,7 +508,12 @@ mod tests {
         image.extend(omap_tree(300, 2));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let tree = Catalog::new(Oid(300), omap, BLK as u32, Xid(1));
+        let tree = Catalog::new(
+            Oid(300),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         assert_eq!(
@@ -472,11 +529,15 @@ mod tests {
         // (`!=` instead of `==`), the first byte is treated as the
         // terminator, the comparison shrinks to an empty slice, and the
         // lookup returns `None`.
-        let mut key = (((JObjType::SnapName.as_value() as u64) << OBJ_TYPE_SHIFT) | 5_555u64)
+        let mut key = ((u64::from(JObjType::SnapName.as_value()) << OBJ_TYPE_SHIFT) | 0x15B3_u64)
             .to_le_bytes()
             .to_vec();
         let name = b"unterm";
-        key.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        key.extend_from_slice(
+            &u16::try_from(name.len())
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         key.extend_from_slice(name);
         let value = 5_555u64.to_le_bytes().to_vec();
 
@@ -485,7 +546,12 @@ mod tests {
         image.extend(omap_tree(300, 2));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let tree = Catalog::new(Oid(300), omap, BLK as u32, Xid(1));
+        let tree = Catalog::new(
+            Oid(300),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         assert_eq!(

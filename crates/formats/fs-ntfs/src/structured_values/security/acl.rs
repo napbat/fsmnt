@@ -1,14 +1,13 @@
 use core::fmt;
 
 use bitflags::bitflags;
-use enumn::N;
 
 use crate::error::{NtfsError, Result};
 use crate::types::NtfsPosition;
 
 use super::sid::NtfsSid;
 
-/// Minimum ACL header size: revision(1) + padding(1) + size(2) + ace_count(2) + padding(2) = 8.
+/// Minimum ACL header size: revision(1) + padding(1) + size(2) + `ace_count(2)` + padding(2) = 8.
 const ACL_HEADER_SIZE: usize = 8;
 
 /// Minimum ACE header size: type(1) + flags(1) + size(2) = 4.
@@ -28,6 +27,11 @@ pub struct NtfsAcl<'s> {
 
 impl<'s> NtfsAcl<'s> {
     /// Parse an ACL from raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ACL header is truncated or its declared size is
+    /// smaller than the header or exceeds `data`.
     pub fn from_bytes(data: &'s [u8], position: NtfsPosition) -> Result<Self> {
         if data.len() < ACL_HEADER_SIZE {
             return Err(NtfsError::InvalidAcl {
@@ -36,7 +40,7 @@ impl<'s> NtfsAcl<'s> {
             });
         }
 
-        let acl_size = u16::from_le_bytes([data[2], data[3]]) as usize;
+        let acl_size = usize::from(u16::from_le_bytes([data[2], data[3]]));
         if acl_size < ACL_HEADER_SIZE {
             return Err(NtfsError::InvalidAcl {
                 position,
@@ -57,21 +61,25 @@ impl<'s> NtfsAcl<'s> {
     }
 
     /// Returns the ACL revision (2 for standard ACLs, 4 for ACLs with object-specific ACE types).
+    #[must_use]
     pub fn revision(&self) -> u8 {
         self.data[0]
     }
 
     /// Returns the total size of the ACL in bytes (including the header).
+    #[must_use]
     pub fn size(&self) -> u16 {
         u16::from_le_bytes([self.data[2], self.data[3]])
     }
 
     /// Returns the number of ACEs in this ACL.
+    #[must_use]
     pub fn ace_count(&self) -> u16 {
         u16::from_le_bytes([self.data[4], self.data[5]])
     }
 
     /// Returns an iterator over the ACEs in this ACL.
+    #[must_use]
     pub fn entries(&self) -> NtfsAceIterator<'s> {
         NtfsAceIterator {
             data: self.data,
@@ -109,8 +117,10 @@ impl<'s> Iterator for NtfsAceIterator<'s> {
             }));
         }
 
-        let ace_size =
-            u16::from_le_bytes([self.data[self.offset + 2], self.data[self.offset + 3]]) as usize;
+        let ace_size = usize::from(u16::from_le_bytes([
+            self.data[self.offset + 2],
+            self.data[self.offset + 3],
+        ]));
 
         if ace_size < ACE_HEADER_SIZE {
             self.remaining = 0;
@@ -138,7 +148,7 @@ impl<'s> Iterator for NtfsAceIterator<'s> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.remaining as usize))
+        (0, Some(usize::from(self.remaining)))
     }
 }
 
@@ -153,31 +163,39 @@ pub struct NtfsAce<'s> {
     position: NtfsPosition,
 }
 
-impl<'s> NtfsAce<'s> {
+impl NtfsAce<'_> {
     /// Returns the ACE type.
+    #[must_use]
     pub fn ace_type(&self) -> NtfsAceType {
         NtfsAceType::n(self.data[0]).unwrap_or(NtfsAceType::Unknown)
     }
 
     /// Returns the raw ACE type byte (useful when the type is not recognized).
+    #[must_use]
     pub fn ace_type_raw(&self) -> u8 {
         self.data[0]
     }
 
     /// Returns the ACE flags.
+    #[must_use]
     pub fn flags(&self) -> NtfsAceFlags {
         NtfsAceFlags::from_bits_truncate(self.data[1])
     }
 
     /// Returns the total size of this ACE in bytes.
+    #[must_use]
     pub fn size(&self) -> u16 {
         u16::from_le_bytes([self.data[2], self.data[3]])
     }
 
     /// Returns the access mask (permission bits).
     ///
-    /// Only valid for basic ACE types (AccessAllowed, AccessDenied, SystemAudit, SystemAlarm).
+    /// Only valid for basic ACE types (`AccessAllowed`, `AccessDenied`, `SystemAudit`, `SystemAlarm`).
     /// For other ACE types, the body layout differs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ACE is too short to contain an access mask.
     pub fn access_mask(&self) -> Result<u32> {
         if self.data.len() < ACE_HEADER_SIZE + 4 {
             return Err(NtfsError::InvalidAce {
@@ -195,8 +213,13 @@ impl<'s> NtfsAce<'s> {
 
     /// Returns the SID that this ACE applies to.
     ///
-    /// Only valid for basic ACE types (AccessAllowed, AccessDenied, SystemAudit, SystemAlarm).
+    /// Only valid for basic ACE types (`AccessAllowed`, `AccessDenied`, `SystemAudit`, `SystemAlarm`).
     /// The SID starts immediately after the 4-byte access mask.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ACE is too short to contain a SID or the SID is
+    /// malformed.
     pub fn sid(&self) -> Result<NtfsSid> {
         let sid_offset = ACE_HEADER_SIZE + 4; // header + access_mask
         if self.data.len() < sid_offset + 8 {
@@ -210,33 +233,92 @@ impl<'s> NtfsAce<'s> {
 }
 
 /// The type of an Access Control Entry.
-#[derive(Clone, Copy, Debug, Eq, N, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum NtfsAceType {
+    /// Grants the rights encoded in the access mask.
     AccessAllowed = 0,
+    /// Denies the rights encoded in the access mask.
     AccessDenied = 1,
+    /// Requests auditing when the encoded access is attempted.
     SystemAudit = 2,
+    /// Represents the legacy system-alarm ACE form.
     SystemAlarm = 3,
+    /// Represents a compound allow ACE carrying server and client identities.
     AccessAllowedCompound = 4,
+    /// Grants rights to a specific object type.
     AccessAllowedObject = 5,
+    /// Denies rights to a specific object type.
     AccessDeniedObject = 6,
+    /// Audits access to a specific object type.
     SystemAuditObject = 7,
+    /// Represents the object-specific system-alarm ACE form.
     SystemAlarmObject = 8,
+    /// Grants rights and carries application callback data.
     AccessAllowedCallback = 9,
+    /// Denies rights and carries application callback data.
     AccessDeniedCallback = 10,
+    /// Grants object-specific rights and carries callback data.
     AccessAllowedCallbackObject = 11,
+    /// Denies object-specific rights and carries callback data.
     AccessDeniedCallbackObject = 12,
+    /// Audits access and carries application callback data.
     SystemAuditCallback = 13,
+    /// Represents a callback-capable system-alarm ACE.
     SystemAlarmCallback = 14,
+    /// Audits object-specific access and carries callback data.
     SystemAuditCallbackObject = 15,
+    /// Represents an object-specific callback system-alarm ACE.
     SystemAlarmCallbackObject = 16,
+    /// Carries an integrity level used by mandatory access control.
     SystemMandatoryLabel = 17,
+    /// Carries resource claims used by conditional access checks.
     SystemResourceAttribute = 18,
+    /// Associates the object with a central access policy.
     SystemScopedPolicyId = 19,
+    /// Carries a process trust level.
     SystemProcessTrustLabel = 20,
+    /// Applies a conditional access filter.
     SystemAccessFilter = 21,
     /// Placeholder for unrecognized ACE types.
     Unknown = 255,
+}
+
+impl NtfsAceType {
+    /// Converts an on-disk ACE type byte into a known variant.
+    ///
+    /// Returns `None` for values that NTFS has not assigned. Callers that
+    /// need to preserve an unknown value can map that result to
+    /// [`Self::Unknown`].
+    #[must_use]
+    pub fn n(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::AccessAllowed),
+            1 => Some(Self::AccessDenied),
+            2 => Some(Self::SystemAudit),
+            3 => Some(Self::SystemAlarm),
+            4 => Some(Self::AccessAllowedCompound),
+            5 => Some(Self::AccessAllowedObject),
+            6 => Some(Self::AccessDeniedObject),
+            7 => Some(Self::SystemAuditObject),
+            8 => Some(Self::SystemAlarmObject),
+            9 => Some(Self::AccessAllowedCallback),
+            10 => Some(Self::AccessDeniedCallback),
+            11 => Some(Self::AccessAllowedCallbackObject),
+            12 => Some(Self::AccessDeniedCallbackObject),
+            13 => Some(Self::SystemAuditCallback),
+            14 => Some(Self::SystemAlarmCallback),
+            15 => Some(Self::SystemAuditCallbackObject),
+            16 => Some(Self::SystemAlarmCallbackObject),
+            17 => Some(Self::SystemMandatoryLabel),
+            18 => Some(Self::SystemResourceAttribute),
+            19 => Some(Self::SystemScopedPolicyId),
+            20 => Some(Self::SystemProcessTrustLabel),
+            21 => Some(Self::SystemAccessFilter),
+            255 => Some(Self::Unknown),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for NtfsAceType {
@@ -367,7 +449,7 @@ mod tests {
         let ace = acl.entries().next().unwrap().unwrap();
         assert_eq!(ace.ace_type(), NtfsAceType::AccessAllowed);
         assert_eq!(ace.flags(), NtfsAceFlags::empty());
-        assert_eq!(ace.access_mask().unwrap(), 0x001F01FF);
+        assert_eq!(ace.access_mask().unwrap(), 0x001F_01FF);
         let sid = ace.sid().unwrap();
         assert_eq!(sid.to_sid_string(), "S-1-5-18");
     }
@@ -385,19 +467,28 @@ mod tests {
         let mut ace = vec![ace_type, flags, 0x00, 0x00]; // size patched below
         ace.extend_from_slice(&access_mask.to_le_bytes());
         // SID: revision 1, len(subs) sub-authorities, authority 5.
-        ace.extend_from_slice(&[0x01, subs.len() as u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05]);
+        ace.extend_from_slice(&[
+            0x01,
+            u8::try_from(subs.len()).expect("test value fits u8"),
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x05,
+        ]);
         for sub in subs {
             ace.extend_from_slice(&sub.to_le_bytes());
         }
-        let size = ace.len() as u16;
+        let size = u16::try_from(ace.len()).expect("test value fits u16");
         ace[2..4].copy_from_slice(&size.to_le_bytes());
         ace
     }
 
-    /// Wraps `aces` in an ACL header (revision 2) with the given ace_count.
+    /// Wraps `aces` in an ACL header (revision 2) with the given `ace_count`.
     fn make_acl(revision: u8, ace_count: u16, aces: &[Vec<u8>]) -> Vec<u8> {
         let body: Vec<u8> = aces.iter().flatten().copied().collect();
-        let size = (ACL_HEADER_SIZE + body.len()) as u16;
+        let size = u16::try_from(ACL_HEADER_SIZE + body.len()).expect("test value fits u16");
         let mut acl = vec![revision, 0x00];
         acl.extend_from_slice(&size.to_le_bytes());
         acl.extend_from_slice(&ace_count.to_le_bytes());
@@ -410,14 +501,14 @@ mod tests {
     fn from_bytes_size_within_and_exceeding_data() {
         // Declared size equals the buffer length: accepted, and the ACL is
         // truncated to exactly that size.
-        let ace = make_basic_ace(0, 0, 0x1F01FF, &[18]);
+        let ace = make_basic_ace(0, 0, 0x1F_01FF, &[18]);
         let acl_bytes = make_acl(2, 1, &[ace]);
         let acl = NtfsAcl::from_bytes(&acl_bytes, NtfsPosition::none()).unwrap();
-        assert_eq!(acl.size() as usize, acl_bytes.len());
+        assert_eq!(usize::from(acl.size()), acl_bytes.len());
 
         // Declared size larger than the buffer: rejected (anchors `>` at 46).
         let mut oversized = acl_bytes.clone();
-        let bigger = (acl_bytes.len() as u16) + 4;
+        let bigger = u16::try_from(acl_bytes.len()).expect("test value fits u16") + 4;
         oversized[2..4].copy_from_slice(&bigger.to_le_bytes());
         assert!(NtfsAcl::from_bytes(&oversized, NtfsPosition::none()).is_err());
 
@@ -425,7 +516,7 @@ mod tests {
         let mut padded = acl_bytes.clone();
         padded.extend_from_slice(&[0xEE; 8]);
         let acl2 = NtfsAcl::from_bytes(&padded, NtfsPosition::none()).unwrap();
-        assert_eq!(acl2.size() as usize, acl_bytes.len());
+        assert_eq!(usize::from(acl2.size()), acl_bytes.len());
     }
 
     #[test]
@@ -450,7 +541,7 @@ mod tests {
         assert_eq!(a0.ace_type(), NtfsAceType::AccessAllowed);
         assert_eq!(a0.ace_type_raw(), 0);
         assert_eq!(a0.flags(), NtfsAceFlags::OBJECT_INHERIT);
-        assert_eq!(a0.size() as usize, ace0_len);
+        assert_eq!(usize::from(a0.size()), ace0_len);
         assert_eq!(a0.access_mask().unwrap(), 0x0011_2233);
         assert_eq!(a0.sid().unwrap().to_sid_string(), "S-1-5-18");
         assert_eq!(it.size_hint(), (0, Some(1)));
@@ -459,7 +550,7 @@ mod tests {
         assert_eq!(a1.ace_type(), NtfsAceType::AccessDenied);
         assert_eq!(a1.ace_type_raw(), 1);
         assert_eq!(a1.flags(), NtfsAceFlags::CONTAINER_INHERIT);
-        assert_eq!(a1.size() as usize, ace1_len);
+        assert_eq!(usize::from(a1.size()), ace1_len);
         assert_eq!(a1.access_mask().unwrap(), 0x4455_6677);
         assert_eq!(a1.sid().unwrap().to_sid_string(), "S-1-5-32-544");
 
@@ -510,7 +601,7 @@ mod tests {
         let mut ace = vec![0x00, 0x00, 0x00, 0x00];
         ace.extend_from_slice(&0xAABB_CCDDu32.to_le_bytes()); // access mask
         ace.extend_from_slice(&[0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]); // 7-byte SID stub
-        let size = ace.len() as u16;
+        let size = u16::try_from(ace.len()).expect("test value fits u16");
         ace[2..4].copy_from_slice(&size.to_le_bytes());
         let acl_bytes = make_acl(2, 1, &[ace]);
         let acl = NtfsAcl::from_bytes(&acl_bytes, NtfsPosition::none()).unwrap();
@@ -521,7 +612,7 @@ mod tests {
         // An ACE too short even for the access mask: access_mask fails.
         let mut tiny = vec![0x00, 0x00, 0x00, 0x00];
         tiny.extend_from_slice(&[0x00, 0x00, 0x00]); // 3-byte body
-        let tiny_size = tiny.len() as u16;
+        let tiny_size = u16::try_from(tiny.len()).expect("test value fits u16");
         tiny[2..4].copy_from_slice(&tiny_size.to_le_bytes());
         let tiny_acl = make_acl(2, 1, &[tiny]);
         let acl2 = NtfsAcl::from_bytes(&tiny_acl, NtfsPosition::none()).unwrap();
@@ -536,7 +627,7 @@ mod tests {
         // A `<` -> `<=` flip at line 182 would wrongly reject this.
         let mut ace = vec![0x00, 0x00, 0x00, 0x00];
         ace.extend_from_slice(&0x1234_5678u32.to_le_bytes());
-        let size = ace.len() as u16;
+        let size = u16::try_from(ace.len()).expect("test value fits u16");
         assert_eq!(size, 8);
         ace[2..4].copy_from_slice(&size.to_le_bytes());
         let acl_bytes = make_acl(2, 1, &[ace]);
@@ -556,7 +647,7 @@ mod tests {
         ace.extend_from_slice(&0u32.to_le_bytes()); // access mask
         // 8-byte SID: revision 1, 0 sub-authorities, authority 5.
         ace.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05]);
-        let size = ace.len() as u16;
+        let size = u16::try_from(ace.len()).expect("test value fits u16");
         assert_eq!(size, 16);
         ace[2..4].copy_from_slice(&size.to_le_bytes());
         let acl_bytes = make_acl(2, 1, &[ace]);
@@ -577,7 +668,7 @@ mod tests {
         let mut ace = vec![0x00, 0x00, 0x00, 0x00];
         ace.extend_from_slice(&0u32.to_le_bytes()); // access mask
         ace.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]); // 4-byte SID stub
-        let size = ace.len() as u16;
+        let size = u16::try_from(ace.len()).expect("test value fits u16");
         assert_eq!(size, 12);
         ace[2..4].copy_from_slice(&size.to_le_bytes());
         let acl_bytes = make_acl(2, 1, &[ace]);

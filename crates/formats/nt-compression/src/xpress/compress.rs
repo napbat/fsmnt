@@ -7,6 +7,7 @@ use crate::lz77::{MatchFinder, Token};
 use crate::{Error, Result};
 
 /// Worst-case compressed size for XPRESS Plain.
+#[must_use]
 pub fn compress_bound(input_len: usize) -> usize {
     // 4-byte flag per 32 items + each item is at worst a literal (1 byte)
     // + some match overhead
@@ -16,6 +17,10 @@ pub fn compress_bound(input_len: usize) -> usize {
 /// Compress `input` using XPRESS Plain LZ77.
 ///
 /// Returns the number of bytes written to `output`.
+///
+/// # Errors
+///
+/// Returns an error when `output` is too small for the encoded stream.
 pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     if input.is_empty() {
         return Ok(0);
@@ -115,19 +120,25 @@ fn encode_match(
     let base_length = length - 3;
 
     let (field_val, remainder) = if base_length < 7 {
-        (base_length as u16, None)
+        (
+            u16::try_from(base_length).expect("the inline XPRESS length field is three bits"),
+            None,
+        )
     } else {
         (7, Some(base_length - 7))
     };
 
-    let word = (((offset - 1) as u16) << 3) | (field_val & 0x7);
+    let word = (u16::try_from(offset - 1).expect("XPRESS match offsets are limited to 8192 bytes")
+        << 3)
+        | (field_val & 0x7);
     let wb = word.to_le_bytes();
     pos = emit(output, pos, wb[0])?;
     pos = emit(output, pos, wb[1])?;
 
     if let Some(rem) = remainder {
         // Nibble extension.
-        let nibble_val = rem.min(15) as u8;
+        let nibble_val =
+            u8::try_from(rem.min(15)).expect("the XPRESS nibble extension is four bits");
         if let Some(np) = nibble_pos.take() {
             // Use high nibble of existing byte.
             output[np] |= nibble_val << 4;
@@ -140,12 +151,15 @@ fn encode_match(
         if rem >= 15 {
             // Byte extension.
             let byte_rem = rem - 15;
-            let byte_val = byte_rem.min(255) as u8;
+            let byte_val =
+                u8::try_from(byte_rem.min(255)).expect("the XPRESS byte extension is eight bits");
             pos = emit(output, pos, byte_val)?;
 
             if byte_rem >= 255 {
                 // u16 extension stores match_length - MIN_MATCH_LEN (3).
-                let u16_bytes = ((length - 3) as u16).to_le_bytes();
+                let u16_bytes = u16::try_from(length - 3)
+                    .expect("XPRESS match lengths are capped at 65538 bytes")
+                    .to_le_bytes();
                 pos = emit(output, pos, u16_bytes[0])?;
                 pos = emit(output, pos, u16_bytes[1])?;
             }
@@ -203,7 +217,7 @@ mod tests {
         let mut input = vec![0u8; 300];
         // Write a pattern then repeat it.
         for (i, byte) in input[..50].iter_mut().enumerate() {
-            *byte = (i * 7) as u8;
+            *byte = (i * 7).to_le_bytes()[0];
         }
         let patch: Vec<u8> = input[..50].to_vec();
         input[50..100].copy_from_slice(&patch);
@@ -224,7 +238,7 @@ mod tests {
         // 8192 unique bytes, then a match at max offset.
         let mut input = vec![0u8; 8200];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i & 0xFF) as u8;
+            *byte = u8::try_from(i & 0xFF).expect("the mask limits the value to one byte");
         }
         // Make positions 8192..8195 match positions 0..3.
         input[8192] = input[0];
@@ -262,7 +276,7 @@ mod tests {
         // extension needed). 33+ such matches will span groups.
         let mut input = vec![0u8; 500];
         for (i, byte) in input[..10].iter_mut().enumerate() {
-            *byte = (i as u8 + 1) * 11;
+            *byte = (u8::try_from(i).expect("the test range is shorter than 256 bytes") + 1) * 11;
         }
         for chunk in 1..50 {
             let start = chunk * 10;
@@ -286,7 +300,7 @@ mod tests {
     fn compress_roundtrip_64kb() {
         let mut input = vec![0u8; 65536];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i % 251) as u8; // prime modulus for variety
+            *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
         }
         // Add some repetition.
         let patch: Vec<u8> = input[1000..2000].to_vec();

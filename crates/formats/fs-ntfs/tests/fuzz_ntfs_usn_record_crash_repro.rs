@@ -1,8 +1,8 @@
-use std::fs;
-use std::path::Path;
+//! Regression tests for malformed USN-record fuzz artifacts.
 
 use fs_ntfs::UsnRecord;
 use fs_ntfs::types::NtfsPosition;
+use fsmnt_testkit::read_required_fixture;
 
 /// Regression harnesses for libFuzzer crashes found in `fuzz_ntfs_usn_record`.
 ///
@@ -13,16 +13,11 @@ fn run_fuzz_ntfs_usn_record_artifact(file_name: &str) {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
 
-    let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crashes/libfuzzer/fuzz_ntfs_usn_record")
-        .join(file_name);
-
-    if !artifact_path.exists() {
-        panic!("Artifact not found at {}.", artifact_path.display());
-    }
-
-    let data =
-        fs::read(&artifact_path).expect("failed to read fuzz artifact for fuzz_ntfs_usn_record");
+    let data = read_required_fixture(
+        env!("CARGO_MANIFEST_DIR"),
+        format!("../../crashes/libfuzzer/fuzz_ntfs_usn_record/{file_name}"),
+        "Regenerate the fuzz_ntfs_usn_record corpus with cargo-fuzz.",
+    );
 
     let pos = NtfsPosition::none();
 

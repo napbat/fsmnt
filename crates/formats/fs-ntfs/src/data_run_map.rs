@@ -147,7 +147,7 @@ impl DataRunMap {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<NtfsPosition> {
-        let total = buf.len() as u64;
+        let total = u64::try_from(buf.len()).expect("a slice length fits u64");
         if total == 0 {
             return Ok(NtfsPosition::none());
         }
@@ -170,8 +170,11 @@ impl DataRunMap {
                 .resolve_position(current_offset)
                 .ok_or(NtfsError::from(IoError::unexpected_eof()))?;
 
-            let to_read = (total - bytes_filled).min(remaining) as usize;
-            let dst = &mut buf[bytes_filled as usize..bytes_filled as usize + to_read];
+            let to_read = usize::try_from((total - bytes_filled).min(remaining))
+                .expect("the read length is bounded by the destination slice");
+            let destination_start = usize::try_from(bytes_filled)
+                .expect("the filled length is bounded by the destination slice");
+            let dst = &mut buf[destination_start..destination_start + to_read];
 
             if let Some(disk_pos) = pos.value() {
                 fs.seek(SeekFrom::Start(disk_pos.get()))?;
@@ -180,7 +183,7 @@ impl DataRunMap {
                 dst.fill(0);
             }
 
-            bytes_filled += to_read as u64;
+            bytes_filled += u64::try_from(to_read).expect("a slice length fits u64");
         }
 
         Ok(first_position)
@@ -232,7 +235,7 @@ mod tests {
     use core::num::NonZeroU64;
     use std::io::Cursor;
 
-    /// Helper: build a DataRunMap from raw (position, size) pairs.
+    /// Helper: build a `DataRunMap` from raw (position, size) pairs.
     fn map_from_raw(runs: &[(Option<u64>, u64)]) -> DataRunMap {
         let mut segments = Vec::new();
         let mut virtual_offset = 0u64;
@@ -386,11 +389,11 @@ mod tests {
         assert_eq!(map.next_non_sparse_offset(511), Some(511));
     }
 
-    /// In-memory disk where byte `i` equals `i as u8`, used to verify reads.
+    /// In-memory disk where byte `i` equals the low byte of `i`, used to verify reads.
     fn indexed_disk(len: usize) -> Cursor<Vec<u8>> {
         let mut data = vec![0u8; len];
         for (i, b) in data.iter_mut().enumerate() {
-            *b = i as u8;
+            *b = i.to_le_bytes()[0];
         }
         Cursor::new(data)
     }
@@ -417,7 +420,12 @@ mod tests {
         // Bytes come from disk positions 1008..1012.
         assert_eq!(
             buf,
-            [1008u32 as u8, 1009u32 as u8, 1010u32 as u8, 1011u32 as u8]
+            [
+                1008_u32.to_le_bytes()[0],
+                1009_u32.to_le_bytes()[0],
+                1010_u32.to_le_bytes()[0],
+                1011_u32.to_le_bytes()[0]
+            ]
         );
     }
 
@@ -435,14 +443,14 @@ mod tests {
         assert_eq!(
             buf,
             [
-                1012u32 as u8,
-                1013u32 as u8,
-                1014u32 as u8,
-                1015u32 as u8,
-                2000u32 as u8,
-                2001u32 as u8,
-                2002u32 as u8,
-                2003u32 as u8,
+                1012_u32.to_le_bytes()[0],
+                1013_u32.to_le_bytes()[0],
+                1014_u32.to_le_bytes()[0],
+                1015_u32.to_le_bytes()[0],
+                2000_u32.to_le_bytes()[0],
+                2001_u32.to_le_bytes()[0],
+                2002_u32.to_le_bytes()[0],
+                2003_u32.to_le_bytes()[0],
             ]
         );
     }
@@ -460,7 +468,12 @@ mod tests {
         // Next 4 bytes come from disk 2000..2004.
         assert_eq!(
             buf[8..],
-            [2000u32 as u8, 2001u32 as u8, 2002u32 as u8, 2003u32 as u8]
+            [
+                2000_u32.to_le_bytes()[0],
+                2001_u32.to_le_bytes()[0],
+                2002_u32.to_le_bytes()[0],
+                2003_u32.to_le_bytes()[0]
+            ]
         );
     }
 
@@ -538,8 +551,8 @@ mod tests {
         buf[0x28..0x30].copy_from_slice(&0x0010_0000u64.to_le_bytes());
         buf[0x30..0x38].copy_from_slice(&1u64.to_le_bytes());
         buf[0x38..0x40].copy_from_slice(&2u64.to_le_bytes());
-        buf[0x40] = (-10i8) as u8;
-        buf[0x44] = (-12i8) as u8;
+        buf[0x40] = (-10i8).cast_unsigned();
+        buf[0x44] = (-12i8).cast_unsigned();
         buf[510] = 0x55;
         buf[511] = 0xAA;
         buf

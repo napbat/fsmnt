@@ -2,7 +2,7 @@
 //!
 //! On-disk layout (`struct fscrypt_symlink_data`):
 //!     u16 le len;          // size of `encrypted_path`
-//!     u8  encrypted_path[len];
+//!     u8  `encrypted_path`[len];
 //!
 //! After reading the raw symlink target bytes via the standard short /
 //! inline-overflow / long-mapped dispatch, parse the 2-byte length,
@@ -115,7 +115,9 @@ mod tests {
 
     fn raw_symlink_payload(ct: &[u8]) -> alloc::vec::Vec<u8> {
         let mut raw = alloc::vec::Vec::with_capacity(2 + ct.len());
-        raw.extend_from_slice(&(ct.len() as u16).to_le_bytes());
+        raw.extend_from_slice(
+            &(u16::try_from(ct.len()).expect("the test fixture value fits in u16")).to_le_bytes(),
+        );
         raw.extend_from_slice(ct);
         raw
     }
@@ -140,7 +142,9 @@ mod tests {
     fn decode_symlink_strips_nul_pad_and_honors_length_prefix() {
         let ct = hex(REFERENCE_TARGET_CT_HEX);
         let mut raw = alloc::vec::Vec::with_capacity(2 + ct.len());
-        raw.extend_from_slice(&(ct.len() as u16).to_le_bytes());
+        raw.extend_from_slice(
+            &(u16::try_from(ct.len()).expect("the test fixture value fits in u16")).to_le_bytes(),
+        );
         raw.extend_from_slice(&ct);
 
         let cipher = make_aes_cts_cipher([0u8; 32]);

@@ -12,10 +12,18 @@ pub trait FsReadSeek<R: Read + Seek> {
 
     /// Reads bytes from this value into `buf`, using `r` as the
     /// device reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an implementation-defined error when data cannot be read.
     fn read(&mut self, r: &mut R, buf: &mut [u8]) -> Result<usize, Self::Error>;
 
     /// Seeks to `pos` within this value's stream, using `r` as the
     /// device reader.
+    ///
+    /// # Errors
+    ///
+    /// Returns an implementation-defined error when the target is invalid.
     fn seek(&mut self, r: &mut R, pos: SeekFrom) -> Result<u64, Self::Error>;
 
     /// Logical position within this value reader's stream.
@@ -32,6 +40,10 @@ pub trait FsReadSeek<R: Read + Seek> {
 
     /// Reads exactly `buf.len()` bytes, returning `UnexpectedEof`
     /// on short read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first read error, including `UnexpectedEof` on a short read.
     fn read_exact(&mut self, r: &mut R, mut buf: &mut [u8]) -> Result<(), Self::Error> {
         while !buf.is_empty() {
             match self.read(r, buf) {
@@ -56,6 +68,16 @@ mod tests {
     use super::*;
     use crate::error::{ErrorKind, FsError, IoError};
     use std::vec;
+
+    fn offset_position(base: u64, offset: i64) -> u64 {
+        if offset.is_negative() {
+            base.checked_sub(offset.unsigned_abs())
+                .expect("test seek stays at or after zero")
+        } else {
+            base.checked_add(offset.unsigned_abs())
+                .expect("test seek position fits u64")
+        }
+    }
 
     #[derive(Debug)]
     enum TestError {
@@ -90,10 +112,11 @@ mod tests {
         type Error = TestError;
 
         fn read(&mut self, _r: &mut R, buf: &mut [u8]) -> Result<usize, TestError> {
-            let remaining = &self.data[self.pos as usize..];
+            let position = usize::try_from(self.pos).expect("test position fits usize");
+            let remaining = &self.data[position..];
             let n = buf.len().min(remaining.len());
             buf[..n].copy_from_slice(&remaining[..n]);
-            self.pos += n as u64;
+            self.pos += u64::try_from(n).expect("read length fits u64");
             Ok(n)
         }
 
@@ -101,10 +124,11 @@ mod tests {
             match pos {
                 SeekFrom::Start(n) => self.pos = n,
                 SeekFrom::Current(n) => {
-                    self.pos = (self.pos as i64 + n) as u64;
+                    self.pos = offset_position(self.pos, n);
                 }
                 SeekFrom::End(n) => {
-                    self.pos = (self.data.len() as i64 + n) as u64;
+                    let end = u64::try_from(self.data.len()).expect("slice length fits u64");
+                    self.pos = offset_position(end, n);
                 }
             }
             Ok(self.pos)
@@ -115,7 +139,7 @@ mod tests {
         }
 
         fn len(&self) -> u64 {
-            self.data.len() as u64
+            u64::try_from(self.data.len()).expect("slice length fits u64")
         }
     }
 
@@ -159,10 +183,11 @@ mod tests {
                 self.interrupted = true;
                 return Err(IoError::new(ErrorKind::Interrupted).into());
             }
-            let remaining = &self.data[self.pos as usize..];
+            let position = usize::try_from(self.pos).expect("test position fits usize");
+            let remaining = &self.data[position..];
             let n = buf.len().min(remaining.len());
             buf[..n].copy_from_slice(&remaining[..n]);
-            self.pos += n as u64;
+            self.pos += u64::try_from(n).expect("read length fits u64");
             Ok(n)
         }
 
@@ -170,10 +195,11 @@ mod tests {
             match pos {
                 SeekFrom::Start(n) => self.pos = n,
                 SeekFrom::Current(n) => {
-                    self.pos = (self.pos as i64 + n) as u64;
+                    self.pos = offset_position(self.pos, n);
                 }
                 SeekFrom::End(n) => {
-                    self.pos = (self.data.len() as i64 + n) as u64;
+                    let end = u64::try_from(self.data.len()).expect("slice length fits u64");
+                    self.pos = offset_position(end, n);
                 }
             }
             Ok(self.pos)
@@ -184,7 +210,7 @@ mod tests {
         }
 
         fn len(&self) -> u64 {
-            self.data.len() as u64
+            u64::try_from(self.data.len()).expect("slice length fits u64")
         }
     }
 

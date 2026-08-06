@@ -14,9 +14,15 @@
 
 #![cfg(feature = "fscrypt")]
 
+use alloc::boxed::Box;
+
+use aes::Aes256;
+#[cfg(test)]
+use aes::cipher::BlockEncrypt;
+use aes::cipher::KeyInit;
+#[cfg(test)]
 use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
-use aes::{Aes128, Aes256};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use sm4::Sm4;
 use xts_mode::Xts128;
@@ -29,54 +35,9 @@ use crate::fscrypt::types::{
     FSCRYPT_MODE_SM4_XTS, FscryptPolicy, IvDerivation, mode_keysize,
 };
 
-/// AES-128-CBC-ESSIV cipher state for fscrypt content blocks.
-///
-/// Per kernel `crypto/essiv.c::essiv_skcipher_setkey`, the inner ECB
-/// "salt cipher" is keyed with the **full** 32-byte SHA-256 digest of
-/// the content key — i.e. AES-256-ECB, not AES-128-ECB. The standard
-/// IV that fscrypt passes through (`union fscrypt_iv` low 16 bytes,
-/// per `fscrypt_generate_iv`) is encrypted under that salt cipher to
-/// derive the per-block CBC IV; the data unit then CBC-decrypts under
-/// the AES-128 content key.
-struct Aes128CbcEssivCipher {
-    cbc: Aes128,
-    /// Keyed with `SHA-256(content_key)` (32 bytes → AES-256-ECB).
-    essiv_inner: Aes256,
-}
+mod essiv;
 
-impl Aes128CbcEssivCipher {
-    fn new(content_key: &[u8; 16]) -> Self {
-        let salt = Sha256::digest(content_key);
-        let essiv_inner =
-            Aes256::new_from_slice(&salt).expect("32-byte SHA-256 digest is a valid AES-256 key");
-        let cbc = Aes128::new_from_slice(content_key)
-            .expect("16-byte content key is a valid AES-128 key");
-        Self { cbc, essiv_inner }
-    }
-
-    /// Decrypt one fscrypt data unit in place. `unit.len()` must be a
-    /// non-zero multiple of 16; `plain_iv` is the kernel's `union
-    /// fscrypt_iv` view (low 16 bytes of [`IvDerivation::full_iv`]).
-    fn decrypt_unit(&self, unit: &mut [u8], plain_iv: [u8; 16]) {
-        // ESSIV: essiv_iv = AES-ECB(SHA-256(key))(plain_iv).
-        let mut essiv_iv = plain_iv;
-        self.essiv_inner
-            .encrypt_block(GenericArray::from_mut_slice(&mut essiv_iv));
-        // Standard CBC decrypt: each ciphertext block ECB-decrypts then
-        // XORs with the previous ciphertext (or essiv_iv for the first).
-        let mut prev = essiv_iv;
-        for chunk in unit.chunks_exact_mut(16) {
-            let saved: [u8; 16] = chunk
-                .try_into()
-                .expect("chunks_exact(16) yields 16-byte slices");
-            self.cbc.decrypt_block(GenericArray::from_mut_slice(chunk));
-            for i in 0..16 {
-                chunk[i] ^= prev[i];
-            }
-            prev = saved;
-        }
-    }
-}
+use essiv::Aes128CbcEssivCipher;
 
 /// Content cipher for one fscrypt-encrypted file, dispatching by mode.
 pub struct ContentCipher {
@@ -313,7 +274,7 @@ impl ContentCipher {
 ///   - Default v1/v2 policies: per-file key via the v1 or v2 KDF (nonce
 ///     input), IV = logical block index.
 ///   - v2 + `IV_INO_LBLK_64` / `IV_INO_LBLK_32`: per-mode-per-FS key via
-///     the v2 KDF (mode_num + FS UUID), IV derived from inode + lblk.
+///     the v2 KDF (`mode_num` + FS UUID), IV derived from inode + lblk.
 pub(crate) fn build_cipher_for_inode<R: crate::io::Read + crate::io::Seek>(
     ext: &crate::ext::Ext,
     fs: &mut R,
@@ -331,7 +292,8 @@ pub(crate) fn build_cipher_for_inode<R: crate::io::Read + crate::io::Seek>(
     policy::validate_supported(
         &p,
         inode_number,
-        ext.block_size.trailing_zeros() as u8,
+        u8::try_from(ext.block_size.trailing_zeros())
+            .expect("a u32 trailing-zero count never exceeds 32"),
         ext.compat
             .contains(crate::feature_flags::CompatFeatures::STABLE_INODES),
     )?;
@@ -415,7 +377,7 @@ pub(crate) fn build_cipher_for_inode<R: crate::io::Read + crate::io::Seek>(
             match p.kind {
                 FscryptPolicyKind::V1 => {
                     let desc = p.key_descriptor.expect("v1 policy carries descriptor");
-                    let mk = ext.fscrypt_keys.get_v1(&desc).ok_or_else(|| {
+                    let mk = ext.fscrypt_keys.get_v1(desc).ok_or_else(|| {
                         ExtError::MissingFscryptKey {
                             inode: inode_number,
                             policy_kind: alloc::format!("{:?}", p.kind),
@@ -505,7 +467,7 @@ mod tests {
         );
     }
 
-    /// DIRECT_KEY plumbing: a non-zero per-file nonce in
+    /// `DIRECT_KEY` plumbing: a non-zero per-file nonce in
     /// `IvDerivation::DirectKey` must reach the Adiantum tweak (bytes
     /// 8..24 of the 32-byte IV). Decrypting the same zero block under
     /// the same key with `DirectKey { nonce }` vs. `PerFileBlockIndex`
@@ -524,7 +486,7 @@ mod tests {
             key_identifier: Some(FscryptKeyIdentifier([0u8; 16])),
             nonce: [0u8; 16],
         };
-        let nonce: [u8; 16] = core::array::from_fn(|i| (i as u8) ^ 0x33);
+        let nonce: [u8; 16] = core::array::from_fn(|i| ((i).to_le_bytes()[0]) ^ 0x33);
 
         let cipher_direct =
             ContentCipher::with_iv(&policy, &key, IvDerivation::DirectKey { nonce }, 4096)
@@ -543,7 +505,7 @@ mod tests {
         );
     }
 
-    /// DIRECT_KEY with the all-zero nonce must agree byte-for-byte with
+    /// `DIRECT_KEY` with the all-zero nonce must agree byte-for-byte with
     /// the default `PerFileBlockIndex` IV: kernel `fscrypt_generate_iv`
     /// only writes the nonce into bytes 8..24, so a zero nonce leaves
     /// the IV identical to the default-policy IV.
@@ -583,9 +545,9 @@ mod tests {
     }
 
     /// AES-128-CBC-ESSIV round-trip: encrypt a known plaintext under
-    /// the kernel's exact ESSIV construction (essiv_iv =
+    /// the kernel's exact ESSIV construction (`essiv_iv` =
     /// AES-256-ECB(SHA-256(content_key))(plain_iv); CBC-encrypt the
-    /// data unit with content_key + essiv_iv), then decrypt via
+    /// data unit with `content_key` + `essiv_iv`), then decrypt via
     /// `ContentCipher` and assert byte-for-byte equality. A
     /// single-IV-skip-ESSIV bug or AES-128-ECB-vs-AES-256-ECB salt
     /// confusion would break this test.
@@ -597,7 +559,7 @@ mod tests {
         let content_key = {
             let mut k = [0u8; 16];
             for (i, b) in k.iter_mut().enumerate() {
-                *b = (i as u8) ^ 0x77;
+                *b = ((i).to_le_bytes()[0]) ^ 0x77;
             }
             k
         };
@@ -619,7 +581,7 @@ mod tests {
         let block_index: u128 = 5;
         let mut block = [0u8; 4096];
         for (i, b) in block.iter_mut().enumerate() {
-            *b = (i as u8).wrapping_mul(11);
+            *b = ((i).to_le_bytes()[0]).wrapping_mul(11);
         }
         let original = block;
 
@@ -629,7 +591,10 @@ mod tests {
         //   essiv_iv     = AES-256-ECB(SHA-256(content_key))(plain_iv)
         //   block_ct     = AES-128-CBC(content_key, essiv_iv)(block_pt)
         let mut plain_iv = [0u8; 16];
-        plain_iv[..8].copy_from_slice(&(block_index as u64).to_le_bytes());
+        plain_iv[..8].copy_from_slice(
+            &(u64::try_from(block_index).expect("the test fixture value fits in u64"))
+                .to_le_bytes(),
+        );
         let salt = Sha256::digest(content_key);
         let essiv_inner = Aes256::new_from_slice(&salt).unwrap();
         let mut essiv_iv = plain_iv;
@@ -677,7 +642,7 @@ mod tests {
     }
 
     /// SM4-XTS round-trip: encrypt a known plaintext under the kernel's
-    /// XTS construction (two SM4-128 keys, lblk_le8 || zero[8] tweak),
+    /// XTS construction (two SM4-128 keys, `lblk_le8` || zero[8] tweak),
     /// then decrypt with `ContentCipher` and verify byte-for-byte.
     /// Pins the dispatch wiring + agreement with `xts-mode::Xts128<Sm4>`.
     #[test]
@@ -688,7 +653,7 @@ mod tests {
         let key = {
             let mut k = [0u8; 32];
             for (i, b) in k.iter_mut().enumerate() {
-                *b = (i as u8).wrapping_add(0x37);
+                *b = ((i).to_le_bytes()[0]).wrapping_add(0x37);
             }
             k
         };
@@ -726,7 +691,7 @@ mod tests {
         // then decrypt with our wrapper and compare against the original.
         let mut key = [0u8; 64];
         for (i, b) in key.iter_mut().enumerate() {
-            *b = i as u8;
+            *b = (i).to_le_bytes()[0];
         }
         let policy = FscryptPolicy {
             kind: FscryptPolicyKind::V2,
@@ -755,7 +720,7 @@ mod tests {
         assert_eq!(block, original);
     }
 
-    /// IV_INO_LBLK_64 round-trip: encrypt a known plaintext with AES-XTS
+    /// `IV_INO_LBLK_64` round-trip: encrypt a known plaintext with AES-XTS
     /// using the kernel-aligned tweak `lblk32 | (ino << 32)`, then decrypt
     /// with `ContentCipher::with_iv(InoLblk64 { inode_number })` and verify
     /// the plaintext comes back. This pins the dispatch wiring end-to-end.
@@ -764,13 +729,15 @@ mod tests {
         let key = {
             let mut k = [0u8; 64];
             for (i, b) in k.iter_mut().enumerate() {
-                *b = (i as u8).wrapping_add(1);
+                *b = ((i).to_le_bytes()[0]).wrapping_add(1);
             }
             k
         };
         let inode_number = 12u32;
         let lblk = 3u128;
-        let expected_iv_value = (lblk as u64 & 0xFFFF_FFFF) | (u64::from(inode_number) << 32);
+        let expected_iv_value = (u64::try_from(lblk).expect("the test fixture value fits in u64")
+            & 0xFFFF_FFFF)
+            | (u64::from(inode_number) << 32);
 
         let policy = FscryptPolicy {
             kind: FscryptPolicyKind::V2,
@@ -809,20 +776,23 @@ mod tests {
         assert_eq!(block, original);
     }
 
-    /// IV_INO_LBLK_32 round-trip: same as above with the
+    /// `IV_INO_LBLK_32` round-trip: same as above with the
     /// `(lblk + hashed_ino) as u32` IV.
     #[test]
     fn iv_ino_lblk_32_round_trip_against_kernel_iv() {
         let key = {
             let mut k = [0u8; 64];
             for (i, b) in k.iter_mut().enumerate() {
-                *b = (i as u8).wrapping_sub(7);
+                *b = ((i).to_le_bytes()[0]).wrapping_sub(7);
             }
             k
         };
         let hashed_ino = 0xDEAD_BEEFu32;
         let lblk = 5u128;
-        let expected_iv_value = u64::from((lblk as u32).wrapping_add(hashed_ino));
+        let expected_iv_value = u64::from(
+            (u32::try_from(lblk).expect("the test fixture value fits in u32"))
+                .wrapping_add(hashed_ino),
+        );
 
         let policy = FscryptPolicy {
             kind: FscryptPolicyKind::V2,
@@ -893,7 +863,7 @@ mod tests {
 
     /// Sub-block AES-XTS round-trip with `data_unit_size = 512` on a
     /// 4 KiB fs-block: encrypt eight 512-byte sectors with the kernel's
-    /// per-sector tweak (absolute unit index = block_index * 8 + i),
+    /// per-sector tweak (absolute unit index = `block_index` * 8 + i),
     /// then decrypt with `ContentCipher` and assert the plaintext comes
     /// back. A single-IV-per-block implementation would only round-trip
     /// the first unit, so the per-byte equality check catches that
@@ -903,7 +873,7 @@ mod tests {
         let key = {
             let mut k = [0u8; 64];
             for (i, b) in k.iter_mut().enumerate() {
-                *b = (i as u8).wrapping_mul(3);
+                *b = ((i).to_le_bytes()[0]).wrapping_mul(3);
             }
             k
         };
@@ -925,7 +895,7 @@ mod tests {
 
         let mut block = [0u8; 4096];
         for (i, b) in block.iter_mut().enumerate() {
-            *b = (i as u8) ^ 0xA5;
+            *b = ((i).to_le_bytes()[0]) ^ 0xA5;
         }
         let original = block;
 
@@ -934,7 +904,10 @@ mod tests {
         let cipher_2 = Aes256::new_from_slice(&key[32..]).unwrap();
         let xts_enc = Xts128::<Aes256>::new(cipher_1, cipher_2);
         for i in 0..units_per_block {
-            let abs_unit = (block_index as u64) * (units_per_block as u64) + i as u64;
+            let abs_unit = (u64::try_from(block_index)
+                .expect("the test fixture value fits in u64"))
+                * (units_per_block as u64)
+                + i as u64;
             let mut tweak = [0u8; 16];
             tweak[..8].copy_from_slice(&abs_unit.to_le_bytes());
             let start = i * data_unit_size;

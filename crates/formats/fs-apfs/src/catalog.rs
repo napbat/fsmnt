@@ -453,19 +453,39 @@ mod tests {
     fn omap_tree(entries: &[(u64, u64, u64)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0007u16.to_le_bytes()); // ROOT|LEAF|FIXED
-        b[0x24..0x28].copy_from_slice(&(entries.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((entries.len() * 4) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(entries.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(entries.len() * 4)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + entries.len() * 4;
         let value_end = BLK - BTREE_INFO_SIZE;
         for (i, &(oid, xid, paddr)) in entries.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 4;
-            b[toc..toc + 2].copy_from_slice(&((i * 16) as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(((i + 1) * 16) as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(i * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from((i + 1) * 16)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             let ks = key_area + i * 16;
             b[ks..ks + 8].copy_from_slice(&oid.to_le_bytes());
             b[ks + 8..ks + 16].copy_from_slice(&xid.to_le_bytes());
             let vs = value_end - (i + 1) * 16;
-            b[vs + 4..vs + 8].copy_from_slice(&(BLK as u32).to_le_bytes());
+            b[vs + 4..vs + 8].copy_from_slice(
+                &u32::try_from(BLK)
+                    .expect("the test fixture value fits in u32")
+                    .to_le_bytes(),
+            );
             b[vs + 8..vs + 16].copy_from_slice(&paddr.to_le_bytes());
         }
         let info = BLK - BTREE_INFO_SIZE;
@@ -490,9 +510,17 @@ mod tests {
     fn catalog_node(records: &[(Vec<u8>, Vec<u8>)], flags: u16) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&flags.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         let toc_len = records.len() * 8; // kvloc entries
-        b[0x2A..0x2C].copy_from_slice(&(toc_len as u16).to_le_bytes());
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(toc_len)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
 
         let key_area = BTN_DATA_OFFSET + toc_len;
         // A root node reserves a btree_info trailer; the value area ends
@@ -506,11 +534,27 @@ mod tests {
         let mut val_cursor = 0usize;
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(key_cursor as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(key_cursor)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             val_cursor += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(val_cursor as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(val_cursor)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
 
             let ks = key_area + key_cursor;
             b[ks..ks + key.len()].copy_from_slice(key);
@@ -541,7 +585,12 @@ mod tests {
         image.extend(leaf); // block 2
 
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(200), omap, BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(200),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         let object2 = catalog.records_for(&mut reader, 2).unwrap();
@@ -592,7 +641,12 @@ mod tests {
         image.extend(leaf2); // block 4
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(300), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(300),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             Cursor::new(image),
         )
     }
@@ -662,7 +716,12 @@ mod tests {
         image.extend(omap_tree(&[(200, 1, 2)]));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(200), omap, BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(200),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         let present = Inode::lookup(&catalog, &mut reader, 2).unwrap();
@@ -721,7 +780,12 @@ mod tests {
         image.extend(leaf2); // block 4
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(300), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(300),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             Cursor::new(image),
         )
     }
@@ -752,7 +816,12 @@ mod tests {
         image.extend(index);
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(300), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(300),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             Cursor::new(image),
         )
     }
@@ -781,7 +850,12 @@ mod tests {
         image.extend(index);
         let omap = Omap::parse(&image[..BLK]).unwrap();
         (
-            Catalog::new(Oid(300), omap, BLK as u32, Xid(1)),
+            Catalog::new(
+                Oid(300),
+                omap,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+                Xid(1),
+            ),
             Cursor::new(image),
         )
     }

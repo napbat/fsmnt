@@ -5,7 +5,7 @@
 //! indirect-calls through it on all subsequent invocations (zero
 //! per-call branching).
 //!
-//! Tiers (x86_64):
+//! Tiers (`x86_64)`:
 //! - **SSE2** (baseline): 16-byte chunks for distance >= 16
 //! - **AVX2**: 32-byte chunks for distance >= 32, SSE2 tail
 //! - **AVX-512**: 64-byte chunks for distance >= 64, AVX2/SSE2 tail
@@ -29,7 +29,7 @@ type CopyMatchFn = unsafe fn(&mut [u8], usize, usize, usize);
 /// [`pick_copy_match`]. `Relaxed` ordering is sufficient because
 /// function pointers live in the text segment and are valid the
 /// moment they become visible.
-static COPY_MATCH_PTR: AtomicPtr<()> = AtomicPtr::new(resolver as *const () as *mut ());
+static COPY_MATCH_PTR: AtomicPtr<()> = AtomicPtr::new((resolver as *const ()).cast_mut());
 
 /// SIMD-accelerated match copy. Dispatches through a cached fn
 /// pointer that is resolved on first invocation via CPUID probing.
@@ -39,7 +39,7 @@ static COPY_MATCH_PTR: AtomicPtr<()> = AtomicPtr::new(resolver as *const () as *
 /// - `distance > 0`
 /// - `out_pos >= distance` (source in bounds)
 /// - `out_pos + length <= output.len()` (dest in bounds)
-#[inline(always)]
+#[inline]
 pub(crate) unsafe fn copy_match_fast(
     output: &mut [u8],
     out_pos: usize,
@@ -92,23 +92,24 @@ fn detect_simd_level() -> SimdLevel {
 unsafe fn resolver(output: &mut [u8], out_pos: usize, distance: usize, length: usize) {
     let level = detect_simd_level();
     let f = pick_copy_match(level);
-    COPY_MATCH_PTR.store(f as *const () as *mut (), Ordering::Relaxed);
+    COPY_MATCH_PTR.store((f as *const ()).cast_mut(), Ordering::Relaxed);
     // SAFETY: caller guarantees preconditions; `f` was chosen for a
     // confirmed feature set.
     unsafe { f(output, out_pos, distance, length) };
 }
 
 /// Select the best copy-match implementation for the given SIMD level.
-fn pick_copy_match(_level: SimdLevel) -> CopyMatchFn {
+fn pick_copy_match(level: SimdLevel) -> CopyMatchFn {
     #[cfg(target_arch = "x86_64")]
     {
-        match _level {
+        match level {
             SimdLevel::Avx512 => return copy_match_avx512,
             SimdLevel::Avx2 => return copy_match_avx2,
             SimdLevel::Sse2 => return copy_match_sse2,
             _ => {} // Scalar or future variants
         }
     }
+    let _ = level;
     copy_match_scalar
 }
 
@@ -126,12 +127,16 @@ unsafe fn copy_match_scalar(output: &mut [u8], out_pos: usize, distance: usize, 
 
 /// SSE2 implementation (128-bit / 16-byte loads/stores).
 ///
-/// Baseline on x86_64 — no `#[target_feature]` needed.
+/// Baseline on `x86_64` — no `#[target_feature]` needed.
 ///
 /// # Safety
 /// Same preconditions as `copy_match_fast`.
 #[cfg(target_arch = "x86_64")]
-#[inline(always)]
+#[inline]
+#[allow(
+    clippy::cast_ptr_alignment,
+    reason = "_mm_loadu_si128 and _mm_storeu_si128 explicitly support byte-aligned addresses; their API still requires __m128i pointers"
+)]
 unsafe fn copy_match_sse2(output: &mut [u8], out_pos: usize, distance: usize, length: usize) {
     use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_storeu_si128};
 
@@ -198,6 +203,10 @@ unsafe fn copy_match_sse2(output: &mut [u8], out_pos: usize, distance: usize, le
 /// in the resolver).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(
+    clippy::cast_ptr_alignment,
+    reason = "the loadu/storeu AVX2 and SSE intrinsics explicitly support byte-aligned addresses but require vector-typed pointers"
+)]
 unsafe fn copy_match_avx2(output: &mut [u8], out_pos: usize, distance: usize, length: usize) {
     use core::arch::x86_64::{
         __m128i, __m256i, _mm_loadu_si128, _mm_storeu_si128, _mm256_loadu_si256,
@@ -280,6 +289,10 @@ unsafe fn copy_match_avx2(output: &mut [u8], out_pos: usize, distance: usize, le
 /// check in the resolver).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
+#[allow(
+    clippy::cast_ptr_alignment,
+    reason = "the loadu/storeu AVX-512, AVX2, and SSE intrinsics explicitly support byte-aligned addresses but require vector-typed pointers"
+)]
 unsafe fn copy_match_avx512(output: &mut [u8], out_pos: usize, distance: usize, length: usize) {
     use core::arch::x86_64::{
         __m128i, __m256i, __m512i, _mm_loadu_si128, _mm_storeu_si128, _mm256_loadu_si256,
@@ -392,7 +405,7 @@ mod tests {
         let mut actual = expected.clone();
         // Seed source region with a pattern.
         for i in 0..out_pos {
-            expected[i] = (i.wrapping_mul(7).wrapping_add(3)) as u8;
+            expected[i] = i.wrapping_mul(7).wrapping_add(3).to_le_bytes()[0];
             actual[i] = expected[i];
         }
         reference_copy(&mut expected, out_pos, distance, length);
@@ -405,14 +418,14 @@ mod tests {
         );
     }
 
-    /// Test a specific CopyMatchFn implementation against the reference.
+    /// Test a specific `CopyMatchFn` implementation against the reference.
     #[cfg(target_arch = "x86_64")]
     fn test_copy_with(f: CopyMatchFn, out_pos: usize, distance: usize, length: usize) {
         let size = out_pos + length + 64;
         let mut expected = alloc::vec![0u8; size];
         let mut actual = expected.clone();
         for i in 0..out_pos {
-            expected[i] = (i.wrapping_mul(7).wrapping_add(3)) as u8;
+            expected[i] = i.wrapping_mul(7).wrapping_add(3).to_le_bytes()[0];
             actual[i] = expected[i];
         }
         reference_copy(&mut expected, out_pos, distance, length);
@@ -453,7 +466,7 @@ mod tests {
     fn simd_non_overlapping() {
         let mut buf = [0u8; 512];
         for (i, byte) in buf[..64].iter_mut().enumerate() {
-            *byte = i as u8;
+            *byte = u8::try_from(i).expect("the test buffer is shorter than 256 bytes");
         }
         // SAFETY: distance=256, out_pos=256, 256>=256, 256+64<=512
         unsafe { copy_match_fast(&mut buf, 256, 256, 64) };
@@ -475,12 +488,16 @@ mod tests {
         // Exactly distance=16, length=48 -> tests SSE2 16-byte path
         let mut buf = [0u8; 128];
         for (i, byte) in buf[..16].iter_mut().enumerate() {
-            *byte = (i + 1) as u8;
+            *byte = u8::try_from(i + 1).expect("the test buffer is shorter than 256 bytes");
         }
         // SAFETY: distance=16, out_pos=16, 16>=16, 16+48<=128
         unsafe { copy_match_fast(&mut buf, 16, 16, 48) };
         for (i, &byte) in buf[..64].iter().enumerate() {
-            assert_eq!(byte, (i % 16 + 1) as u8, "mismatch at {i}");
+            assert_eq!(
+                byte,
+                u8::try_from(i % 16 + 1).expect("the expected pattern ranges from one through 16"),
+                "mismatch at {i}"
+            );
         }
     }
 
@@ -489,12 +506,16 @@ mod tests {
         // distance=32, length=160 -> tests AVX2 32-byte path
         let mut buf = [0u8; 256];
         for (i, byte) in buf[..32].iter_mut().enumerate() {
-            *byte = (i + 1) as u8;
+            *byte = u8::try_from(i + 1).expect("the test buffer is shorter than 256 bytes");
         }
         // SAFETY: distance=32, out_pos=32, 32>=32, 32+160<=256
         unsafe { copy_match_fast(&mut buf, 32, 32, 160) };
         for (i, &byte) in buf[..192].iter().enumerate() {
-            assert_eq!(byte, (i % 32 + 1) as u8, "mismatch at {i}");
+            assert_eq!(
+                byte,
+                u8::try_from(i % 32 + 1).expect("the expected pattern ranges from one through 32"),
+                "mismatch at {i}"
+            );
         }
     }
 
@@ -503,12 +524,16 @@ mod tests {
         // distance=64, length=320 -> tests AVX-512 64-byte path
         let mut buf = [0u8; 512];
         for (i, byte) in buf[..64].iter_mut().enumerate() {
-            *byte = (i + 1) as u8;
+            *byte = u8::try_from(i + 1).expect("the test buffer is shorter than 256 bytes");
         }
         // SAFETY: distance=64, out_pos=64, 64>=64, 64+320<=512
         unsafe { copy_match_fast(&mut buf, 64, 64, 320) };
         for (i, &byte) in buf[..384].iter().enumerate() {
-            assert_eq!(byte, (i % 64 + 1) as u8, "mismatch at {i}");
+            assert_eq!(
+                byte,
+                u8::try_from(i % 64 + 1).expect("the expected pattern ranges from one through 64"),
+                "mismatch at {i}"
+            );
         }
     }
 
@@ -517,7 +542,7 @@ mod tests {
         // Large copy with distance > length (no overlap).
         let mut buf = alloc::vec![0u8; 4096];
         for (i, byte) in buf[..1024].iter_mut().enumerate() {
-            *byte = (i.wrapping_mul(13).wrapping_add(7)) as u8;
+            *byte = i.wrapping_mul(13).wrapping_add(7).to_le_bytes()[0];
         }
         // SAFETY: distance=2048, out_pos=2048, 2048>=2048, 2048+1024<=4096
         unsafe { copy_match_fast(&mut buf, 2048, 2048, 1024) };

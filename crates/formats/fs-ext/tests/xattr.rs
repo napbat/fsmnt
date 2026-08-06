@@ -1,4 +1,6 @@
-mod common;
+//! Integration tests for ext extended-attribute parsing and validation.
+
+mod support;
 
 /// Look up a root-level entry by name and return its inode number.
 fn lookup_inode(ext: &fs_ext::Ext, fs: &mut std::io::Cursor<Vec<u8>>, name: &[u8]) -> u32 {
@@ -9,12 +11,12 @@ fn lookup_inode(ext: &fs_ext::Ext, fs: &mut std::io::Cursor<Vec<u8>>, name: &[u8
 
 #[test]
 fn ibody_xattrs_found() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"xattr_ibody");
     let inode = ext.inode(&mut fs, ino).unwrap();
     let xattrs = inode.xattrs(&mut fs).unwrap();
 
-    let names: Vec<&str> = xattrs.iter().map(|x| x.name()).collect();
+    let names: Vec<&str> = xattrs.iter().map(fs_ext::Xattr::name).collect();
     assert!(
         names.contains(&"user.greeting"),
         "expected user.greeting in {names:?}",
@@ -31,7 +33,7 @@ fn ibody_xattrs_found() {
 
 #[test]
 fn ibody_xattr_get_by_name() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"xattr_ibody");
     let inode = ext.inode(&mut fs, ino).unwrap();
 
@@ -47,7 +49,7 @@ fn ibody_xattr_get_by_name() {
 
 #[test]
 fn xattrs_on_file_without_xattrs() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"hello.txt");
     let inode = ext.inode(&mut fs, ino).unwrap();
     let xattrs = inode.xattrs(&mut fs).unwrap();
@@ -57,7 +59,7 @@ fn xattrs_on_file_without_xattrs() {
 
 #[test]
 fn block_xattr_file_has_entries() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"xattr_block");
     let inode = ext.inode(&mut fs, ino).unwrap();
     let xattrs = inode.xattrs(&mut fs).unwrap();
@@ -80,7 +82,7 @@ fn block_xattr_file_has_entries() {
 
 #[test]
 fn ea_inode_xattr_by_name() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"ea_inode_file");
     let inode = ext.inode(&mut fs, ino).unwrap();
 
@@ -92,7 +94,7 @@ fn ea_inode_xattr_by_name() {
 
 #[test]
 fn ea_inode_xattr_in_list() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"ea_inode_file");
     let inode = ext.inode(&mut fs, ino).unwrap();
 
@@ -113,7 +115,7 @@ fn ea_inode_xattr_in_list() {
 
 #[test]
 fn ea_inode_nonexistent_xattr() {
-    let (ext, mut fs) = common::open_ext("ext4.img");
+    let (ext, mut fs) = support::open_ext("ext4.img");
     let ino = lookup_inode(&ext, &mut fs, b"ea_inode_file");
     let inode = ext.inode(&mut fs, ino).unwrap();
 

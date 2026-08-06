@@ -24,7 +24,9 @@ use crate::{BitLockerError, Credential, Result, UnlockMethod};
 /// Error returned when `unlock()` fails, preserving the volume for retry.
 #[derive(Debug)]
 pub struct UnlockError<R> {
+    /// Locked volume returned intact so another credential can be attempted.
     pub volume: BitLockerVolume<R>,
+    /// Error raised while validating the attempted credential.
     pub source: BitLockerError,
 }
 
@@ -74,11 +76,13 @@ const MIN_CHUNK_SECTORS: usize = 8;
 const MAX_CHUNK_SECTORS: usize = 256;
 
 impl<R> UnlockedVolume<R> {
+    /// Returns the validated metadata associated with the unlocked view.
     #[must_use]
     pub fn metadata(&self) -> &BitLockerMetadata {
         &self.metadata
     }
 
+    /// Returns the logical sector size used for decryption and seeking.
     #[must_use]
     pub fn sector_size(&self) -> u16 {
         self.sector_size
@@ -104,7 +108,7 @@ impl<R: Read + Seek> UnlockedVolume<R> {
     /// the encrypted/plaintext boundary.
     fn fill_buf(&mut self, start_sector: u64) -> std::io::Result<()> {
         let ss = u64::from(self.sector_size);
-        let ss_usize = self.sector_size as usize;
+        let ss_usize = usize::from(self.sector_size);
         let volume_size = self.volume_size();
         let encrypted_size = self.metadata.encrypted_volume_size();
         let nb_backup = u64::from(self.metadata.nb_backup_sectors());
@@ -113,8 +117,7 @@ impl<R: Read + Seek> UnlockedVolume<R> {
         // How many sectors can we read from start_sector?
         let remaining_sectors = (volume_size.saturating_sub(start_sector * ss)) / ss;
         let target = self.chunk_sectors;
-        #[expect(clippy::cast_possible_truncation)]
-        let count = target.min(remaining_sectors.min(target as u64) as usize);
+        let count = target.min(usize::try_from(remaining_sectors).unwrap_or(usize::MAX));
         if count == 0 {
             self.buf_start_sector = None;
             self.buf_valid_sectors = 0;
@@ -125,7 +128,8 @@ impl<R: Read + Seek> UnlockedVolume<R> {
         // If so, we must read them individually (they're at a different
         // disk offset).  Otherwise we can do one big sequential read.
         let first_is_backup = start_sector < nb_backup;
-        let all_contiguous = !first_is_backup || start_sector + count as u64 <= nb_backup;
+        let count_u64 = u64::try_from(count).unwrap_or(u64::MAX);
+        let all_contiguous = !first_is_backup || start_sector + count_u64 <= nb_backup;
 
         if all_contiguous && !first_is_backup {
             // Fast path: one seek + one read for the whole chunk.
@@ -135,7 +139,7 @@ impl<R: Read + Seek> UnlockedVolume<R> {
         } else {
             // Slow path: per-sector reads (only for backup region boundary).
             for i in 0..count {
-                let sector = start_sector + i as u64;
+                let sector = start_sector + u64::try_from(i).unwrap_or(u64::MAX);
                 let disk_offset = if sector < nb_backup {
                     backup_addr + sector * ss
                 } else {
@@ -150,7 +154,7 @@ impl<R: Read + Seek> UnlockedVolume<R> {
 
         // Decrypt each sector in-place.
         for i in 0..count {
-            let sector = start_sector + i as u64;
+            let sector = start_sector + u64::try_from(i).unwrap_or(u64::MAX);
             let buf_off = i * ss_usize;
             let data = &mut self.buf[buf_off..buf_off + ss_usize];
 
@@ -184,7 +188,7 @@ impl<R: Read + Seek> UnlockedVolume<R> {
         let sector = self.position / ss;
 
         if let Some(start) = self.buf_start_sector {
-            let end = start + self.buf_valid_sectors as u64;
+            let end = start + u64::try_from(self.buf_valid_sectors).unwrap_or(u64::MAX);
             if sector >= start && sector < end {
                 return Ok(()); // already buffered
             }
@@ -222,25 +226,43 @@ impl<R: Read + Seek> Read for UnlockedVolume<R> {
 
             let start = self.buf_start_sector.unwrap_or(0);
             let buf_byte_start = start * ss;
-            let buf_byte_end = buf_byte_start + (self.buf_valid_sectors as u64 * ss);
+            let valid_sectors = u64::try_from(self.buf_valid_sectors).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decryption buffer sector count exceeds u64",
+                )
+            })?;
+            let buf_byte_end = buf_byte_start + (valid_sectors * ss);
 
             // These differences are bounded by the buffer size (MAX_CHUNK_SECTORS
             // × sector_size), which fits in usize on any supported platform.
-            #[expect(clippy::cast_possible_truncation)]
-            let pos_in_buf = (self.position - buf_byte_start) as usize;
-            #[expect(clippy::cast_possible_truncation)]
-            let remaining_in_buf = (buf_byte_end - self.position) as usize;
+            let pos_in_buf = usize::try_from(self.position - buf_byte_start).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decryption-buffer offset exceeds usize",
+                )
+            })?;
+            let remaining_in_buf = usize::try_from(buf_byte_end - self.position).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decryption-buffer length exceeds usize",
+                )
+            })?;
             let remaining_in_output = buf.len() - filled;
             let volume_remaining = volume_size - self.position;
-            #[expect(clippy::cast_possible_truncation)]
-            let volume_cap = volume_remaining.min(usize::MAX as u64) as usize;
+            let volume_cap = usize::try_from(volume_remaining).unwrap_or(usize::MAX);
 
             let to_copy = remaining_in_buf.min(remaining_in_output).min(volume_cap);
 
             buf[filled..filled + to_copy]
                 .copy_from_slice(&self.buf[pos_in_buf..pos_in_buf + to_copy]);
             filled += to_copy;
-            self.position += to_copy as u64;
+            self.position += u64::try_from(to_copy).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "read length exceeds the volume position range",
+                )
+            })?;
         }
 
         Ok(filled)
@@ -282,7 +304,10 @@ impl<R: Read + Seek> BitLockerVolume<R> {
     ///
     /// Returns `UnlockError` if credential processing, key unwrapping,
     /// or FVEK extraction fails.
-    #[expect(clippy::result_large_err)]
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error deliberately returns the intact volume so callers can retry another credential"
+    )]
     pub fn unlock(
         self,
         method: &UnlockMethod,
@@ -294,7 +319,7 @@ impl<R: Read + Seek> BitLockerVolume<R> {
                 match build_decryptor(enc_method, &fvek) {
                     Ok(decryptor) => {
                         let sector_size = self.metadata().bytes_per_sector();
-                        let buf_size = sector_size as usize * MAX_CHUNK_SECTORS;
+                        let buf_size = usize::from(sector_size) * MAX_CHUNK_SECTORS;
                         let (reader, metadata) = self.into_parts();
                         Ok(UnlockedVolume {
                             reader,
@@ -388,7 +413,7 @@ fn extract_clear_key_vmk(metadata: &BitLockerMetadata) -> Result<Zeroizing<Vec<u
         // with a standard 8-byte datum header followed by the raw key bytes.
         let nested = ext_key.nested_data();
         let kek = if let Ok((inner_hdr, _)) = DatumHeaderRaw::read_from_prefix(nested) {
-            let inner_size = inner_hdr.size.get() as usize;
+            let inner_size = usize::from(inner_hdr.size.get());
             let hdr_size = size_of::<DatumHeaderRaw>();
             if inner_size <= nested.len() && inner_size >= hdr_size {
                 &nested[hdr_size..inner_size]
@@ -716,330 +741,5 @@ fn required_key_size(method: EncryptionMethod) -> usize {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_decryptor_aes128_xts() {
-        let fvek = vec![0x42u8; 32];
-        let dec = build_decryptor(EncryptionMethod::Aes128Xts, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn build_decryptor_aes256_xts() {
-        let fvek = vec![0x42u8; 64];
-        let dec = build_decryptor(EncryptionMethod::Aes256Xts, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn build_decryptor_aes128_cbc() {
-        let fvek = vec![0x42u8; 16];
-        let dec = build_decryptor(EncryptionMethod::Aes128Cbc, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn build_decryptor_aes256_cbc() {
-        let fvek = vec![0x42u8; 32];
-        let dec = build_decryptor(EncryptionMethod::Aes256Cbc, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn build_decryptor_diffuser_128() {
-        let fvek = vec![0x42u8; 64];
-        let dec = build_decryptor(EncryptionMethod::Aes128CbcDiffuser, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn build_decryptor_diffuser_256() {
-        let fvek = vec![0x42u8; 64];
-        let dec = build_decryptor(EncryptionMethod::Aes256CbcDiffuser, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn build_decryptor_fvek_too_short() {
-        let fvek = vec![0x42u8; 8];
-        let err = build_decryptor(EncryptionMethod::Aes256Xts, &fvek).unwrap_err();
-        assert!(matches!(err, BitLockerError::SectorLayoutError { .. }));
-    }
-
-    #[test]
-    fn build_decryptor_with_algo_prefix() {
-        let mut fvek = Vec::with_capacity(34);
-        fvek.extend_from_slice(&0x8004u16.to_le_bytes());
-        fvek.extend_from_slice(&[0x42u8; 32]);
-        let dec = build_decryptor(EncryptionMethod::Aes128Xts, &fvek);
-        assert!(dec.is_ok());
-    }
-
-    #[test]
-    fn fvek_algo_prefix_known_ids() {
-        use zerocopy::IntoBytes;
-        let make = |id: u16| {
-            let bytes = id.to_le_bytes();
-            FvekAlgoPrefix::read_from_bytes(bytes.as_bytes())
-                .unwrap()
-                .is_known()
-        };
-        assert!(make(0x8000));
-        assert!(make(0x8005));
-        assert!(!make(0x1234));
-    }
-
-    fn make_test_volume(
-        plaintext_sectors: &[&[u8; 512]],
-    ) -> UnlockedVolume<std::io::Cursor<Vec<u8>>> {
-        use aes::cipher::KeyInit;
-        let key = [0x42u8; 32];
-
-        let mut disk = Vec::new();
-        for (i, sector) in plaintext_sectors.iter().enumerate() {
-            let tweak = AesXtsDecryptor::sector_tweak(i as u64);
-            let cipher1 = aes::Aes128::new(key[..16].into());
-            let cipher2 = aes::Aes128::new(key[16..32].into());
-            let xts = xts_mode::Xts128::<aes::Aes128>::new(cipher1, cipher2);
-            let mut encrypted = **sector;
-            xts.encrypt_sector(&mut encrypted, tweak);
-            disk.extend_from_slice(&encrypted);
-        }
-
-        let total_sectors = plaintext_sectors.len() as u64;
-        let metadata = BitLockerMetadata::new_for_test(
-            EncryptionMethod::Aes128Xts,
-            disk.len() as u64,
-            512,
-            total_sectors,
-        );
-
-        UnlockedVolume {
-            reader: std::io::Cursor::new(disk),
-            metadata,
-            decryptor: Decryptor::Xts(AesXtsDecryptor::new(key.to_vec()).unwrap()),
-            sector_size: 512,
-            position: 0,
-            buf: Zeroizing::new(vec![0u8; 512 * MAX_CHUNK_SECTORS]),
-            buf_start_sector: None,
-            buf_valid_sectors: 0,
-            chunk_sectors: MIN_CHUNK_SECTORS,
-        }
-    }
-
-    #[test]
-    fn read_full_sector() {
-        let sector0 = &[0xABu8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-        let mut buf = [0u8; 512];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 512);
-        assert_eq!(buf, *sector0);
-    }
-
-    #[test]
-    fn read_partial_sector() {
-        let sector0 = &[0xCDu8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-        let mut buf = [0u8; 16];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 16);
-        assert_eq!(buf, [0xCD; 16]);
-    }
-
-    #[test]
-    fn read_across_sector_boundary() {
-        let sector0 = &[0xAAu8; 512];
-        let sector1 = &[0xBBu8; 512];
-        let mut vol = make_test_volume(&[sector0, sector1]);
-
-        // Seek to 256 bytes before sector boundary
-        vol.seek(SeekFrom::Start(256)).unwrap();
-        let mut buf = [0u8; 512];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 512);
-        assert_eq!(&buf[..256], &[0xAA; 256]);
-        assert_eq!(&buf[256..], &[0xBB; 256]);
-    }
-
-    #[test]
-    fn seek_and_read() {
-        let sector0 = &[0x11u8; 512];
-        let sector1 = &[0x22u8; 512];
-        let mut vol = make_test_volume(&[sector0, sector1]);
-
-        vol.seek(SeekFrom::Start(512)).unwrap();
-        let mut buf = [0u8; 512];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 512);
-        assert_eq!(buf, [0x22; 512]);
-    }
-
-    #[test]
-    fn read_at_eof_returns_zero() {
-        let sector0 = &[0xEEu8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-        vol.seek(SeekFrom::Start(512)).unwrap();
-        let mut buf = [0u8; 16];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 0);
-    }
-
-    #[test]
-    fn seek_from_end() {
-        let sector0 = &[0xFFu8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-        let pos = vol.seek(SeekFrom::End(-16)).unwrap();
-        assert_eq!(pos, 496);
-        let mut buf = [0u8; 16];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 16);
-        assert_eq!(buf, [0xFF; 16]);
-    }
-
-    #[test]
-    fn seek_beyond_u64_max_errors() {
-        let sector0 = &[0u8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-        // Seek to end, then try to go past u64::MAX
-        vol.seek(SeekFrom::Start(u64::MAX)).unwrap();
-        let err = vol.seek(SeekFrom::Current(1));
-        assert!(err.is_err());
-    }
-
-    #[test]
-    fn seek_negative_errors() {
-        let sector0 = &[0u8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-        let err = vol.seek(SeekFrom::Start(0));
-        assert!(err.is_ok());
-        let err = vol.seek(SeekFrom::Current(-1));
-        assert!(err.is_err());
-    }
-
-    /// Build a volume where only the first `encrypted_sectors` sectors are
-    /// encrypted; remaining sectors are stored as raw plaintext on disk.
-    fn make_partial_volume(
-        plaintext_sectors: &[&[u8; 512]],
-        encrypted_sectors: usize,
-    ) -> UnlockedVolume<std::io::Cursor<Vec<u8>>> {
-        use aes::cipher::KeyInit;
-        let key = [0x42u8; 32];
-
-        let mut disk = Vec::new();
-        for (i, sector) in plaintext_sectors.iter().enumerate() {
-            if i < encrypted_sectors {
-                let tweak = AesXtsDecryptor::sector_tweak(i as u64);
-                let cipher1 = aes::Aes128::new(key[..16].into());
-                let cipher2 = aes::Aes128::new(key[16..32].into());
-                let xts = xts_mode::Xts128::<aes::Aes128>::new(cipher1, cipher2);
-                let mut encrypted = **sector;
-                xts.encrypt_sector(&mut encrypted, tweak);
-                disk.extend_from_slice(&encrypted);
-            } else {
-                // Stored as plaintext (not encrypted on disk)
-                disk.extend_from_slice(*sector);
-            }
-        }
-
-        let total_sectors = plaintext_sectors.len() as u64;
-        let encrypted_volume_size = (encrypted_sectors as u64) * 512;
-        let metadata = BitLockerMetadata::new_for_test(
-            EncryptionMethod::Aes128Xts,
-            encrypted_volume_size,
-            512,
-            total_sectors,
-        );
-
-        UnlockedVolume {
-            reader: std::io::Cursor::new(disk),
-            metadata,
-            decryptor: Decryptor::Xts(AesXtsDecryptor::new(key.to_vec()).unwrap()),
-            sector_size: 512,
-            position: 0,
-            buf: Zeroizing::new(vec![0u8; 512 * MAX_CHUNK_SECTORS]),
-            buf_start_sector: None,
-            buf_valid_sectors: 0,
-            chunk_sectors: MIN_CHUNK_SECTORS,
-        }
-    }
-
-    #[test]
-    fn read_outside_encrypted_region_passes_through() {
-        // 4 sectors total, only first 2 encrypted
-        let s0 = &[0xAAu8; 512];
-        let s1 = &[0xBBu8; 512];
-        let s2 = &[0xCCu8; 512]; // plaintext on disk
-        let s3 = &[0xDDu8; 512]; // plaintext on disk
-        let mut vol = make_partial_volume(&[s0, s1, s2, s3], 2);
-
-        // Read sector 2 — should be raw plaintext passthrough
-        vol.seek(SeekFrom::Start(1024)).unwrap();
-        let mut buf = [0u8; 512];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 512);
-        assert_eq!(buf, [0xCC; 512]);
-
-        // Read sector 3
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 512);
-        assert_eq!(buf, [0xDD; 512]);
-    }
-
-    #[test]
-    fn read_spanning_encrypted_boundary() {
-        // 4 sectors, first 2 encrypted
-        let s0 = &[0x11u8; 512];
-        let s1 = &[0x22u8; 512];
-        let s2 = &[0x33u8; 512]; // plaintext
-        let s3 = &[0x44u8; 512]; // plaintext
-        let mut vol = make_partial_volume(&[s0, s1, s2, s3], 2);
-
-        // Seek to 256 bytes before the encrypted/unencrypted boundary
-        vol.seek(SeekFrom::Start(512 + 256)).unwrap();
-        let mut buf = [0u8; 512];
-        let n = vol.read(&mut buf).unwrap();
-        assert_eq!(n, 512);
-        // First 256 bytes from sector 1 (encrypted, decrypted to 0x22)
-        assert_eq!(&buf[..256], &[0x22; 256]);
-        // Last 256 bytes from sector 2 (plaintext passthrough, 0x33)
-        assert_eq!(&buf[256..], &[0x33; 256]);
-    }
-
-    #[test]
-    fn encrypted_and_unencrypted_sectors_both_correct() {
-        // Verify encrypted sectors decrypt properly alongside plaintext ones
-        let s0 = &[0xAAu8; 512];
-        let s1 = &[0xBBu8; 512]; // plaintext on disk
-        let mut vol = make_partial_volume(&[s0, s1], 1);
-
-        // Read sector 0 (encrypted) — should decrypt
-        let mut buf = [0u8; 512];
-        vol.read_exact(&mut buf).unwrap();
-        assert_eq!(buf, [0xAA; 512]);
-
-        // Read sector 1 (plaintext) — should passthrough
-        vol.read_exact(&mut buf).unwrap();
-        assert_eq!(buf, [0xBB; 512]);
-    }
-
-    #[test]
-    fn cache_hit_reuses_sector() {
-        let sector0 = &[0xAAu8; 512];
-        let mut vol = make_test_volume(&[sector0]);
-
-        // First read populates cache
-        let mut buf1 = [0u8; 16];
-        vol.read_exact(&mut buf1).unwrap();
-
-        // Seek back and read again — should hit cache
-        vol.seek(SeekFrom::Start(0)).unwrap();
-        let mut buf2 = [0u8; 16];
-        vol.read_exact(&mut buf2).unwrap();
-
-        assert_eq!(buf1, buf2);
-    }
-}
+#[path = "unlock_tests/mod.rs"]
+mod tests;

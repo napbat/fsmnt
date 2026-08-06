@@ -110,6 +110,11 @@ impl Reaper {
     /// # Errors
     ///
     /// Returns [`ApfsError::Truncated`] for a short block.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width reaper field ceases to fit the minimum
+    /// block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < REAPER_PREFIX_SIZE {
             return Err(ApfsError::Truncated {
@@ -177,6 +182,11 @@ impl ReapList {
     ///
     /// Returns [`ApfsError::Truncated`] or [`ApfsError::Malformed`] when the
     /// declared entry count does not fit the block.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width reap-list field ceases to fit the bounds
+    /// validated before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < NRL_ENTRIES_OFFSET {
             return Err(ApfsError::Truncated {

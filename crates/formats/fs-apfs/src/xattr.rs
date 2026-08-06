@@ -245,7 +245,9 @@ mod tests {
                 assert_eq!(xattr_obj_id, 909);
                 assert_eq!(dstream.size, 65536);
             }
-            other => panic!("expected a Stream value, got {other:?}"),
+            other @ XattrValue::Embedded(_) => {
+                panic!("expected a Stream value, got {other:?}")
+            }
         }
     }
 
@@ -341,18 +343,42 @@ mod tests {
     fn catalog_leaf(records: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut b = vec![0u8; BLK];
         b[0x20..0x22].copy_from_slice(&0x0003u16.to_le_bytes());
-        b[0x24..0x28].copy_from_slice(&(records.len() as u32).to_le_bytes());
-        b[0x2A..0x2C].copy_from_slice(&((records.len() * 8) as u16).to_le_bytes());
+        b[0x24..0x28].copy_from_slice(
+            &u32::try_from(records.len())
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
+        b[0x2A..0x2C].copy_from_slice(
+            &u16::try_from(records.len() * 8)
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         let key_area = BTN_DATA_OFFSET + records.len() * 8;
         let value_end = BLK - BTREE_INFO_SIZE;
         let (mut kc, mut vc) = (0usize, 0usize);
         for (i, (key, value)) in records.iter().enumerate() {
             let toc = BTN_DATA_OFFSET + i * 8;
-            b[toc..toc + 2].copy_from_slice(&(kc as u16).to_le_bytes());
-            b[toc + 2..toc + 4].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            b[toc..toc + 2].copy_from_slice(
+                &u16::try_from(kc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 2..toc + 4].copy_from_slice(
+                &u16::try_from(key.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             vc += value.len();
-            b[toc + 4..toc + 6].copy_from_slice(&(vc as u16).to_le_bytes());
-            b[toc + 6..toc + 8].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            b[toc + 4..toc + 6].copy_from_slice(
+                &u16::try_from(vc)
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
+            b[toc + 6..toc + 8].copy_from_slice(
+                &u16::try_from(value.len())
+                    .expect("the test fixture value fits in u16")
+                    .to_le_bytes(),
+            );
             b[key_area + kc..key_area + kc + key.len()].copy_from_slice(key);
             b[value_end - vc..value_end - vc + value.len()].copy_from_slice(value);
             kc += key.len();
@@ -361,11 +387,14 @@ mod tests {
     }
 
     fn xattr_key(obj_id: u64, name: &str) -> Vec<u8> {
-        let mut k = (((JObjType::Xattr.as_value() as u64) << OBJ_TYPE_SHIFT) | obj_id)
+        let mut k = ((u64::from(JObjType::Xattr.as_value()) << OBJ_TYPE_SHIFT) | obj_id)
             .to_le_bytes()
             .to_vec();
         let bytes = name.as_bytes();
-        k.extend_from_slice(&(bytes.len() as u16 + 1).to_le_bytes());
+        k.extend_from_slice(
+            &(u16::try_from(bytes.len()).expect("the test fixture value fits in u16") + 1)
+                .to_le_bytes(),
+        );
         k.extend_from_slice(bytes);
         k.push(0);
         k
@@ -374,7 +403,11 @@ mod tests {
     fn embedded_value(data: &[u8]) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(&XattrFlags::DATA_EMBEDDED.bits().to_le_bytes());
-        v.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        v.extend_from_slice(
+            &u16::try_from(data.len())
+                .expect("the test fixture value fits in u16")
+                .to_le_bytes(),
+        );
         v.extend_from_slice(data);
         v
     }
@@ -395,13 +428,24 @@ mod tests {
         image.extend(omap_tree(80, 2));
         image.extend(leaf);
         let omap = Omap::parse(&image[..BLK]).unwrap();
-        let catalog = Catalog::new(Oid(80), omap, BLK as u32, Xid(1));
+        let catalog = Catalog::new(
+            Oid(80),
+            omap,
+            u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            Xid(1),
+        );
         let mut reader = Cursor::new(image);
 
         let xattrs = Xattr::list(&catalog, &mut reader, 8).unwrap();
         assert_eq!(xattrs.len(), 2);
         assert_eq!(xattrs[0].name, "com.apple.quarantine");
-        let data = xattrs[0].read(&catalog, &mut reader, BLK as u32).unwrap();
+        let data = xattrs[0]
+            .read(
+                &catalog,
+                &mut reader,
+                u32::try_from(BLK).expect("the test fixture value fits in u32"),
+            )
+            .unwrap();
         assert_eq!(data, b"q-data");
     }
 }

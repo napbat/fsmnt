@@ -28,7 +28,7 @@ const TABLE_BITS: u32 = 10;
 const TABLE_SIZE: usize = 1 << TABLE_BITS; // 1024
 
 /// Packed entry format: `(symbol << 4) | code_len`.
-/// code_len == 0 means overflow — symbol field is overflow index.
+/// `code_len` == 0 means overflow — symbol field is overflow index.
 type PackedEntry = u16;
 
 /// Specialized decode table for XPRESS Huffman (512 symbols, max 15 bits).
@@ -68,7 +68,7 @@ impl PackedDecodeTable {
             if len == 0 {
                 continue;
             }
-            let sym = sym as u16;
+            let sym = u16::try_from(sym).expect("the XPRESS Huffman alphabet contains 512 symbols");
             let len_u32 = u32::from(len);
 
             if len_u32 <= TABLE_BITS {
@@ -76,7 +76,7 @@ impl PackedDecodeTable {
                 let pad = TABLE_BITS - len_u32;
                 let base = code << pad;
                 let count = 1u32 << pad;
-                let entry = (sym << 4) | (len as u16);
+                let entry = (sym << 4) | u16::from(len);
                 for i in 0..count {
                     let idx = (base | i) as usize;
                     tbl.direct[idx] = entry;
@@ -85,16 +85,18 @@ impl PackedDecodeTable {
             } else {
                 // Long code: route through overflow tree.
                 let prefix = (code >> (len_u32 - TABLE_BITS)) as usize;
-                let root = if !direct_filled[prefix] {
+                let root = if direct_filled[prefix] {
+                    // Already an overflow root.
+                    (tbl.direct[prefix] >> 4) as usize
+                } else {
                     // Allocate overflow root.
                     let idx = tbl.alloc_overflow()?;
                     // Mark direct entry as overflow pointer (code_len=0).
-                    tbl.direct[prefix] = (idx as u16) << 4;
+                    tbl.direct[prefix] = u16::try_from(idx)
+                        .expect("the XPRESS overflow table has fewer than 4096 entries")
+                        << 4;
                     direct_filled[prefix] = true;
                     idx
-                } else {
-                    // Already an overflow root.
-                    (tbl.direct[prefix] >> 4) as usize
                 };
 
                 // Walk remaining bits to insert leaf.
@@ -110,14 +112,16 @@ impl PackedDecodeTable {
                     }
                     if bit_pos == 0 {
                         // Leaf: store symbol and code_len.
-                        tbl.overflow[child_idx] = (sym << 4) | (len as u16);
+                        tbl.overflow[child_idx] = (sym << 4) | u16::from(len);
                     } else {
                         // Internal node: ensure child exists.
                         let existing = tbl.overflow[child_idx];
                         if existing == 0 {
                             let new_node = tbl.alloc_overflow()?;
                             // Store node index (code_len=0 marks internal).
-                            tbl.overflow[child_idx] = (new_node as u16) << 4;
+                            tbl.overflow[child_idx] = u16::try_from(new_node)
+                                .expect("the XPRESS overflow table has fewer than 4096 entries")
+                                << 4;
                         }
                         node = (tbl.overflow[child_idx] >> 4) as usize;
                     }
@@ -157,13 +161,13 @@ impl PackedDecodeTable {
 
     /// Decode one symbol from the top bits of `next_bits`.
     /// Returns `(symbol, code_len)`.
-    #[inline(always)]
+    #[inline]
     fn decode(&self, next_bits: u32) -> Result<(u16, u32)> {
         let index = (next_bits >> (32 - TABLE_BITS)) as usize;
         // SAFETY: index = next_bits >> 22, which is at most 2^10 - 1 = 1023.
         // TABLE_SIZE = 1024, so index < TABLE_SIZE always.
         let entry = unsafe { *self.direct.get_unchecked(index) };
-        let code_len = (entry & 0xF) as u32;
+        let code_len = u32::from(entry & 0xF);
         if code_len != 0 {
             return Ok((entry >> 4, code_len));
         }
@@ -179,7 +183,7 @@ impl PackedDecodeTable {
             let bit = ((next_bits >> (31 - bits_used)) & 1) as usize;
             let child_idx = node * 2 + bit;
             let child = self.overflow[child_idx];
-            let child_len = (child & 0xF) as u32;
+            let child_len = u32::from(child & 0xF);
             if child_len != 0 {
                 return Ok((child >> 4, child_len));
             }
@@ -253,6 +257,11 @@ const OUTPUT_GUARD: usize = 188;
 /// Returns the number of bytes written to `output`, or an error if the
 /// input is malformed. The caller must pre-allocate `output` to the
 /// expected decompressed size.
+///
+/// # Errors
+///
+/// Returns an error when a Huffman table or token is malformed, or a match
+/// refers outside the decoded output.
 pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     let mut in_pos = 0;
     let mut out_pos = 0;
@@ -287,23 +296,22 @@ pub fn decompress_lenient(input: &[u8], output: &mut [u8]) -> LenientResult {
         let block_limit = (out_pos + BLOCK_SIZE).min(output.len());
         let block_input = &input[in_pos..];
 
-        match decompress_block_strict(block_input, output, out_pos, block_limit) {
-            Ok((consumed, written)) => {
-                in_pos += consumed;
-                out_pos += written;
-                if written == 0 {
-                    break;
-                }
+        if let Ok((consumed, written)) =
+            decompress_block_strict(block_input, output, out_pos, block_limit)
+        {
+            in_pos += consumed;
+            out_pos += written;
+            if written == 0 {
+                break;
             }
-            Err(_) => {
-                had_errors = true;
-                let fill = block_limit - out_pos;
-                // Region is already zeroed from the initial fill.
-                out_pos += fill;
-                // Skip to next block: advance past header at minimum.
-                in_pos += HEADER_SIZE.min(input.len().saturating_sub(in_pos));
-                skip_to_next_block_boundary(input, &mut in_pos);
-            }
+        } else {
+            had_errors = true;
+            let fill = block_limit - out_pos;
+            // Region is already zeroed from the initial fill.
+            out_pos += fill;
+            // Skip to next block: advance past header at minimum.
+            in_pos += HEADER_SIZE.min(input.len().saturating_sub(in_pos));
+            skip_to_next_block_boundary(input, &mut in_pos);
         }
     }
 
@@ -327,6 +335,10 @@ fn skip_to_next_block_boundary(input: &[u8], in_pos: &mut usize) {
 /// bit-reading model that matches the MS-XCA spec pseudocode.
 ///
 /// Returns `(input_bytes_consumed, output_bytes_written)`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "keeping the deficit-based format state machine contiguous makes its pointer and bit-count invariants auditable"
+)]
 fn decompress_block_strict(
     input: &[u8],
     output: &mut [u8],
@@ -352,8 +364,8 @@ fn decompress_block_strict(
     }
 
     // Initialize: load two 16-bit words into a u32 accumulator.
-    let w0 = u16::from_le_bytes([data[0], data[1]]) as u32;
-    let w1 = u16::from_le_bytes([data[2], data[3]]) as u32;
+    let w0 = u32::from(u16::from_le_bytes([data[0], data[1]]));
+    let w1 = u32::from(u16::from_le_bytes([data[2], data[3]]));
     let mut pos: usize = 4;
     let mut next_bits: u32 = (w0 << 16) | w1;
     let mut extra_bit_count: i32 = 16;
@@ -367,24 +379,27 @@ fn decompress_block_strict(
         let (symbol, code_len) = table.decode(next_bits)?;
 
         next_bits <<= code_len;
-        extra_bit_count -= code_len as i32;
+        extra_bit_count -=
+            i32::try_from(code_len).expect("XPRESS Huffman codes use at most 15 bits");
 
         // Refill — no bounds check (INPUT_GUARD guarantees headroom).
         if extra_bit_count < 0 {
             // SAFETY: INPUT_GUARD ensures pos + 2 <= data.len().
-            let word = unsafe { crate::raw::read_u16_le(data, pos) } as u32;
+            let word = u32::from(unsafe { crate::raw::read_u16_le(data, pos) });
             pos += 2;
-            next_bits |= word << ((-extra_bit_count) as u32);
+            let deficit = u32::try_from(-extra_bit_count)
+                .expect("this refill branch requires a negative bit count");
+            next_bits |= word << deficit;
             extra_bit_count += 16;
         }
 
         if symbol < 256 {
-            output[out_pos] = symbol as u8;
+            output[out_pos] = u8::try_from(symbol).expect("literal symbols are below 256");
             out_pos += 1;
         } else {
             let sym_offset = symbol - 256;
-            let length_header = (sym_offset & 15) as u32;
-            let distance_log = (sym_offset >> 4) as u32;
+            let length_header = u32::from(sym_offset & 15);
+            let distance_log = u32::from(sym_offset >> 4);
 
             // Length decode — no bounds checks on extension reads.
             let length = if length_header < 15 {
@@ -420,12 +435,15 @@ fn decompress_block_strict(
             } else {
                 let extra = next_bits >> (32 - distance_log);
                 next_bits <<= distance_log;
-                extra_bit_count -= distance_log as i32;
+                extra_bit_count -=
+                    i32::try_from(distance_log).expect("XPRESS distances use at most 16 bits");
                 if extra_bit_count < 0 {
                     // SAFETY: INPUT_GUARD ensures pos + 2 <= data.len().
-                    let word = unsafe { crate::raw::read_u16_le(data, pos) } as u32;
+                    let word = u32::from(unsafe { crate::raw::read_u16_le(data, pos) });
                     pos += 2;
-                    next_bits |= word << ((-extra_bit_count) as u32);
+                    let deficit = u32::try_from(-extra_bit_count)
+                        .expect("this refill branch requires a negative bit count");
+                    next_bits |= word << deficit;
                     extra_bit_count += 16;
                 }
                 (1usize << distance_log) + extra as usize
@@ -461,7 +479,8 @@ fn decompress_block_strict(
         let (symbol, code_len) = table.decode(next_bits)?;
 
         next_bits <<= code_len;
-        extra_bit_count -= code_len as i32;
+        extra_bit_count -=
+            i32::try_from(code_len).expect("XPRESS Huffman codes use at most 15 bits");
 
         if extra_bit_count < 0 {
             if pos + 2 > data.len() {
@@ -471,19 +490,21 @@ fn decompress_block_strict(
                     data.len().saturating_sub(pos),
                 ));
             }
-            let word = u16::from_le_bytes([data[pos], data[pos + 1]]) as u32;
+            let word = u32::from(u16::from_le_bytes([data[pos], data[pos + 1]]));
             pos += 2;
-            next_bits |= word << ((-extra_bit_count) as u32);
+            let deficit = u32::try_from(-extra_bit_count)
+                .expect("this refill branch requires a negative bit count");
+            next_bits |= word << deficit;
             extra_bit_count += 16;
         }
 
         if symbol < 256 {
-            output[out_pos] = symbol as u8;
+            output[out_pos] = u8::try_from(symbol).expect("literal symbols are below 256");
             out_pos += 1;
         } else {
             let sym_offset = symbol - 256;
-            let length_header = (sym_offset & 15) as u32;
-            let distance_log = (sym_offset >> 4) as u32;
+            let length_header = u32::from(sym_offset & 15);
+            let distance_log = u32::from(sym_offset >> 4);
 
             let length = if length_header < 15 {
                 length_header as usize + 3
@@ -537,7 +558,8 @@ fn decompress_block_strict(
             } else {
                 let extra = next_bits >> (32 - distance_log);
                 next_bits <<= distance_log;
-                extra_bit_count -= distance_log as i32;
+                extra_bit_count -=
+                    i32::try_from(distance_log).expect("XPRESS distances use at most 16 bits");
                 if extra_bit_count < 0 {
                     if pos + 2 > data.len() {
                         return Err(err_input_truncated(
@@ -546,9 +568,11 @@ fn decompress_block_strict(
                             data.len().saturating_sub(pos),
                         ));
                     }
-                    let word = u16::from_le_bytes([data[pos], data[pos + 1]]) as u32;
+                    let word = u32::from(u16::from_le_bytes([data[pos], data[pos + 1]]));
                     pos += 2;
-                    next_bits |= word << ((-extra_bit_count) as u32);
+                    let deficit = u32::try_from(-extra_bit_count)
+                        .expect("this refill branch requires a negative bit count");
+                    next_bits |= word << deficit;
                     extra_bit_count += 16;
                 }
                 (1usize << distance_log) + extra as usize
@@ -588,7 +612,7 @@ fn parse_code_lengths(header: &[u8]) -> [u8; NUM_SYMBOLS] {
 
 /// Copy `length` bytes from `output[out_pos - distance..]` to
 /// `output[out_pos..]`, using chunked copies where possible.
-#[inline(always)]
+#[inline]
 fn copy_match_fast(
     output: &mut [u8],
     out_pos: usize,
@@ -683,7 +707,7 @@ mod tests {
     /// Returns `(code, length)` per symbol.
     fn assign_codes(lengths: &[u8; NUM_SYMBOLS]) -> Vec<(u32, u8)> {
         let mut counts = [0u32; 16];
-        for &len in lengths.iter() {
+        for &len in lengths {
             if len > 0 && (len as usize) < counts.len() {
                 counts[len as usize] += 1;
             }
@@ -814,7 +838,11 @@ mod tests {
         let n = decompress(&block, &mut output).expect("decompress failed");
         assert_eq!(n, 256);
         for (i, &byte) in output.iter().enumerate() {
-            assert_eq!(byte, i as u8, "mismatch at byte {i}");
+            assert_eq!(
+                byte,
+                u8::try_from(i).expect("the test block is shorter than 256 bytes"),
+                "mismatch at byte {i}"
+            );
         }
     }
 

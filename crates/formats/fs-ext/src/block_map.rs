@@ -5,16 +5,16 @@ use crate::error::{ExtError, Result};
 use crate::ext::Ext;
 use crate::io::{Read, Seek, SeekFrom};
 
-/// Number of direct block pointers in the i_block array.
+/// Number of direct block pointers in the `i_block` array.
 const DIRECT_BLOCKS: u32 = 12;
 
-/// Byte offset within i_block of the single-indirect pointer.
+/// Byte offset within `i_block` of the single-indirect pointer.
 const SINGLE_INDIRECT_OFF: usize = 48;
 
-/// Byte offset within i_block of the double-indirect pointer.
+/// Byte offset within `i_block` of the double-indirect pointer.
 const DOUBLE_INDIRECT_OFF: usize = 52;
 
-/// Byte offset within i_block of the triple-indirect pointer.
+/// Byte offset within `i_block` of the triple-indirect pointer.
 const TRIPLE_INDIRECT_OFF: usize = 56;
 
 /// Read a little-endian u32 block pointer from a 4-byte slice.
@@ -65,9 +65,8 @@ fn read_indirect_block_entry<T: Read + Seek>(
     block_ptr: u32,
     index: u32,
 ) -> Result<Option<u64>> {
-    let block = match validate_ptr(ext, block_ptr)? {
-        Some(b) => b,
-        None => return Ok(None),
+    let Some(block) = validate_ptr(ext, block_ptr)? else {
+        return Ok(None);
     };
     read_indirect_entry(ext, fs, block, index)
 }
@@ -190,7 +189,7 @@ fn collect_triple_indirect_blocks<T: Read + Seek>(
 
 /// Resolve a logical block number via the indirect block map.
 ///
-/// The i_block array contains 15 little-endian u32 pointers:
+/// The `i_block` array contains 15 little-endian u32 pointers:
 /// - [0..12]: direct block pointers
 /// - [12]: single indirect
 /// - [13]: double indirect
@@ -226,9 +225,8 @@ pub(crate) fn resolve_block_map<T: Read + Seek>(
     let n_squared = n.saturating_mul(n);
     if remaining < n_squared {
         let dbl_ptr = read_ptr(i_block, DOUBLE_INDIRECT_OFF);
-        let dbl_block = match validate_ptr(ext, dbl_ptr)? {
-            Some(b) => b,
-            None => return Ok(None),
+        let Some(dbl_block) = validate_ptr(ext, dbl_ptr)? else {
+            return Ok(None);
         };
 
         let first_idx = remaining / n;
@@ -248,9 +246,8 @@ pub(crate) fn resolve_block_map<T: Read + Seek>(
     let n_cubed = n_squared.saturating_mul(n);
     if remaining < n_cubed {
         let tpl_ptr = read_ptr(i_block, TRIPLE_INDIRECT_OFF);
-        let tpl_block = match validate_ptr(ext, tpl_ptr)? {
-            Some(b) => b,
-            None => return Ok(None),
+        let Some(tpl_block) = validate_ptr(ext, tpl_ptr)? else {
+            return Ok(None);
         };
 
         let first_idx = remaining / n_squared;
@@ -279,7 +276,7 @@ pub(crate) fn resolve_block_map<T: Read + Seek>(
 mod tests {
     use super::*;
 
-    /// Minimal Ext struct for testing (only block_size and blocks_count
+    /// Minimal Ext struct for testing (only `block_size` and `blocks_count`
     /// matter for block map resolution).
     fn test_ext() -> Ext {
         Ext {
@@ -348,7 +345,7 @@ mod tests {
         }
     }
 
-    /// Build an i_block array with direct pointers set.
+    /// Build an `i_block` array with direct pointers set.
     fn make_direct_iblock(ptrs: &[u32; 15]) -> [u8; 60] {
         let mut buf = [0u8; 60];
         for (i, &ptr) in ptrs.iter().enumerate() {
@@ -409,11 +406,13 @@ mod tests {
 
         // Build disk image: at block 50, put indirect pointers
         let indirect_offset = 50u64 * 4096;
-        let disk_size = (indirect_offset + 4096) as usize;
+        let disk_size =
+            usize::try_from(indirect_offset + 4096).expect("the test fixture value fits in usize");
         let mut disk = vec![0u8; disk_size];
 
         // Entry 0 in indirect block -> physical block 200
-        let ib = &mut disk[indirect_offset as usize..];
+        let ib = &mut disk
+            [usize::try_from(indirect_offset).expect("the test fixture value fits in usize")..];
         ib[0..4].copy_from_slice(&200u32.to_le_bytes());
         // Entry 5 -> physical block 300
         ib[20..24].copy_from_slice(&300u32.to_le_bytes());
@@ -459,15 +458,18 @@ mod tests {
         let dbl_offset = 60u64 * 4096;
         let ind_block_num = 70u32;
         let ind_offset = u64::from(ind_block_num) * 4096;
-        let disk_size = (ind_offset + 4096) as usize;
+        let disk_size =
+            usize::try_from(ind_offset + 4096).expect("the test fixture value fits in usize");
         let mut disk = vec![0u8; disk_size];
 
         // Double indirect block: entry 0 -> indirect block 70
-        let dbl = &mut disk[dbl_offset as usize..];
+        let dbl =
+            &mut disk[usize::try_from(dbl_offset).expect("the test fixture value fits in usize")..];
         dbl[0..4].copy_from_slice(&ind_block_num.to_le_bytes());
 
         // Indirect block 70: entry 0 -> data block 500
-        let ind = &mut disk[ind_offset as usize..];
+        let ind =
+            &mut disk[usize::try_from(ind_offset).expect("the test fixture value fits in usize")..];
         ind[0..4].copy_from_slice(&500u32.to_le_bytes());
 
         let mut cursor = std::io::Cursor::new(disk);

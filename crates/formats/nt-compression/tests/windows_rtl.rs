@@ -29,7 +29,9 @@ fn test_patterns() -> vec::Vec<(&'static str, vec::Vec<u8>)> {
     patterns.push(("zeros_1k", vec![0u8; 1024]));
 
     // Sequential bytes.
-    let sequential: vec::Vec<u8> = (0..512).map(|i| (i % 256) as u8).collect();
+    let sequential: vec::Vec<u8> = (0..512)
+        .map(|i| u8::try_from(i % 256).expect("the modulus limits values to one byte"))
+        .collect();
     patterns.push(("sequential_512", sequential));
 
     // Repetitive short pattern.
@@ -40,9 +42,9 @@ fn test_patterns() -> vec::Vec<(&'static str, vec::Vec<u8>)> {
     let mut mixed = vec![0u8; 4096];
     for (i, byte) in mixed.iter_mut().enumerate() {
         *byte = if i < 2048 {
-            (i % 64) as u8
+            u8::try_from(i % 64).expect("the modulus limits values below 64")
         } else {
-            ((i * 7 + 13) % 251) as u8
+            u8::try_from((i * 7 + 13) % 251).expect("the modulus limits values below 251")
         };
     }
     patterns.push(("mixed_4k", mixed));

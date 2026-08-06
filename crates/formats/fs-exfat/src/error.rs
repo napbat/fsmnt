@@ -15,46 +15,74 @@ pub type Result<T, E = ExFatError> = core::result::Result<T, E>;
 pub enum ExFatError {
     /// The filesystem name field does not contain "EXFAT   ".
     #[error("Invalid filesystem name: expected \"EXFAT   \", found {actual:?}")]
-    InvalidFileSystemName { actual: [u8; 8] },
+    InvalidFileSystemName {
+        /// Eight-byte filesystem name read from the boot sector.
+        actual: [u8; 8],
+    },
 
     /// The boot signature is not 0xAA55.
     #[error("Invalid boot signature: expected 0xAA55, found {actual:#06x}")]
-    InvalidBootSignature { actual: u16 },
+    InvalidBootSignature {
+        /// Signature value read from the boot sector.
+        actual: u16,
+    },
 
-    /// The MustBeZero BPB area contains non-zero bytes.
+    /// The `MustBeZero` BPB area contains non-zero bytes.
     #[error("MustBeZero BPB area contains non-zero bytes")]
     MustBeZeroViolation,
 
-    /// The BytesPerSectorShift is outside the valid range 9-12.
+    /// The `BytesPerSectorShift` is outside the valid range 9-12.
     #[error("Invalid bytes per sector shift: {actual} (must be 9-12)")]
-    InvalidBytesPerSectorShift { actual: u8 },
+    InvalidBytesPerSectorShift {
+        /// Invalid shift value read from the boot sector.
+        actual: u8,
+    },
 
-    /// The SectorsPerClusterShift exceeds the maximum for the given
+    /// The `SectorsPerClusterShift` exceeds the maximum for the given
     /// sector size.
     #[error(
         "Invalid sectors per cluster shift: {actual} \
          (max {max} for BytesPerSectorShift {bps_shift})"
     )]
-    InvalidSectorsPerClusterShift { actual: u8, max: u8, bps_shift: u8 },
+    InvalidSectorsPerClusterShift {
+        /// Invalid sectors-per-cluster shift.
+        actual: u8,
+        /// Largest shift valid for the selected sector size.
+        max: u8,
+        /// Boot sector's bytes-per-sector shift.
+        bps_shift: u8,
+    },
 
     /// A cluster index is out of the valid range.
     #[error("Invalid cluster number: {cluster}")]
-    InvalidCluster { cluster: u32 },
+    InvalidCluster {
+        /// Out-of-range cluster number.
+        cluster: u32,
+    },
 
     /// A cluster is marked as bad (0xFFFFFFF7).
     #[error("Cluster {cluster} is marked as bad")]
-    BadCluster { cluster: u32 },
+    BadCluster {
+        /// Cluster number carrying the bad-cluster marker.
+        cluster: u32,
+    },
 
     /// A cluster chain loop was detected.
     #[error(
         "Cluster chain loop detected \
          (exceeded maximum of {max_clusters} clusters)"
     )]
-    ChainLoop { max_clusters: u32 },
+    ChainLoop {
+        /// Maximum number of data clusters in the volume.
+        max_clusters: u32,
+    },
 
-    /// The NumberOfFats field is not 1 or 2.
+    /// The `NumberOfFats` field is not 1 or 2.
     #[error("Invalid number of FATs: {actual} (must be 1 or 2)")]
-    InvalidNumberOfFats { actual: u8 },
+    InvalidNumberOfFats {
+        /// Invalid table count read from the boot sector.
+        actual: u8,
+    },
 
     /// An entry set ended before all secondary entries were read.
     #[error(
@@ -62,19 +90,29 @@ pub enum ExFatError {
          expected {expected} secondary entries, found {actual}"
     )]
     TruncatedEntrySet {
+        /// Number of secondary records declared by the primary record.
         expected: u8,
+        /// Number of secondary records available before the set ended.
         actual: u8,
+        /// Absolute byte offset of the primary record.
         byte_offset: u64,
     },
 
     /// An unknown critical entry type was encountered.
     #[error("Unknown critical entry type {entry_type:#04x} at byte {byte_offset:#x}")]
-    UnknownCriticalEntry { entry_type: u8, byte_offset: u64 },
+    UnknownCriticalEntry {
+        /// Unsupported critical entry type byte.
+        entry_type: u8,
+        /// Absolute byte offset of the entry.
+        byte_offset: u64,
+    },
 
     /// An entry set has an invalid structure.
     #[error("Invalid entry set at byte {byte_offset:#x}: {reason}")]
     InvalidEntrySet {
+        /// Explanation of the structural violation.
         reason: &'static str,
+        /// Absolute byte offset of the entry set.
         byte_offset: u64,
     },
 
@@ -91,7 +129,12 @@ pub enum ExFatError {
         "Up-case table checksum mismatch: expected {expected:#010x}, \
          actual {actual:#010x}"
     )]
-    UpcaseChecksumMismatch { expected: u32, actual: u32 },
+    UpcaseChecksumMismatch {
+        /// Checksum stored in the up-case table directory entry.
+        expected: u32,
+        /// Checksum computed over the table data.
+        actual: u32,
+    },
 
     /// A file or directory was not found.
     #[error("Entry not found")]
@@ -101,25 +144,39 @@ pub enum ExFatError {
     #[error("Entry is not a directory")]
     NotADirectory,
 
-    /// Metadata tables have not been loaded (call load_metadata first).
+    /// Metadata tables have not been loaded (call `load_metadata` first).
     #[error("Metadata not loaded (call load_metadata first)")]
     MetadataNotLoaded,
 
     /// The up-case table data is invalid.
     #[error("Invalid up-case table: {reason}")]
-    InvalidUpcaseTable { reason: &'static str },
+    InvalidUpcaseTable {
+        /// Explanation of the invalid compressed table.
+        reason: &'static str,
+    },
 
-    /// The VolumeLength field is zero.
+    /// The `VolumeLength` field is zero.
     #[error("Invalid volume length: {actual} sectors (must be > 0)")]
-    InvalidVolumeLength { actual: u64 },
+    InvalidVolumeLength {
+        /// Invalid sector count read from the boot sector.
+        actual: u64,
+    },
 
-    /// The PercentInUse field is outside the valid range.
+    /// The `PercentInUse` field is outside the valid range.
     #[error("Invalid percent in use: {actual} (must be 0-100 or 0xFF)")]
-    InvalidPercentInUse { actual: u8 },
+    InvalidPercentInUse {
+        /// Invalid utilization percentage read from the boot sector.
+        actual: u8,
+    },
 
     /// The filesystem revision is not supported.
     #[error("Unsupported filesystem revision: {major}.{minor} (only 1.xx supported)")]
-    UnsupportedRevision { major: u8, minor: u8 },
+    UnsupportedRevision {
+        /// Unsupported major revision number.
+        major: u8,
+        /// Minor revision paired with the unsupported major number.
+        minor: u8,
+    },
 
     /// An I/O error occurred.
     #[error("I/O error: {0:?}")]
@@ -242,8 +299,8 @@ mod tests {
         assert!(format!("{e}").contains("Up-case"));
 
         let e = ExFatError::UpcaseChecksumMismatch {
-            expected: 0xE619D30D,
-            actual: 0x00000000,
+            expected: 0xE619_D30D,
+            actual: 0x0000_0000,
         };
         let msg = format!("{e}");
         assert!(msg.contains("0xe619d30d"));

@@ -36,17 +36,15 @@ pub fn parse_recovery_password(password: &str) -> Result<[u16; 8]> {
                 detail: "recovery password group value exceeds u16 range after division",
             });
         }
-        // decoded is verified <= u16::MAX above
-        #[expect(clippy::cast_possible_truncation)]
-        {
-            result[i] = decoded as u16;
-        }
+        result[i] =
+            u16::try_from(decoded).map_err(|_| BitLockerError::InvalidCredentialFormat {
+                detail: "recovery password group value exceeds u16 range after division",
+            })?;
     }
     Ok(result)
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 

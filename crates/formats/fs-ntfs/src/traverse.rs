@@ -54,6 +54,7 @@ pub struct NtfsDirectory<'n> {
 impl<'n> NtfsDirectory<'n> {
     /// Creates a directory handle from an [`Ntfs`] reference and
     /// MFT record number.
+    #[must_use]
     pub fn new(ntfs: &'n Ntfs, file_record_number: u64) -> Self {
         Self {
             ntfs,
@@ -69,6 +70,10 @@ impl<'n> NtfsDirectory<'n> {
     ///
     /// Returns `Err(NtfsError::NotADirectory)` if the file is
     /// not a directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory index is malformed or cannot be read.
     pub fn from_file<R: Read + Seek>(file: &NtfsFile<'n>, r: &mut R) -> Result<Self> {
         if !file.is_directory() {
             return Err(NtfsError::NotADirectory {
@@ -82,6 +87,7 @@ impl<'n> NtfsDirectory<'n> {
     }
 
     /// Returns the MFT file record number of this directory.
+    #[must_use]
     pub fn file_record_number(&self) -> u64 {
         self.file_record_number
     }
@@ -138,9 +144,8 @@ impl<'n, R: Read + Seek> FsTryIterator<R> for NtfsDirectoryIter<'n> {
     fn try_next(&mut self, r: &mut R) -> Result<Option<NtfsTraversalEntry<'n, '_>>> {
         // Keyless sentinel entries are filtered by btree_walk_next,
         // so every entry yielded here has a valid key.
-        let entry = match self.inner.try_next(r)? {
-            None => return Ok(None),
-            Some(e) => e,
+        let Some(entry) = self.inner.try_next(r)? else {
+            return Ok(None);
         };
 
         let file_ref = entry.file_reference();
@@ -185,14 +190,15 @@ pub struct NtfsTraversalEntry<'n, 'a> {
     file_record_number: u64,
 }
 
-impl<'n, 'a> NtfsTraversalEntry<'n, 'a> {
+impl NtfsTraversalEntry<'_, '_> {
     /// Returns the MFT file record number of this entry.
+    #[must_use]
     pub fn file_record_number(&self) -> u64 {
         self.file_record_number
     }
 }
 
-impl<'n, 'a, R: Read + Seek> FsDirEntry<R> for NtfsTraversalEntry<'n, 'a> {
+impl<'n, R: Read + Seek> FsDirEntry<R> for NtfsTraversalEntry<'n, '_> {
     type Error = NtfsError;
     type Dir = NtfsDirectory<'n>;
 
@@ -302,7 +308,7 @@ mod tests {
             FsDirEntry::<TestReader>::name_bytes(&entry),
             "child.txt"
                 .encode_utf16()
-                .flat_map(|c| c.to_le_bytes())
+                .flat_map(u16::to_le_bytes)
                 .collect::<Vec<u8>>()
         );
 

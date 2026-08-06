@@ -1,9 +1,9 @@
-use std::fs;
-use std::path::Path;
+//! Regression tests for malformed attribute-list fuzz artifacts.
 
 use fs_common::iter::FsTryIterator;
 use fs_ntfs::structured_values::NtfsAttributeList;
 use fs_ntfs::types::NtfsPosition;
+use fsmnt_testkit::read_required_fixture;
 
 /// Regression harness for libFuzzer timeouts found in `fuzz_ntfs_attribute_list`.
 ///
@@ -14,16 +14,11 @@ fn run_fuzz_ntfs_attribute_list_artifact(file_name: &str) {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
 
-    let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../crashes/libfuzzer/fuzz_ntfs_attribute_list")
-        .join(file_name);
-
-    if !artifact_path.exists() {
-        panic!("Artifact not found at {}.", artifact_path.display());
-    }
-
-    let data = fs::read(&artifact_path)
-        .expect("failed to read fuzz artifact for fuzz_ntfs_attribute_list");
+    let data = read_required_fixture(
+        env!("CARGO_MANIFEST_DIR"),
+        format!("../../crashes/libfuzzer/fuzz_ntfs_attribute_list/{file_name}"),
+        "Regenerate the fuzz_ntfs_attribute_list corpus with cargo-fuzz.",
+    );
 
     let pos = NtfsPosition::none();
 
@@ -43,13 +38,12 @@ fn run_fuzz_ntfs_attribute_list_artifact(file_name: &str) {
         let _ = entry.position();
         let _ = entry.base_file_reference();
         count += 1;
-        if count > 1000 {
-            panic!(
-                "Infinite loop detected: iterated {} times on a {}-byte input",
-                count,
-                data.len()
-            );
-        }
+        assert!(
+            count <= 1000,
+            "Infinite loop detected: iterated {} times on a {}-byte input",
+            count,
+            data.len()
+        );
     }
 }
 

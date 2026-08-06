@@ -3,29 +3,26 @@
 //! These tests run against APFS fixture images under `testdata/`. The
 //! images are not committed — generating them needs `mkapfs` and root (see
 //! `testdata/README.md`) — so each test loads its fixture lazily and skips
-//! silently when it is absent. A checkout without the fixtures still
+//! with a diagnostic when it is absent. A checkout without the fixtures still
 //! builds and passes `cargo test`; CI gains the coverage once the fixtures
 //! are generated.
 
 use std::io::Cursor;
-use std::path::PathBuf;
 
 /// Loads a fixture image from `testdata/`, or returns `None` (with a note)
 /// when it has not been generated.
 fn load_fixture(name: &str) -> Option<Cursor<Vec<u8>>> {
-    let path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "testdata", name]
-        .iter()
-        .collect();
-    match std::fs::read(&path) {
-        Ok(bytes) => Some(Cursor::new(bytes)),
-        Err(_) => {
-            eprintln!(
-                "skipping: APFS fixture {name} not present \
-                 (run crates/fs-apfs/testdata/gen-fixtures.sh)"
-            );
-            None
-        }
-    }
+    let bytes = fsmnt_testkit::read_optional_fixture(
+        env!("CARGO_MANIFEST_DIR"),
+        format!("testdata/{name}"),
+    );
+    bytes.map(Cursor::new).or_else(|| {
+        eprintln!(
+            "skipping: APFS fixture {name} not present \
+             (run crates/formats/fs-apfs/testdata/gen-fixtures.sh)"
+        );
+        None
+    })
 }
 
 #[test]

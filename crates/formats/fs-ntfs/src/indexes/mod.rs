@@ -24,6 +24,7 @@ use crate::types::NtfsPosition;
 /// [`NtfsIndex`]: crate::NtfsIndex
 /// [`NtfsIndexEntry`]: crate::NtfsIndexEntry
 pub trait NtfsIndexEntryType: Clone + fmt::Debug {
+    /// Key representation stored by this index-entry type.
     type KeyType: NtfsIndexEntryKey;
 }
 
@@ -42,13 +43,23 @@ pub trait NtfsIndexEntryKey: fmt::Debug + Sized {
     /// [`NtfsFileName`]: crate::structured_values::NtfsFileName
     type Ref<'a>: fmt::Debug;
 
+    /// Parses an owned key from its serialized index-entry bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the slice does not contain a valid key for this
+    /// index type.
     fn key_from_slice(slice: &[u8], position: NtfsPosition) -> Result<Self>;
 
     /// Constructs a borrowed key reference from a raw byte slice.
     ///
     /// For types where `Ref<'a> = Self`, use
     /// [`impl_fixed_size_key_ref!`] instead of implementing manually.
-    fn key_ref_from_slice<'a>(slice: &'a [u8], position: NtfsPosition) -> Result<Self::Ref<'a>>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index metadata is malformed or its allocation data cannot be read.
+    fn key_ref_from_slice(slice: &[u8], position: NtfsPosition) -> Result<Self::Ref<'_>>;
 }
 
 /// Implements the `Ref<'a> = Self` GAT and `key_ref_from_slice`
@@ -83,11 +94,18 @@ pub use security_id::*;
 /// This trait and [`NtfsIndexEntryHasFileReference`] are mutually exclusive.
 // TODO: Use negative trait bounds of future Rust to enforce mutual exclusion.
 pub trait NtfsIndexEntryHasData: NtfsIndexEntryType {
+    /// Additional payload representation stored after the entry key.
     type DataType: NtfsIndexEntryData;
 }
 
 /// Trait implemented by a structure that describes Index Entry data.
 pub trait NtfsIndexEntryData: fmt::Debug + Sized {
+    /// Parses index-entry payload data from its serialized bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the slice does not contain valid payload data
+    /// for this index type.
     fn data_from_slice(slice: &[u8], position: NtfsPosition) -> Result<Self>;
 }
 

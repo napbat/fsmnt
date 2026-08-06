@@ -47,26 +47,31 @@ impl IoError {
     }
 
     /// Creates an [`ErrorKind::Interrupted`] error.
+    #[must_use]
     pub const fn interrupted() -> Self {
         Self::new(ErrorKind::Interrupted)
     }
 
     /// Creates an [`ErrorKind::UnexpectedEof`] error.
+    #[must_use]
     pub const fn unexpected_eof() -> Self {
         Self::new(ErrorKind::UnexpectedEof)
     }
 
     /// Creates an [`ErrorKind::InvalidData`] error.
+    #[must_use]
     pub const fn invalid_data() -> Self {
         Self::new(ErrorKind::InvalidData)
     }
 
     /// Creates an [`ErrorKind::InvalidInput`] error.
+    #[must_use]
     pub const fn invalid_input() -> Self {
         Self::new(ErrorKind::InvalidInput)
     }
 
     /// Creates an [`ErrorKind::Other`] error.
+    #[must_use]
     pub const fn other() -> Self {
         Self::new(ErrorKind::Other)
     }

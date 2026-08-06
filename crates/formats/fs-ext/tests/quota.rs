@@ -4,21 +4,18 @@
 //! `mkfs.ext4 -O quota` plus a Python patcher that injects extra dqblk
 //! records into the user and group leaf blocks.
 
-mod common;
+mod support;
 
 use fs_ext::{Ext, ExtError, QuotaKind, QuotaRecord};
 
 const FIXTURE: &str = "ext4-quota.img";
 
 fn fixture_available(name: &str) -> bool {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata")
-        .join(name)
-        .exists()
+    fsmnt_testkit::fixture_path(env!("CARGO_MANIFEST_DIR"), format!("testdata/{name}")).exists()
 }
 
 fn collect_quota(name: &str, kind: QuotaKind) -> Vec<QuotaRecord> {
-    let (ext, mut fs) = common::open_ext(name);
+    let (ext, mut fs) = support::open_ext(name);
     ext.quota(&mut fs, kind)
         .expect("open quota tree")
         .map(|r| r.expect("decode record"))
@@ -31,7 +28,7 @@ fn fixture_exposes_all_three_quota_inums() {
         eprintln!("skipping: {FIXTURE} not generated");
         return;
     }
-    let (ext, _fs) = common::open_ext(FIXTURE);
+    let (ext, _fs) = support::open_ext(FIXTURE);
     assert_ne!(ext.usr_quota_inum(), 0);
     assert_ne!(ext.grp_quota_inum(), 0);
     assert_ne!(ext.prj_quota_inum(), 0);
@@ -122,8 +119,8 @@ fn quota_inum_zero_returns_empty_iterator_without_error() {
         return;
     }
     // Patch a copy of the fixture so s_usr_quota_inum is zeroed.
-    let mut fs = common::load_image(FIXTURE);
-    common::patch_superblock_u32(&mut fs, 0x240, 0);
+    let mut fs = support::load_image(FIXTURE);
+    support::patch_superblock_u32(&mut fs, 0x240, 0);
     let ext = Ext::open_lenient(&mut fs).expect("open lenient after sb patch");
     let records: Vec<_> = ext
         .quota(&mut fs, QuotaKind::User)
@@ -138,7 +135,7 @@ fn corrupt_magic_yields_structured_error() {
         eprintln!("skipping: {FIXTURE} not generated");
         return;
     }
-    let mut fs = common::load_image(FIXTURE);
+    let mut fs = support::load_image(FIXTURE);
     let usr_inum = {
         let buf = fs.get_ref();
         u32::from_le_bytes(buf[1024 + 0x240..1024 + 0x244].try_into().unwrap())
@@ -146,7 +143,8 @@ fn corrupt_magic_yields_structured_error() {
     let inode_offset = locate_inode_offset(fs.get_ref(), usr_inum);
     let extent_block = first_extent_block(fs.get_ref(), inode_offset);
     let block_size = block_size(fs.get_ref());
-    let magic_offset = (extent_block as usize) * (block_size as usize);
+    let magic_offset = usize::try_from(extent_block).expect("fixture extent block fits usize")
+        * usize::try_from(block_size).expect("fixture block size fits usize");
     {
         let buf = fs.get_mut();
         buf[magic_offset..magic_offset + 4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
@@ -171,19 +169,21 @@ fn corrupt_tree_pointer_yields_structured_error() {
         eprintln!("skipping: {FIXTURE} not generated");
         return;
     }
-    let mut fs = common::load_image(FIXTURE);
+    let mut fs = support::load_image(FIXTURE);
     let usr_inum = {
         let buf = fs.get_ref();
         u32::from_le_bytes(buf[1024 + 0x240..1024 + 0x244].try_into().unwrap())
     };
     let inode_offset = locate_inode_offset(fs.get_ref(), usr_inum);
     let extent_block = first_extent_block(fs.get_ref(), inode_offset);
-    let block_size = block_size(fs.get_ref()) as usize;
+    let block_size =
+        usize::try_from(block_size(fs.get_ref())).expect("fixture block size fits usize");
     // Quota block 1 lives in the first fs block of the data extent at
     // offset 1024 (since fs block size is 4096 and quota block is 1024).
     // Patch the first u32 of quota block 1 to point to an out-of-range
     // tree-block number.
-    let qblock1_off = (extent_block as usize) * block_size + 1024;
+    let qblock1_off =
+        usize::try_from(extent_block).expect("fixture extent block fits usize") * block_size + 1024;
     {
         let buf = fs.get_mut();
         buf[qblock1_off..qblock1_off + 4].copy_from_slice(&999u32.to_le_bytes());
@@ -210,20 +210,23 @@ fn block_size(buf: &[u8]) -> u32 {
 fn locate_inode_offset(buf: &[u8], inum: u32) -> usize {
     let inodes_per_group = u32::from_le_bytes(buf[1024 + 0x28..1024 + 0x2C].try_into().unwrap());
     let inode_size = u16::from_le_bytes(buf[1024 + 0x58..1024 + 0x5A].try_into().unwrap());
-    let bs = block_size(buf) as usize;
+    let bs = usize::try_from(block_size(buf)).expect("fixture block size fits usize");
     let group = (inum - 1) / inodes_per_group;
     let index_in_group = (inum - 1) % inodes_per_group;
     let incompat = u32::from_le_bytes(buf[1024 + 0x60..1024 + 0x64].try_into().unwrap());
     let desc_size = if (incompat & 0x80) != 0 { 64 } else { 32 };
     let first_data_block = u32::from_le_bytes(buf[1024 + 0x14..1024 + 0x18].try_into().unwrap());
-    let gdt_block_base = (first_data_block + 1) as usize * bs;
-    let gdt_offset = group as usize * desc_size;
+    let gdt_block_base =
+        usize::try_from(first_data_block + 1).expect("fixture GDT block fits usize") * bs;
+    let gdt_offset = usize::try_from(group).expect("fixture group fits usize") * desc_size;
     let inode_table_lo = u32::from_le_bytes(
         buf[gdt_block_base + gdt_offset + 8..gdt_block_base + gdt_offset + 12]
             .try_into()
             .unwrap(),
     );
-    inode_table_lo as usize * bs + index_in_group as usize * inode_size as usize
+    usize::try_from(inode_table_lo).expect("fixture inode-table block fits usize") * bs
+        + usize::try_from(index_in_group).expect("fixture inode index fits usize")
+            * usize::from(inode_size)
 }
 
 fn first_extent_block(buf: &[u8], inode_off: usize) -> u64 {
@@ -235,5 +238,5 @@ fn first_extent_block(buf: &[u8], inode_off: usize) -> u64 {
     assert_eq!(depth, 0, "expected single-extent inode for quota tree");
     let ee_start_hi = u16::from_le_bytes(i_block[12 + 6..12 + 8].try_into().unwrap());
     let ee_start_lo = u32::from_le_bytes(i_block[12 + 8..12 + 12].try_into().unwrap());
-    ((ee_start_hi as u64) << 32) | ee_start_lo as u64
+    (u64::from(ee_start_hi) << 32) | u64::from(ee_start_lo)
 }

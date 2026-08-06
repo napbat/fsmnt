@@ -1,7 +1,6 @@
 use core::mem;
 
 use arrayvec::ArrayVec;
-use enumn::N;
 use nt_string::u16strle::U16StrLe;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LittleEndian, U32, U64, Unaligned};
 
@@ -18,13 +17,15 @@ use crate::types::NtfsPosition;
 
 /// Size of all [`FileNameHeader`] fields.
 const FILE_NAME_HEADER_SIZE: usize = 66;
+const FILE_NAME_HEADER_SIZE_U64: u64 = 66;
 
-/// The smallest FileName attribute has a name containing just a single character.
+/// The smallest `FileName` attribute has a name containing just a single character.
 const FILE_NAME_MIN_SIZE: usize = FILE_NAME_HEADER_SIZE + mem::size_of::<u16>();
+const FILE_NAME_MIN_SIZE_U64: u64 = 68;
 
-/// The "name" stored in the FileName attribute has an `u8` length field specifying the number of UTF-16 code points.
+/// The "name" stored in the `FileName` attribute has an `u8` length field specifying the number of UTF-16 code points.
 /// Hence, the name occupies up to 510 bytes.
-const NAME_MAX_SIZE: usize = (u8::MAX as usize) * mem::size_of::<u16>();
+const NAME_MAX_SIZE: usize = 255 * mem::size_of::<u16>();
 
 #[derive(Clone, Debug, FromBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C, packed)]
@@ -45,7 +46,7 @@ struct FileNameHeader {
 /// Character set constraint of the filename, returned by [`NtfsFileName::namespace`].
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/concepts/filename_namespace.html>
-#[derive(Clone, Copy, Debug, Eq, N, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum NtfsFileNamespace {
     /// A POSIX-compatible filename, which is case-sensitive and supports all Unicode
@@ -58,11 +59,35 @@ pub enum NtfsFileNamespace {
     /// that consists entirely of printable ASCII characters (except for " * < > ? \ | / : ; . , + = [ ]).
     Dos = 2,
     /// A Windows filename that also fulfills all requirements of an MS-DOS 8+3 filename (minus the
-    /// uppercase requirement), and therefore only got a single $FILE_NAME record with this name.
+    /// uppercase requirement), and therefore only got a single $`FILE_NAME` record with this name.
     Win32AndDos = 3,
 }
 
 impl NtfsFileNamespace {
+    /// Converts an on-disk namespace byte into a known filename namespace.
+    ///
+    /// Returns `None` for reserved namespace values.
+    #[must_use]
+    pub fn n(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Posix),
+            1 => Some(Self::Win32),
+            2 => Some(Self::Dos),
+            3 => Some(Self::Win32AndDos),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    const fn on_disk_value(self) -> u8 {
+        match self {
+            Self::Posix => 0,
+            Self::Win32 => 1,
+            Self::Dos => 2,
+            Self::Win32AndDos => 3,
+        }
+    }
+
     /// Returns `true` if this is a "long" name namespace ([`Win32`] or [`Posix`]).
     ///
     /// These are the primary display names for a file. A file with a long name typically
@@ -71,6 +96,7 @@ impl NtfsFileNamespace {
     /// [`Win32`]: NtfsFileNamespace::Win32
     /// [`Posix`]: NtfsFileNamespace::Posix
     /// [`Dos`]: NtfsFileNamespace::Dos
+    #[must_use]
     pub fn is_long(&self) -> bool {
         matches!(self, Self::Win32 | Self::Posix)
     }
@@ -79,6 +105,7 @@ impl NtfsFileNamespace {
     ///
     /// [`Dos`]: NtfsFileNamespace::Dos
     /// [`Win32AndDos`]: NtfsFileNamespace::Win32AndDos
+    #[must_use]
     pub fn is_dos_compatible(&self) -> bool {
         matches!(self, Self::Dos | Self::Win32AndDos)
     }
@@ -87,8 +114,19 @@ impl NtfsFileNamespace {
     /// both Win32 and DOS constraints, so only a single `$FILE_NAME` attribute is stored.
     ///
     /// [`Win32AndDos`]: NtfsFileNamespace::Win32AndDos
+    #[must_use]
     pub fn is_combined(&self) -> bool {
         matches!(self, Self::Win32AndDos)
+    }
+}
+
+fn validated_namespace(value: u8) -> NtfsFileNamespace {
+    match value {
+        0 => NtfsFileNamespace::Posix,
+        1 => NtfsFileNamespace::Win32,
+        2 => NtfsFileNamespace::Dos,
+        3 => NtfsFileNamespace::Win32AndDos,
+        _ => unreachable!("file-name constructors validate the namespace byte"),
     }
 }
 
@@ -106,18 +144,18 @@ impl<'a> arbitrary::Arbitrary<'a> for NtfsFileNamespace {
     }
 }
 
-/// Structure of a $FILE_NAME attribute.
+/// Structure of a $`FILE_NAME` attribute.
 ///
-/// NTFS creates a $FILE_NAME attribute for every hard link.
+/// NTFS creates a $`FILE_NAME` attribute for every hard link.
 /// Its valuable information is the actual file name and whether this file represents a directory.
-/// Apart from that, it duplicates several fields of $STANDARD_INFORMATION, but these are only updated when the file name changes.
+/// Apart from that, it duplicates several fields of $`STANDARD_INFORMATION`, but these are only updated when the file name changes.
 /// You usually want to use the corresponding fields from [`NtfsStandardInformation`] instead.
 ///
-/// A $FILE_NAME attribute can be resident or non-resident.
+/// A $`FILE_NAME` attribute can be resident or non-resident.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/attributes/file_name.html>
 ///
-/// Spec reference: MS-FSCC Section 2.4.7 (FileBasicInformation) for timestamps; Section 2.1.5 (Pathname) for name formats.
+/// Spec reference: MS-FSCC Section 2.4.7 (`FileBasicInformation`) for timestamps; Section 2.1.5 (Pathname) for name formats.
 ///
 /// [`NtfsStandardInformation`]: crate::structured_values::NtfsStandardInformation
 #[derive(Clone, Debug)]
@@ -131,11 +169,11 @@ impl NtfsFileName {
     where
         T: Read,
     {
-        if value_length < FILE_NAME_MIN_SIZE as u64 {
+        if value_length < FILE_NAME_MIN_SIZE_U64 {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::FileName,
-                expected: FILE_NAME_MIN_SIZE as u64,
+                expected: FILE_NAME_MIN_SIZE_U64,
                 actual: value_length,
             });
         }
@@ -153,12 +191,13 @@ impl NtfsFileName {
         Ok(file_name)
     }
 
-    /// Returns the last access time stored in this $FILE_NAME record.
+    /// Returns the last access time stored in this $`FILE_NAME` record.
     ///
     /// **Note that NTFS only updates it when the file name is changed!**
     /// Check [`NtfsStandardInformation::access_time`] for a last access time that is always up to date.
     ///
     /// [`NtfsStandardInformation::access_time`]: crate::structured_values::NtfsStandardInformation::access_time
+    #[must_use]
     pub fn access_time(&self) -> NtfsTime {
         self.header.access_time
     }
@@ -179,16 +218,18 @@ impl NtfsFileName {
     /// [`NtfsAttribute::value`]: crate::NtfsAttribute::value
     /// [`NtfsDataRun::allocated_size`]: crate::attribute_value::NtfsDataRun::allocated_size
     /// [`NtfsFile::data`]: crate::NtfsFile::data
+    #[must_use]
     pub fn allocated_size(&self) -> u64 {
         self.header.allocated_size.get()
     }
 
-    /// Returns the creation time stored in this $FILE_NAME record.
+    /// Returns the creation time stored in this $`FILE_NAME` record.
     ///
     /// **Note that NTFS only updates it when the file name is changed!**
     /// Check [`NtfsStandardInformation::creation_time`] for a creation time that is always up to date.
     ///
     /// [`NtfsStandardInformation::creation_time`]: crate::structured_values::NtfsStandardInformation::creation_time
+    #[must_use]
     pub fn creation_time(&self) -> NtfsTime {
         self.header.creation_time
     }
@@ -209,6 +250,7 @@ impl NtfsFileName {
     /// [`NtfsAttribute`]: crate::attribute::NtfsAttribute
     /// [`NtfsAttribute::value`]: crate::attribute::NtfsAttribute::value
     /// [`NtfsFile::data`]: crate::file::NtfsFile::data
+    #[must_use]
     pub fn data_size(&self) -> u64 {
         self.header.data_size.get()
     }
@@ -220,55 +262,62 @@ impl NtfsFileName {
     /// Check [`NtfsStandardInformation::file_attributes`] for file attributes that are always up to date.
     ///
     /// [`NtfsStandardInformation::file_attributes`]: crate::structured_values::NtfsStandardInformation::file_attributes
+    #[must_use]
     pub fn file_attributes(&self) -> NtfsFileAttributeFlags {
         NtfsFileAttributeFlags::from_bits_truncate(self.header.file_attributes.get())
     }
 
     /// Returns whether this file is a directory.
+    #[must_use]
     pub fn is_directory(&self) -> bool {
         self.file_attributes()
             .contains(NtfsFileAttributeFlags::IS_DIRECTORY)
     }
 
-    /// Returns the MFT record modification time stored in this $FILE_NAME record.
+    /// Returns the MFT record modification time stored in this $`FILE_NAME` record.
     ///
     /// **Note that NTFS only updates it when the file name is changed!**
     /// Check [`NtfsStandardInformation::mft_record_modification_time`] for an MFT record modification time that is always up to date.
     ///
     /// [`NtfsStandardInformation::mft_record_modification_time`]: crate::structured_values::NtfsStandardInformation::mft_record_modification_time
+    #[must_use]
     pub fn mft_record_modification_time(&self) -> NtfsTime {
         self.header.mft_record_modification_time
     }
 
-    /// Returns the modification time stored in this $FILE_NAME record.
+    /// Returns the modification time stored in this $`FILE_NAME` record.
     ///
     /// **Note that NTFS only updates it when the file name is changed!**
     /// Check [`NtfsStandardInformation::modification_time`] for a modification time that is always up to date.
     ///
     /// [`NtfsStandardInformation::modification_time`]: crate::structured_values::NtfsStandardInformation::modification_time
+    #[must_use]
     pub fn modification_time(&self) -> NtfsTime {
         self.header.modification_time
     }
 
     /// Gets the file name and returns it wrapped in a [`U16StrLe`].
-    pub fn name<'a>(&'a self) -> U16StrLe<'a> {
+    #[must_use]
+    pub fn name(&self) -> U16StrLe<'_> {
         U16StrLe(&self.name)
     }
 
     /// Returns the file name length, in bytes.
     ///
     /// A file name has a maximum length of 255 UTF-16 code points (510 bytes).
+    #[must_use]
     pub fn name_length(&self) -> usize {
-        self.header.name_length as usize * mem::size_of::<u16>()
+        usize::from(self.header.name_length) * mem::size_of::<u16>()
     }
 
     /// Returns the [`NtfsFileNamespace`] of this file name.
+    #[must_use]
     pub fn namespace(&self) -> NtfsFileNamespace {
-        // Namespace was validated in key_from_slice (bounded 0..=3).
-        NtfsFileNamespace::n(self.header.namespace).unwrap()
+        validated_namespace(self.header.namespace)
     }
 
     /// Returns an [`NtfsFileReference`] for the directory where this file is located.
+    #[must_use]
     pub fn parent_directory_reference(&self) -> NtfsFileReference {
         self.header.parent_directory_reference
     }
@@ -278,6 +327,7 @@ impl NtfsFileName {
     /// Returns 0 if this file is not a reparse point.
     /// Check [`NtfsFileAttributeFlags::REPARSE_POINT`] in [`file_attributes`](Self::file_attributes)
     /// to determine if this file is a reparse point.
+    #[must_use]
     pub fn reparse_point_tag(&self) -> u32 {
         self.header.reparse_point_tag.get()
     }
@@ -291,7 +341,8 @@ impl NtfsFileName {
     }
 
     fn validate_name_length(&self, data_size: u64, position: NtfsPosition) -> Result<()> {
-        let total_size = (FILE_NAME_HEADER_SIZE + self.name_length()) as u64;
+        let total_size =
+            u64::try_from(FILE_NAME_HEADER_SIZE + self.name_length()).unwrap_or(u64::MAX);
 
         if total_size > data_size {
             return Err(NtfsError::InvalidStructuredValueSize {
@@ -325,7 +376,12 @@ impl NtfsFileName {
     pub(crate) fn from_bytes_for_test(data: &[u8]) -> Self {
         let position = NtfsPosition::none();
         let mut cursor = ReadOnlyCursor::new(data);
-        Self::new(&mut cursor, position, data.len() as u64).expect("test FN construction failed")
+        Self::new(
+            &mut cursor,
+            position,
+            u64::try_from(data.len()).expect("test file-name data length fits u64"),
+        )
+        .expect("test FN construction failed")
     }
 }
 
@@ -352,13 +408,19 @@ pub struct NtfsFileNameRef<'a> {
 
 impl<'a> NtfsFileNameRef<'a> {
     /// Constructs a borrowed file name view from a raw byte slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the fixed header or name is truncated, or if the
+    /// namespace byte is unsupported.
     pub fn from_slice(slice: &'a [u8], position: NtfsPosition) -> Result<Self> {
+        let slice_length = u64::try_from(slice.len()).unwrap_or(u64::MAX);
         if slice.len() < FILE_NAME_MIN_SIZE {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::FileName,
-                expected: FILE_NAME_MIN_SIZE as u64,
-                actual: slice.len() as u64,
+                expected: FILE_NAME_MIN_SIZE_U64,
+                actual: slice_length,
             });
         }
 
@@ -366,8 +428,8 @@ impl<'a> NtfsFileNameRef<'a> {
             NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::FileName,
-                expected: FILE_NAME_HEADER_SIZE as u64,
-                actual: slice.len() as u64,
+                expected: FILE_NAME_HEADER_SIZE_U64,
+                actual: slice_length,
             }
         })?;
 
@@ -379,13 +441,13 @@ impl<'a> NtfsFileNameRef<'a> {
             });
         }
 
-        let name_len = header.name_length as usize * mem::size_of::<u16>();
+        let name_len = usize::from(header.name_length) * mem::size_of::<u16>();
         if name_len < mem::size_of::<u16>() || name_len > remainder.len() {
             return Err(NtfsError::InvalidStructuredValueSize {
                 position,
                 ty: NtfsAttributeType::FileName,
-                expected: (FILE_NAME_HEADER_SIZE + name_len) as u64,
-                actual: slice.len() as u64,
+                expected: u64::try_from(FILE_NAME_HEADER_SIZE + name_len).unwrap_or(u64::MAX),
+                actual: slice_length,
             });
         }
 
@@ -394,38 +456,44 @@ impl<'a> NtfsFileNameRef<'a> {
     }
 
     /// Gets the file name and returns it wrapped in a [`U16StrLe`].
+    #[must_use]
     pub fn name(&self) -> U16StrLe<'a> {
         U16StrLe(self.name)
     }
 
     /// Returns the file name length, in bytes.
+    #[must_use]
     pub fn name_length(&self) -> usize {
-        self.header.name_length as usize * mem::size_of::<u16>()
+        usize::from(self.header.name_length) * mem::size_of::<u16>()
     }
 
     /// Returns the [`NtfsFileNamespace`] of this file name.
+    #[must_use]
     pub fn namespace(&self) -> NtfsFileNamespace {
-        // Namespace was validated in from_slice (bounded 0..=3).
-        NtfsFileNamespace::n(self.header.namespace).unwrap()
+        validated_namespace(self.header.namespace)
     }
 
     /// Returns whether this file is a directory.
+    #[must_use]
     pub fn is_directory(&self) -> bool {
         self.file_attributes()
             .contains(NtfsFileAttributeFlags::IS_DIRECTORY)
     }
 
     /// Returns flags that a user can set for a file.
+    #[must_use]
     pub fn file_attributes(&self) -> NtfsFileAttributeFlags {
         NtfsFileAttributeFlags::from_bits_truncate(self.header.file_attributes.get())
     }
 
     /// Returns an [`NtfsFileReference`] for the parent directory.
+    #[must_use]
     pub fn parent_directory_reference(&self) -> NtfsFileReference {
         self.header.parent_directory_reference
     }
 
     /// Returns the raw UTF-16LE name bytes.
+    #[must_use]
     pub fn name_bytes(&self) -> &'a [u8] {
         self.name
     }
@@ -436,59 +504,26 @@ impl NtfsIndexEntryKey for NtfsFileName {
     type Ref<'a> = NtfsFileNameRef<'a>;
 
     fn key_from_slice(slice: &[u8], position: NtfsPosition) -> Result<Self> {
-        let value_length = slice.len() as u64;
+        let value_length = u64::try_from(slice.len()).unwrap_or(u64::MAX);
 
         let mut cursor = ReadOnlyCursor::new(slice);
         Self::new(&mut cursor, position, value_length)
     }
 
-    fn key_ref_from_slice<'a>(
-        slice: &'a [u8],
-        position: NtfsPosition,
-    ) -> Result<NtfsFileNameRef<'a>> {
+    fn key_ref_from_slice(slice: &[u8], position: NtfsPosition) -> Result<NtfsFileNameRef<'_>> {
         NtfsFileNameRef::from_slice(slice, position)
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<'a> arbitrary::Arbitrary<'a> for NtfsFileName {
-    // mutants::skip: the `NAME_MAX_SIZE / 2` clamp upper bound equals 255,
-    // which is also u8::MAX — the maximum value `header.name_length` (a u8) can
-    // hold. Mutating `/` to `*` raises the bound to 1020, but the clamp can
-    // never reach it, so the result is identical for every input: a provably
-    // equivalent mutant. The other arithmetic in this fn (`%= 4`,
-    // `name_chars * size_of::<u16>()`) is exercised by
-    // test_file_name_arbitrary_clamps_name_length.
-    #[cfg_attr(test, mutants::skip)]
-    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let header_bytes: [u8; FILE_NAME_HEADER_SIZE] = u.arbitrary()?;
-        let mut header = FileNameHeader::read_from_bytes(&header_bytes)
-            .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+mod arbitrary_impl;
 
-        // Clamp namespace to valid range (0-3)
-        header.namespace %= 4;
-
-        // Generate a name of the length specified in the header (clamped to valid range)
-        let name_chars = (header.name_length as usize).clamp(1, NAME_MAX_SIZE / 2);
-        header.name_length = name_chars as u8;
-        let name_len = name_chars * core::mem::size_of::<u16>();
-
-        let mut name = ArrayVec::new();
-        for _ in 0..name_len {
-            name.push(u.arbitrary()?);
-        }
-
-        Ok(Self { header, name })
-    }
-}
+#[cfg(test)]
+mod fixture_tests;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::KnownNtfsFileRecordNumber;
-    use crate::ntfs::Ntfs;
-    use crate::time::tests::NT_TIMESTAMP_2021_01_01;
-    use fs_common::iter::FsTryIterator;
 
     #[test]
     fn test_namespace_is_long() {
@@ -515,146 +550,6 @@ mod tests {
     }
 
     #[test]
-    fn test_file_name() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
-        let mut mft_attributes = mft.attributes_raw();
-
-        // Check the FileName attribute of the MFT.
-        let attribute = mft_attributes.nth(1).unwrap().unwrap();
-        assert_eq!(attribute.ty().unwrap(), NtfsAttributeType::FileName);
-        assert_eq!(attribute.attribute_length(), 104);
-        assert!(attribute.is_resident());
-        assert_eq!(attribute.name_length(), 0);
-        assert_eq!(attribute.value_length(), 74);
-
-        // Check the actual "file name" of the MFT.
-        let file_name = attribute
-            .structured_value::<_, NtfsFileName>(&mut testfs1)
-            .unwrap();
-
-        let creation_time = file_name.creation_time();
-        assert!(creation_time.nt_timestamp() > NT_TIMESTAMP_2021_01_01);
-        assert_eq!(creation_time, file_name.modification_time());
-        assert_eq!(creation_time, file_name.mft_record_modification_time());
-        assert_eq!(creation_time, file_name.access_time());
-
-        let allocated_size = file_name.allocated_size();
-        assert!(allocated_size > 0);
-        assert_eq!(allocated_size, file_name.data_size());
-
-        assert_eq!(file_name.name_length(), 8);
-
-        // Test various ways to compare the same string.
-        assert_eq!(file_name.name(), "$MFT");
-        assert_eq!(file_name.name().to_string_lossy(), String::from("$MFT"));
-        assert_eq!(
-            file_name.name(),
-            U16StrLe(&[b'$', 0, b'M', 0, b'F', 0, b'T', 0])
-        );
-    }
-
-    #[test]
-    fn test_parent_directory_reference() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let ntfs = Ntfs::new(&mut testfs1).unwrap();
-
-        // $MFT's parent directory reference should point to the root directory (record 5).
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
-        let mut mft_attributes = mft.attributes_raw();
-        let attribute = mft_attributes.nth(1).unwrap().unwrap();
-        let file_name = attribute
-            .structured_value::<_, NtfsFileName>(&mut testfs1)
-            .unwrap();
-
-        let parent_ref = file_name.parent_directory_reference();
-        assert_eq!(
-            parent_ref.file_record_number(),
-            KnownNtfsFileRecordNumber::RootDirectory as u64
-        );
-    }
-
-    #[test]
-    fn test_file_name_namespace_of_system_files() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let ntfs = Ntfs::new(&mut testfs1).unwrap();
-
-        // System files like $MFT typically use Win32AndDos namespace.
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
-        let mut mft_attributes = mft.attributes_raw();
-        let attribute = mft_attributes.nth(1).unwrap().unwrap();
-        let file_name = attribute
-            .structured_value::<_, NtfsFileName>(&mut testfs1)
-            .unwrap();
-
-        let ns = file_name.namespace();
-        // $MFT's name fits in 8.3 format, so it's typically Win32AndDos.
-        assert!(
-            ns == NtfsFileNamespace::Win32AndDos || ns == NtfsFileNamespace::Win32,
-            "unexpected namespace: {ns:?}"
-        );
-    }
-
-    #[test]
-    fn test_file_name_directory_flag() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let mut ntfs = Ntfs::new(&mut testfs1).unwrap();
-        ntfs.read_upcase_table(&mut testfs1).unwrap();
-
-        let root_dir = ntfs.root_directory(&mut testfs1).unwrap();
-        let root_dir_index = root_dir.directory_index(&mut testfs1).unwrap();
-        let mut entries = root_dir_index.entries();
-
-        // Iterate entries and check that directories have the IS_DIRECTORY flag
-        // in their $FILE_NAME attributes.
-        while let Some(entry) = entries.try_next(&mut testfs1).unwrap() {
-            if let Some(Ok(file_name)) = entry.key() {
-                let is_dir = file_name.is_directory();
-                let attrs = file_name.file_attributes();
-                assert_eq!(
-                    is_dir,
-                    attrs.contains(super::super::NtfsFileAttributeFlags::IS_DIRECTORY),
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_file_name_reparse_point_tag() {
-        let Some(mut testfs1) = crate::helpers::tests::testfs1() else {
-            return;
-        };
-        let ntfs = Ntfs::new(&mut testfs1).unwrap();
-
-        // Regular files should have reparse_point_tag == 0.
-        let mft = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::MFT as u64)
-            .unwrap();
-        let mut mft_attributes = mft.attributes_raw();
-        let attribute = mft_attributes.nth(1).unwrap().unwrap();
-        let file_name = attribute
-            .structured_value::<_, NtfsFileName>(&mut testfs1)
-            .unwrap();
-
-        assert_eq!(file_name.reparse_point_tag(), 0);
-    }
-
-    #[test]
     fn file_name_ref_from_raw_bytes() {
         // Build a minimal $FILE_NAME structure:
         //   FileNameHeader (66 bytes) + UTF-16LE name "AB" (4 bytes)
@@ -674,7 +569,7 @@ mod tests {
         // name_length at offset 64
         buf[64] = 2; // 2 UTF-16 code units
         // namespace at offset 65
-        buf[65] = NtfsFileNamespace::Win32 as u8;
+        buf[65] = NtfsFileNamespace::Win32.on_disk_value();
 
         // UTF-16LE name "AB" at offset 66
         buf[66] = b'A';
@@ -712,14 +607,14 @@ mod tests {
 
     /// Builds a `$FILE_NAME` attribute byte buffer for synthetic tests.
     ///
-    /// Layout (MS-FSCC 2.4.7-style $FILE_NAME):
-    /// - 0..8   parent_directory_reference
+    /// Layout (MS-FSCC 2.4.7-style $`FILE_NAME)`:
+    /// - 0..8   `parent_directory_reference`
     /// - 8..40  four 8-byte NTFS timestamps (left zero)
-    /// - 40..48 allocated_size
-    /// - 48..56 data_size
-    /// - 56..60 file_attributes
-    /// - 60..64 reparse_point_tag
-    /// - 64     name_length (UTF-16 code units)
+    /// - 40..48 `allocated_size`
+    /// - 48..56 `data_size`
+    /// - 56..60 `file_attributes`
+    /// - 60..64 `reparse_point_tag`
+    /// - 64     `name_length` (UTF-16 code units)
     /// - 65     namespace
     /// - 66..   UTF-16LE name
     fn build_file_name(
@@ -738,7 +633,7 @@ mod tests {
         buf[48..56].copy_from_slice(&data_size.to_le_bytes());
         buf[56..60].copy_from_slice(&file_attributes.to_le_bytes());
         buf[60..64].copy_from_slice(&reparse_tag.to_le_bytes());
-        buf[64] = name_units.len() as u8;
+        buf[64] = u8::try_from(name_units.len()).expect("test value fits u8");
         buf[65] = namespace;
         for unit in &name_units {
             buf.extend_from_slice(&unit.to_le_bytes());
@@ -755,7 +650,7 @@ mod tests {
             0x0AAA_BBBB_CCCC_DDDD,
             0x1000_0000, // IS_DIRECTORY
             0xDEAD_BEEF, // reparse_point_tag
-            NtfsFileNamespace::Win32 as u8,
+            NtfsFileNamespace::Win32.on_disk_value(),
             "hi",
         );
         let fname = NtfsFileName::from_bytes_for_test(&buf);
@@ -786,7 +681,15 @@ mod tests {
     fn test_file_name_length_three_units() {
         // 3 code units * 2 = 6 bytes. Distinguishes name_length from 0/1 and
         // pins the `* size_of::<u16>()` multiply (vs / which would give 1).
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Posix as u8, "abc");
+        let buf = build_file_name(
+            5,
+            0,
+            0,
+            0,
+            0,
+            NtfsFileNamespace::Posix.on_disk_value(),
+            "abc",
+        );
         let fname = NtfsFileName::from_bytes_for_test(&buf);
         assert_eq!(fname.name_length(), 6);
         assert_eq!(fname.name(), "abc");
@@ -802,7 +705,15 @@ mod tests {
         // would SUCCEED if validation were skipped, so a
         // `validate_name_length -> Ok(())` mutant would let parsing succeed.
         // This kills both the `-> Ok(())` mutant and the `> -> <` boundary.
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "ABCD");
+        let buf = build_file_name(
+            5,
+            0,
+            0,
+            0,
+            0,
+            NtfsFileNamespace::Win32.on_disk_value(),
+            "ABCD",
+        );
         assert_eq!(buf.len(), FILE_NAME_HEADER_SIZE + 8);
         let position = NtfsPosition::none();
         let mut cursor = ReadOnlyCursor::new(&buf);
@@ -820,7 +731,7 @@ mod tests {
         // value_length (100). The original `>` is false -> accepted. A `> -> <`
         // mutant would see `68 < 100` true -> reject, so a successful parse
         // here kills `> -> <`. The buffer holds the 1-code-unit name.
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "Z");
+        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32.on_disk_value(), "Z");
         let position = NtfsPosition::none();
         let mut cursor = ReadOnlyCursor::new(&buf);
         let fname = NtfsFileName::new(&mut cursor, position, 100).unwrap();
@@ -832,7 +743,7 @@ mod tests {
     fn test_file_name_validate_length_accepts_exact_fit() {
         // The minimal valid case: header + exactly the declared name bytes,
         // total_size == data_size. Boundary for `total_size > data_size`.
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "Z");
+        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32.on_disk_value(), "Z");
         // value_length is exactly header + 2 bytes for one code unit.
         assert_eq!(buf.len(), FILE_NAME_HEADER_SIZE + 2);
         let fname = NtfsFileName::from_bytes_for_test(&buf);
@@ -847,7 +758,11 @@ mod tests {
         buf[65] = 5;
         let position = NtfsPosition::none();
         let mut cursor = ReadOnlyCursor::new(&buf);
-        let result = NtfsFileName::new(&mut cursor, position, buf.len() as u64);
+        let result = NtfsFileName::new(
+            &mut cursor,
+            position,
+            u64::try_from(buf.len()).expect("test buffer length fits u64"),
+        );
         assert!(matches!(
             result,
             Err(NtfsError::UnsupportedFileNamespace { actual: 5, .. })
@@ -861,7 +776,15 @@ mod tests {
         // the backing ArrayVec too small and panic; the genuine constant
         // (255 * 2 = 510) accommodates it.
         let name: String = std::iter::repeat_n('a', 200).collect();
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Posix as u8, &name);
+        let buf = build_file_name(
+            5,
+            0,
+            0,
+            0,
+            0,
+            NtfsFileNamespace::Posix.on_disk_value(),
+            &name,
+        );
         let fname = NtfsFileName::from_bytes_for_test(&buf);
         assert_eq!(fname.name_length(), 400);
         assert_eq!(fname.name().to_string_lossy().len(), 200);
@@ -876,7 +799,7 @@ mod tests {
             0,
             0x0000_0020,
             0,
-            NtfsFileNamespace::Win32 as u8,
+            NtfsFileNamespace::Win32.on_disk_value(),
             "AB",
         );
         let r = NtfsFileNameRef::from_slice(&buf, NtfsPosition::none()).unwrap();
@@ -888,7 +811,15 @@ mod tests {
         // name_bytes returns the genuine UTF-16LE slice (not empty / [0] / [1]).
         // Use a 3-code-unit name so name_length is 3 * 2 = 6, distinct from
         // 3 + 2 = 5 and 3 / 2 = 1 — pinning the `* size_of::<u16>()` multiply.
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "ABC");
+        let buf = build_file_name(
+            5,
+            0,
+            0,
+            0,
+            0,
+            NtfsFileNamespace::Win32.on_disk_value(),
+            "ABC",
+        );
         let r = NtfsFileNameRef::from_slice(&buf, NtfsPosition::none()).unwrap();
         assert_eq!(r.name_bytes(), &[b'A', 0, b'B', 0, b'C', 0]);
         assert_eq!(r.name_length(), 6);
@@ -898,7 +829,7 @@ mod tests {
     fn test_file_name_ref_rejects_zero_name_length() {
         // name_length = 0 -> name_len (0) < size_of::<u16>() (2), rejected.
         // Pins the `name_len < mem::size_of::<u16>()` lower-bound check.
-        let mut buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "A");
+        let mut buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32.on_disk_value(), "A");
         buf[64] = 0; // zero code units
         let result = NtfsFileNameRef::from_slice(&buf, NtfsPosition::none());
         assert!(result.is_err());
@@ -910,12 +841,24 @@ mod tests {
         // Pins `name_len > remainder.len()`. The error's `expected` field is
         // FILE_NAME_HEADER_SIZE + name_len = 66 + 200 = 266; asserting it
         // exactly kills the `+ -> *` mutation (which would compute 66 * 200).
-        let mut buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "AB");
+        let mut buf = build_file_name(
+            5,
+            0,
+            0,
+            0,
+            0,
+            NtfsFileNamespace::Win32.on_disk_value(),
+            "AB",
+        );
         buf[64] = 100; // 100 code units = 200 bytes, far past the 4-byte name
         let result = NtfsFileNameRef::from_slice(&buf, NtfsPosition::none());
         match result {
             Err(NtfsError::InvalidStructuredValueSize { expected, .. }) => {
-                assert_eq!(expected, (FILE_NAME_HEADER_SIZE + 200) as u64);
+                assert_eq!(
+                    expected,
+                    u64::try_from(FILE_NAME_HEADER_SIZE + 200)
+                        .expect("test expected size fits u64")
+                );
             }
             other => panic!("expected InvalidStructuredValueSize, got {other:?}"),
         }
@@ -925,7 +868,7 @@ mod tests {
     fn test_file_name_ref_exact_min_size_accepted() {
         // slice.len() == FILE_NAME_MIN_SIZE must be accepted (boundary for
         // `slice.len() < FILE_NAME_MIN_SIZE`).
-        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32 as u8, "A");
+        let buf = build_file_name(5, 0, 0, 0, 0, NtfsFileNamespace::Win32.on_disk_value(), "A");
         assert_eq!(buf.len(), FILE_NAME_MIN_SIZE);
         let r = NtfsFileNameRef::from_slice(&buf, NtfsPosition::none()).unwrap();
         assert_eq!(r.name(), "A");

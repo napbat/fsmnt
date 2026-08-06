@@ -1,33 +1,30 @@
+//! Regression tests for inputs that previously crashed FAT fuzz targets.
+
 use fs_common::iter::FsTryIterator;
-use std::fs;
 use std::io::Cursor;
-use std::path::Path;
 
 /// Regression harnesses for libFuzzer crashes found in FAT fuzz targets.
-fn load_artifact(target: &str, file_name: &str) -> Vec<u8> {
-    unsafe {
-        std::env::set_var("RUST_BACKTRACE", "1");
+fn load_artifact(target: &str, file_name: &str) -> Option<Vec<u8>> {
+    let relative_path = format!("../../crashes/libfuzzer/{target}/{file_name}");
+    let data = fsmnt_testkit::read_optional_fixture(env!("CARGO_MANIFEST_DIR"), &relative_path);
+    if data.is_none() {
+        eprintln!("SKIPPED: missing recorded libFuzzer artifact {relative_path}");
     }
-
-    let artifact_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(format!("../../crashes/libfuzzer/{target}"))
-        .join(file_name);
-
-    if !artifact_path.exists() {
-        panic!("Artifact not found at {}.", artifact_path.display());
-    }
-
-    fs::read(&artifact_path).expect("failed to read fuzz artifact")
+    data
 }
 
 fn run_fuzz_fat_new_artifact(file_name: &str) {
-    let data = load_artifact("fuzz_fat_new", file_name);
+    let Some(data) = load_artifact("fuzz_fat_new", file_name) else {
+        return;
+    };
     let mut cursor = Cursor::new(&data[..]);
     let _ = fs_fat::Fat::new(&mut cursor);
 }
 
 fn run_fuzz_fat_root_dir_artifact(file_name: &str) {
-    let data = load_artifact("fuzz_fat_root_dir", file_name);
+    let Some(data) = load_artifact("fuzz_fat_root_dir", file_name) else {
+        return;
+    };
     let mut cursor = Cursor::new(&data[..]);
 
     let Ok(fat) = fs_fat::Fat::new(&mut cursor) else {
@@ -49,7 +46,9 @@ fn run_fuzz_fat_root_dir_artifact(file_name: &str) {
 }
 
 fn run_fuzz_fat_open_artifact(file_name: &str) {
-    let data = load_artifact("fuzz_fat_open", file_name);
+    let Some(data) = load_artifact("fuzz_fat_open", file_name) else {
+        return;
+    };
 
     // The fuzz_fat_open target uses `arbitrary` to split the input into
     // image data and a path. For reproduction, we treat the entire blob

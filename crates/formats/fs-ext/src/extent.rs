@@ -16,6 +16,10 @@ const MAX_DEPTH: u16 = 5;
 ///
 /// Present at the start of every extent tree node: the in-inode root,
 /// interior index nodes, and leaf nodes.
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical ext4 eh_* on-disk identifiers"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct RawExtentHeader {
@@ -52,6 +56,10 @@ const _: () = assert!(
 ///
 /// Maps a contiguous range of logical blocks to physical blocks.
 /// If `ee_len > 32768`, the extent is uninitialized (preallocated).
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical ext4 ee_* on-disk identifiers"
+)]
 #[derive(Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct RawExtent {
@@ -432,7 +440,7 @@ fn resolve_node<T: Read + Seek>(
     let entry_data = &node[12..];
 
     if depth == 0 {
-        search_leaf(entry_data, entries, logical_block)
+        Ok(search_leaf(entry_data, entries, logical_block))
     } else {
         search_index(
             ext,
@@ -447,7 +455,7 @@ fn resolve_node<T: Read + Seek>(
 }
 
 /// Scan leaf entries for the extent covering `logical_block`.
-fn search_leaf(entry_data: &[u8], entries: u16, logical_block: u32) -> Result<Option<Extent>> {
+fn search_leaf(entry_data: &[u8], entries: u16, logical_block: u32) -> Option<Extent> {
     for i in 0..u32::from(entries) {
         let off = (i as usize) * 12;
         let end = off + 12;
@@ -462,11 +470,11 @@ fn search_leaf(entry_data: &[u8], entries: u16, logical_block: u32) -> Result<Op
         let ext = decode_extent(raw);
         let start = ext.logical_block;
         if logical_block >= start && logical_block < start + ext.len {
-            return Ok(Some(ext));
+            return Some(ext);
         }
     }
 
-    Ok(None)
+    None
 }
 
 /// Predecessor binary search on index entries, then recurse into child.
@@ -531,14 +539,17 @@ fn search_index<T: Read + Seek>(
 mod tests {
     use super::*;
 
-    /// Build a minimal 60-byte i_block with a valid extent header
+    /// Build a minimal 60-byte `i_block` with a valid extent header
     /// and the given leaf extents (depth 0).
     fn make_leaf_iblock(extents: &[(u32, u16, u16, u32)]) -> [u8; 60] {
         let mut buf = [0u8; 60];
 
         // Header: magic, entries, max=4, depth=0, generation=0
         buf[0..2].copy_from_slice(&EXTENT_MAGIC.to_le_bytes());
-        buf[2..4].copy_from_slice(&(extents.len() as u16).to_le_bytes());
+        buf[2..4].copy_from_slice(
+            &(u16::try_from(extents.len()).expect("the test fixture value fits in u16"))
+                .to_le_bytes(),
+        );
         buf[4..6].copy_from_slice(&4u16.to_le_bytes()); // eh_max
         // depth = 0, generation = 0 (already zeroed)
 
@@ -553,7 +564,7 @@ mod tests {
         buf
     }
 
-    /// Minimal Ext struct for testing (only block_size and blocks_count
+    /// Minimal Ext struct for testing (only `block_size` and `blocks_count`
     /// matter for extent resolution).
     fn test_ext() -> Ext {
         Ext {
@@ -793,11 +804,13 @@ mod tests {
 
         // Build the child block (leaf at depth 0) at byte offset 50*4096
         let child_offset = 50u64 * 4096;
-        let disk_size = (child_offset + 4096) as usize;
+        let disk_size =
+            usize::try_from(child_offset + 4096).expect("the test fixture value fits in usize");
         let mut disk = vec![0u8; disk_size];
 
         // Child block header: depth=0, 1 extent entry
-        let cb = &mut disk[child_offset as usize..];
+        let cb = &mut disk
+            [usize::try_from(child_offset).expect("the test fixture value fits in usize")..];
         cb[0..2].copy_from_slice(&EXTENT_MAGIC.to_le_bytes());
         cb[2..4].copy_from_slice(&1u16.to_le_bytes()); // entries
         cb[4..6].copy_from_slice(&340u16.to_le_bytes()); // max

@@ -25,6 +25,11 @@ pub struct FscryptMasterKey {
 
 impl FscryptMasterKey {
     /// Construct from a slice of length 16..=64.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtError::InvalidFscryptPolicy`] when `bytes` is shorter
+    /// than 16 bytes or longer than 64 bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < FSCRYPT_MIN_KEY_SIZE || bytes.len() > FSCRYPT_MAX_KEY_SIZE {
             return Err(ExtError::InvalidFscryptPolicy {
@@ -34,23 +39,23 @@ impl FscryptMasterKey {
         }
         let mut buf = [0u8; FSCRYPT_MAX_KEY_SIZE];
         buf[..bytes.len()].copy_from_slice(bytes);
-        Ok(Self {
-            bytes: buf,
-            len: bytes.len() as u8,
-        })
+        let len = u8::try_from(bytes.len()).map_err(|_| ExtError::InvalidFscryptPolicy {
+            inode: 0,
+            reason: "fscrypt master key length does not fit its encoded field",
+        })?;
+        Ok(Self { bytes: buf, len })
     }
 
     /// Construct from a fixed 64-byte array (the modal case).
+    #[must_use]
     pub fn from_array(bytes: [u8; FSCRYPT_MAX_KEY_SIZE]) -> Self {
-        Self {
-            bytes,
-            len: FSCRYPT_MAX_KEY_SIZE as u8,
-        }
+        Self { bytes, len: 64 }
     }
 
     /// Borrow the active prefix of the buffer.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
+        &self.bytes[..usize::from(self.len)]
     }
 }
 
@@ -121,7 +126,9 @@ impl ConstantTimeEq for FscryptKeyIdentifier {
 /// Which fscrypt policy version applies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FscryptPolicyKind {
+    /// Version 1 policy using an eight-byte master-key descriptor.
     V1,
+    /// Version 2 policy using a sixteen-byte master-key identifier.
     V2,
 }
 
@@ -131,9 +138,13 @@ pub enum FscryptPolicyKind {
 /// to decrypt this object, plus the raw mode bytes for diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FscryptPolicy {
+    /// Version and key-reference scheme used by the policy.
     pub kind: FscryptPolicyKind,
+    /// On-disk algorithm identifier used for file contents.
     pub contents_mode: u8,
+    /// On-disk algorithm identifier used for filenames and symlinks.
     pub filenames_mode: u8,
+    /// Raw fscrypt policy flags controlling IV and padding behavior.
     pub flags: u8,
     /// 0 means "fs block size"; non-zero values are unsupported.
     pub log2_data_unit_size: u8,
@@ -141,11 +152,13 @@ pub struct FscryptPolicy {
     pub key_descriptor: Option<FscryptKeyDescriptor>,
     /// Some for v2, None for v1.
     pub key_identifier: Option<FscryptKeyIdentifier>,
+    /// Per-file nonce used when deriving this inode's encryption keys.
     pub nonce: [u8; 16],
 }
 
 impl FscryptPolicy {
     /// Padding bytes per `flags & 0x03`.
+    #[must_use]
     pub fn padding_bytes(&self) -> usize {
         4usize << (self.flags & 0x03)
     }
@@ -197,7 +210,7 @@ impl IvDerivation {
     /// ciphers (Adiantum, HCTR2) consume all 32 bytes; AES-XTS uses
     /// only the low 16.
     ///
-    /// Kernel order is: `memset(iv, 0, ivsize)` → DIRECT_KEY's
+    /// Kernel order is: `memset(iv, 0, ivsize)` → `DIRECT_KEY`'s
     /// `memcpy(iv->nonce, ci->ci_nonce, 16)` at offset 8..24 → final
     /// `iv->index = cpu_to_le64(index)` at offset 0..8. The index write
     /// happens last so it does not overlap the nonce.
@@ -220,13 +233,16 @@ impl IvDerivation {
             Self::InoLblk64 { inode_number } => {
                 // Kernel `fscrypt_generate_iv` masks lblk_num to its low
                 // 32 bits via `WARN_ON_ONCE((u32)lblk != lblk)` then
-                // proceeds; mirror via `as u32` then back to u64.
-                let lblk32 = lblk_num as u32 as u64;
+                // proceeds; mirror by decoding the low four bytes.
+                let bytes = lblk_num.to_le_bytes();
+                let lblk32 =
+                    u64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                 let ino64 = u64::from(inode_number);
                 lblk32 | (ino64 << 32)
             }
             Self::InoLblk32 { hashed_ino } => {
-                let lblk32 = lblk_num as u32;
+                let bytes = lblk_num.to_le_bytes();
+                let lblk32 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 u64::from(lblk32.wrapping_add(hashed_ino))
             }
         };
@@ -256,13 +272,14 @@ impl IvDerivation {
 pub(crate) fn mode_keysize(mode: u8) -> Option<usize> {
     match mode {
         FSCRYPT_MODE_AES_256_XTS => Some(64),
-        FSCRYPT_MODE_AES_256_CTS | FSCRYPT_MODE_ADIANTUM | FSCRYPT_MODE_AES_256_HCTR2 => Some(32),
-        FSCRYPT_MODE_AES_128_CBC | FSCRYPT_MODE_AES_128_CTS => Some(16),
+        FSCRYPT_MODE_AES_256_CTS
+        | FSCRYPT_MODE_ADIANTUM
+        | FSCRYPT_MODE_AES_256_HCTR2
+        | FSCRYPT_MODE_SM4_XTS => Some(32),
+        FSCRYPT_MODE_AES_128_CBC | FSCRYPT_MODE_AES_128_CTS | FSCRYPT_MODE_SM4_CTS => Some(16),
         // Per kernel `fscrypt_modes`:
         //   FSCRYPT_MODE_SM4_XTS keysize = 32 (k1 || k2, two SM4-128 keys)
         //   FSCRYPT_MODE_SM4_CTS keysize = 16 (single SM4-128 key)
-        FSCRYPT_MODE_SM4_XTS => Some(32),
-        FSCRYPT_MODE_SM4_CTS => Some(16),
         _ => None,
     }
 }
@@ -422,7 +439,7 @@ mod tests {
         //   memcpy(iv->nonce, ci->ci_nonce, 16);   // bytes 8..24
         //   iv->index = cpu_to_le64(index);        // bytes 0..8
         // Bytes 24..32 remain zero.
-        let nonce: [u8; 16] = core::array::from_fn(|i| (i as u8) ^ 0x5A);
+        let nonce: [u8; 16] = core::array::from_fn(|i| ((i).to_le_bytes()[0]) ^ 0x5A);
         let iv = IvDerivation::DirectKey { nonce }.full_iv(7);
         let mut expected = [0u8; 32];
         expected[..8].copy_from_slice(&7u64.to_le_bytes());

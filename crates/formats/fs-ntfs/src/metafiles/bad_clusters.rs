@@ -32,8 +32,12 @@ impl NtfsBadClusters {
     ///
     /// Opens MFT record 8, finds the `$Bad` named `$DATA` attribute, and
     /// identifies non-sparse data runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the requested NTFS metafile is missing, malformed, or cannot be read.
     pub fn load<T: Read + Seek>(ntfs: &Ntfs, fs: &mut T) -> Result<Self> {
-        let badclus_file = ntfs.file(fs, KnownNtfsFileRecordNumber::BadClus as u64)?;
+        let badclus_file = ntfs.file(fs, KnownNtfsFileRecordNumber::BadClus.as_u64())?;
 
         // Find the $DATA attribute named "$Bad" by iterating raw attributes.
         // This avoids requiring the upcase table.
@@ -56,7 +60,7 @@ impl NtfsBadClusters {
             // The $Bad stream should be non-resident (it spans the entire FS).
             let non_resident_value = attribute.non_resident_value()?;
             let map = DataRunMap::from_data_runs(non_resident_value.data_runs())?;
-            let cluster_size = ntfs.cluster_size() as u64;
+            let cluster_size = u64::from(ntfs.cluster_size());
 
             for i in 0..map.segment_count() {
                 if let Some((position, size)) = map.segment(i) {
@@ -87,6 +91,7 @@ impl NtfsBadClusters {
 
     /// Returns `true` if there are any non-sparse data runs, indicating
     /// bad clusters on the volume.
+    #[must_use]
     pub fn has_bad_clusters(&self) -> bool {
         !self.bad_ranges.is_empty()
     }
@@ -100,6 +105,7 @@ impl NtfsBadClusters {
     }
 
     /// Returns the total number of bad clusters on the volume.
+    #[must_use]
     pub fn total_bad_clusters(&self) -> u64 {
         self.bad_ranges.iter().map(|&(_, count)| count).sum()
     }

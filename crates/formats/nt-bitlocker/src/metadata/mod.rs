@@ -15,7 +15,9 @@ use vmk::VmkDatum;
 /// Per-block validation result.
 #[derive(Debug, Clone)]
 pub enum BlockStatus {
+    /// The redundant metadata block passed signature, bounds, and CRC checks.
     Valid,
+    /// The redundant metadata block was rejected for the recorded reason.
     Invalid(MetadataFailure),
 }
 
@@ -28,16 +30,19 @@ pub struct MetadataDiagnostics {
 }
 
 impl MetadataDiagnostics {
+    /// Returns validation results for all three metadata copies.
     #[must_use]
     pub fn block_statuses(&self) -> &[BlockStatus; 3] {
         &self.block_statuses
     }
 
+    /// Returns the zero-based index of the authoritative metadata copy.
     #[must_use]
     pub fn selected_block(&self) -> u8 {
         self.selected_block
     }
 
+    /// Returns whether valid copies disagree on security-relevant fields.
     #[must_use]
     pub fn has_disagreements(&self) -> bool {
         self.has_disagreements
@@ -113,9 +118,13 @@ pub fn validate_all_blocks<R: Read + Seek>(
     let mut failures: [Option<MetadataFailure>; 3] = [None, None, None];
 
     for (i, &offset) in offsets.iter().enumerate() {
-        // i is always 0..3, so truncation to u8 is safe
-        #[expect(clippy::cast_possible_truncation)]
-        let idx = i as u8;
+        let idx = u8::try_from(i).map_err(|_| BitLockerError::InvalidMetadata {
+            block_index: u8::MAX,
+            reason: MetadataFailure::ParseFailed {
+                offset,
+                detail: "metadata block index exceeds u8",
+            },
+        })?;
         match read_fve_block(reader, offset, idx) {
             Ok(block) => {
                 statuses[i] = Some(BlockStatus::Valid);
@@ -205,9 +214,15 @@ pub fn validate_all_blocks<R: Read + Seek>(
         selected_block,
         MetadataDiagnostics {
             block_statuses,
-            // selected_idx is always 0..3, truncation to u8 is safe
-            #[expect(clippy::cast_possible_truncation)]
-            selected_block: selected_idx as u8,
+            selected_block: u8::try_from(selected_idx).map_err(|_| {
+                BitLockerError::InvalidMetadata {
+                    block_index: u8::MAX,
+                    reason: MetadataFailure::ParseFailed {
+                        offset: 0,
+                        detail: "selected metadata block index exceeds u8",
+                    },
+                }
+            })?,
             has_disagreements,
         },
     ))
@@ -216,12 +231,18 @@ pub fn validate_all_blocks<R: Read + Seek>(
 /// Encryption method from FVE metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncryptionMethod {
+    /// AES-128 in CBC mode with Elephant diffusion.
     Aes128CbcDiffuser, // 0x8000
+    /// AES-256 in CBC mode with Elephant diffusion.
     Aes256CbcDiffuser, // 0x8001
-    Aes128Cbc,         // 0x8002
-    Aes256Cbc,         // 0x8003
-    Aes128Xts,         // 0x8004
-    Aes256Xts,         // 0x8005
+    /// AES-128 in CBC mode without diffusion.
+    Aes128Cbc, // 0x8002
+    /// AES-256 in CBC mode without diffusion.
+    Aes256Cbc, // 0x8003
+    /// AES-128 in XTS mode.
+    Aes128Xts, // 0x8004
+    /// AES-256 in XTS mode.
+    Aes256Xts, // 0x8005
 }
 
 impl EncryptionMethod {
@@ -241,16 +262,24 @@ impl EncryptionMethod {
 /// Key protector type from VMK datum `protection_type` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectorType {
-    ClearKey,         // 0x0000
-    Tpm,              // 0x0100
-    StartupKey,       // 0x0200
-    TpmPin,           // 0x0500
+    /// VMK is stored under an unencrypted clear-key protector.
+    ClearKey, // 0x0000
+    /// VMK is protected by the platform TPM.
+    Tpm, // 0x0100
+    /// VMK is protected by an external startup-key file.
+    StartupKey, // 0x0200
+    /// VMK requires both TPM state and a user PIN.
+    TpmPin, // 0x0500
+    /// VMK is protected by a numerical recovery password.
     RecoveryPassword, // 0x0800
-    Password,         // 0x2000
+    /// VMK is protected by a user password.
+    Password, // 0x2000
+    /// An unrecognized on-disk protector identifier.
     Unknown(u16),
 }
 
 impl ProtectorType {
+    /// Decodes an on-disk protector identifier without rejecting unknown IDs.
     #[must_use]
     pub fn from_raw(raw: u16) -> Self {
         match raw {
@@ -269,14 +298,20 @@ impl ProtectorType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EncryptionState {
+    /// All protected volume sectors are encrypted.
     FullyEncrypted,
+    /// The volume data is currently decrypted.
     Decrypted,
+    /// An encryption or decryption conversion is in progress.
     SwitchingEncryption,
+    /// A conversion operation is paused.
     SwitchPaused,
+    /// An unrecognized on-disk conversion state.
     Unknown(u16),
 }
 
 impl EncryptionState {
+    /// Decodes an on-disk encryption-state identifier.
     #[must_use]
     pub fn from_raw(raw: u16) -> Self {
         match raw {
@@ -297,11 +332,13 @@ pub struct KeyProtectorInfo {
 }
 
 impl KeyProtectorInfo {
+    /// Returns the mechanism used to protect this VMK.
     #[must_use]
     pub fn protector_type(&self) -> ProtectorType {
         self.protector_type
     }
 
+    /// Returns the key protector's persistent identifier.
     #[must_use]
     pub fn guid(&self) -> &[u8; 16] {
         &self.guid
@@ -330,41 +367,49 @@ pub struct BitLockerMetadata {
 }
 
 impl BitLockerMetadata {
+    /// Returns the sector encryption algorithm selected for the volume.
     #[must_use]
     pub fn encryption_method(&self) -> EncryptionMethod {
         self.encryption_method
     }
 
+    /// Returns the volume's current encryption or conversion state.
     #[must_use]
     pub fn encryption_state(&self) -> EncryptionState {
         self.encryption_state
     }
 
+    /// Returns the volume serial number from its FVE boot sector.
     #[must_use]
     pub fn volume_serial_number(&self) -> u64 {
         self.volume_serial_number
     }
 
+    /// Returns summaries of the VMK protectors advertised by the volume.
     #[must_use]
     pub fn key_protectors(&self) -> &[KeyProtectorInfo] {
         &self.key_protectors
     }
 
+    /// Returns the persistent `BitLocker` volume identifier.
     #[must_use]
     pub fn volume_guid(&self) -> &[u8; 16] {
         &self.volume_guid
     }
 
+    /// Returns the number of volume bytes covered by encryption.
     #[must_use]
     pub fn encrypted_volume_size(&self) -> u64 {
         self.encrypted_volume_size
     }
 
+    /// Returns the volume's logical sector size.
     #[must_use]
     pub fn bytes_per_sector(&self) -> u16 {
         self.bytes_per_sector
     }
 
+    /// Returns the total number of logical sectors reported by the volume.
     #[must_use]
     pub fn total_sectors(&self) -> u64 {
         self.total_sectors
@@ -383,11 +428,13 @@ impl BitLockerMetadata {
         self.boot_sectors_backup
     }
 
+    /// Returns the FVE metadata format version.
     #[must_use]
     pub fn bitlocker_version(&self) -> u16 {
         self.fve_version
     }
 
+    /// Returns validation and selection details for redundant metadata copies.
     #[must_use]
     pub fn metadata_diagnostics(&self) -> &MetadataDiagnostics {
         &self.diagnostics
@@ -424,16 +471,21 @@ impl BitLockerMetadata {
     }
 }
 
-/// Build `BitLockerMetadata` from volume header and selected FVE block.
+/// Builds volume metadata from a header and the selected FVE metadata block.
+///
+/// # Errors
+///
+/// Returns [`BitLockerError::UnsupportedEncryptionMethod`] when the FVE
+/// dataset selects an encryption algorithm this crate cannot decrypt.
 pub fn build_metadata(
     volume_header: &VolumeHeader,
     block: &FveBlock,
     diagnostics: MetadataDiagnostics,
 ) -> Result<BitLockerMetadata> {
-    // encryption_method_raw() returns u32; the known IDs all fit in u16
-    #[expect(clippy::cast_possible_truncation)]
-    let method_u16 = block.encryption_method_raw() as u16;
-    let encryption_method = EncryptionMethod::from_raw(block.encryption_method_raw())
+    let method_raw = block.encryption_method_raw();
+    let method_bytes = method_raw.to_le_bytes();
+    let method_u16 = u16::from_le_bytes([method_bytes[0], method_bytes[1]]);
+    let encryption_method = EncryptionMethod::from_raw(method_raw)
         .ok_or(BitLockerError::UnsupportedEncryptionMethod { method: method_u16 })?;
 
     // Extract key protectors from VMK datum entries
@@ -500,6 +552,7 @@ impl<R: Read + Seek> BitLockerVolume<R> {
         Ok(Self { reader, metadata })
     }
 
+    /// Returns the validated, non-secret volume metadata.
     #[must_use]
     pub fn metadata(&self) -> &BitLockerMetadata {
         &self.metadata
@@ -517,7 +570,6 @@ impl<R: Read + Seek> BitLockerVolume<R> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
     use std::io::Cursor;
@@ -539,15 +591,17 @@ mod tests {
         buf
     }
 
-    #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
     fn make_fve_block_bytes(version: u32, encryption_method: u32) -> Vec<u8> {
         let metadata_size: u32 = 128;
-        let total_block_size: usize = 64 + metadata_size as usize;
+        let total_block_size = 64
+            + usize::try_from(metadata_size)
+                .expect("the test metadata size fits in the host address space");
         // Buffer = block + 8-byte validations structure
         let mut buf = vec![0u8; total_block_size + 8];
         buf[0..8].copy_from_slice(b"-FVE-FS-");
         // Block header size field at offset 8 (V2: total_block_size >> 4)
-        let size_field = (total_block_size >> 4) as u16;
+        let size_field = u16::try_from(total_block_size >> 4)
+            .expect("the test block's 16-byte unit count fits in u16");
         buf[0x08..0x0A].copy_from_slice(&size_field.to_le_bytes());
         buf[0x0A..0x0C].copy_from_slice(&2u16.to_le_bytes());
         buf[0x10..0x18].copy_from_slice(&1_048_576u64.to_le_bytes());
@@ -567,12 +621,14 @@ mod tests {
         vec![0u8; 256]
     }
 
-    #[expect(clippy::cast_possible_truncation, reason = "test offsets are small")]
     fn build_volume(offsets: [u64; 3], block0: &[u8], block1: &[u8], block2: &[u8]) -> Vec<u8> {
         let max_end = offsets
             .iter()
             .enumerate()
-            .map(|(i, &o)| o as usize + [block0, block1, block2][i].len())
+            .map(|(i, &offset)| {
+                usize::try_from(offset).expect("the test volume offset fits in usize")
+                    + [block0, block1, block2][i].len()
+            })
             .max()
             .unwrap_or(512);
         let total = max_end.max(512);
@@ -581,7 +637,7 @@ mod tests {
         vol[..512].copy_from_slice(&header);
         for (i, &offset) in offsets.iter().enumerate() {
             let block = [block0, block1, block2][i];
-            let start = offset as usize;
+            let start = usize::try_from(offset).expect("the test volume offset fits in usize");
             vol[start..start + block.len()].copy_from_slice(block);
         }
         vol
@@ -662,7 +718,7 @@ mod tests {
 
     fn make_vmk_datum_bytes(protection_type: u16) -> Vec<u8> {
         let total_size: u16 = 36; // header(8) + guid(16) + time(8) + unk(2) + prot(2)
-        let mut buf = vec![0u8; total_size as usize];
+        let mut buf = vec![0u8; usize::from(total_size)];
         buf[0..2].copy_from_slice(&total_size.to_le_bytes());
         buf[2..4].copy_from_slice(&ENTRY_TYPE_VMK.to_le_bytes());
         buf[4..6].copy_from_slice(&VALUE_TYPE_VMK.to_le_bytes());
@@ -671,17 +727,22 @@ mod tests {
         buf
     }
 
-    #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
     fn make_fve_block_with_vmk(encryption_method: u32, protection_type: u16) -> Vec<u8> {
         let vmk = make_vmk_datum_bytes(protection_type);
-        let metadata_size: u32 = 48 + vmk.len() as u32;
+        let metadata_size =
+            48 + u32::try_from(vmk.len()).expect("the test VMK datum length fits in u32");
         // Round up to 16-byte alignment (V2 size field loses low 4 bits)
-        let total_block_size: usize = ((64 + metadata_size as usize) + 15) & !15;
+        let total_block_size = ((64
+            + usize::try_from(metadata_size)
+                .expect("the test metadata size fits in the host address space"))
+            + 15)
+            & !15;
         // Buffer = block + 8-byte validations structure
         let mut buf = vec![0u8; total_block_size + 8];
         buf[0..8].copy_from_slice(b"-FVE-FS-");
         // Block header size field at offset 8 (V2: total_block_size >> 4)
-        let size_field = (total_block_size >> 4) as u16;
+        let size_field = u16::try_from(total_block_size >> 4)
+            .expect("the test block's 16-byte unit count fits in u16");
         buf[0x08..0x0A].copy_from_slice(&size_field.to_le_bytes());
         buf[0x0A..0x0C].copy_from_slice(&2u16.to_le_bytes());
         buf[0x10..0x18].copy_from_slice(&1_048_576u64.to_le_bytes());

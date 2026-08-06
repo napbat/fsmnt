@@ -34,13 +34,13 @@ bitflags! {
 pub(crate) enum JournalChecksumMode {
     /// No checksumming.
     None,
-    /// COMPAT_CHECKSUM generation 1: CRC32 over concatenated data blocks in
+    /// `COMPAT_CHECKSUM` generation 1: CRC32 over concatenated data blocks in
     /// the commit block's `h_chksum[0]`. No per-tag or tail checksums.
     CompatCrc32,
-    /// CSUM_V2: CRC32C per block (16-bit truncated in tag), descriptor and
+    /// `CSUM_V2`: CRC32C per block (16-bit truncated in tag), descriptor and
     /// revocation tails, commit block checksum.
     V2Crc32c,
-    /// CSUM_V3: CRC32C per block (full 32-bit in tag), descriptor and
+    /// `CSUM_V3`: CRC32C per block (full 32-bit in tag), descriptor and
     /// revocation tails, commit block checksum. Otherwise identical to V2.
     V3Crc32c,
 }

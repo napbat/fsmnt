@@ -1,3 +1,5 @@
+//! Interactive shell for inspecting an NTFS volume or disk image.
+
 mod sector_reader;
 
 use std::env;
@@ -87,11 +89,13 @@ fn main() -> Result<()> {
             "fileinfo" => fileinfo(arg, &mut info),
             "fsinfo" => fsinfo(&mut info),
             "get" => get(arg, &mut info),
-            "help" => help(arg),
+            "help" => {
+                help(arg);
+                Ok(())
+            }
             "" => continue,
             _ => Err(anyhow!(
-                "Invalid command \"{}\". Type \"help\" to get a list of all commands.",
-                command
+                "Invalid command \"{command}\". Type \"help\" to get a list of all commands."
             )),
         };
         if let Err(e) = result {
@@ -340,17 +344,17 @@ where
         let attribute = attribute_item.to_attribute()?;
 
         match attribute.ty() {
-            Ok(NtfsAttributeType::StandardInformation) => fileinfo_std(attribute)?,
-            Ok(NtfsAttributeType::FileName) => fileinfo_filename(info, attribute)?,
-            Ok(NtfsAttributeType::Data) => fileinfo_data(attribute)?,
-            _ => continue,
+            Ok(NtfsAttributeType::StandardInformation) => fileinfo_std(&attribute)?,
+            Ok(NtfsAttributeType::FileName) => fileinfo_filename(info, &attribute)?,
+            Ok(NtfsAttributeType::Data) => fileinfo_data(&attribute)?,
+            _ => {}
         }
     }
 
     Ok(())
 }
 
-fn fileinfo_std(attribute: NtfsAttribute) -> Result<()> {
+fn fileinfo_std(attribute: &NtfsAttribute) -> Result<()> {
     const TIME_FORMAT: &[FormatItem] =
         format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
 
@@ -361,15 +365,19 @@ fn fileinfo_std(attribute: NtfsAttribute) -> Result<()> {
 
     println!("{:34}{}", "Attributes:", std_info.file_attributes());
 
-    let atime = OffsetDateTime::from(std_info.access_time()).format(TIME_FORMAT)?;
-    let ctime = OffsetDateTime::from(std_info.creation_time()).format(TIME_FORMAT)?;
-    let mtime = OffsetDateTime::from(std_info.modification_time()).format(TIME_FORMAT)?;
-    let mmtime =
+    let access_time = OffsetDateTime::from(std_info.access_time()).format(TIME_FORMAT)?;
+    let creation_time = OffsetDateTime::from(std_info.creation_time()).format(TIME_FORMAT)?;
+    let modification_time =
+        OffsetDateTime::from(std_info.modification_time()).format(TIME_FORMAT)?;
+    let mft_record_modification_time =
         OffsetDateTime::from(std_info.mft_record_modification_time()).format(TIME_FORMAT)?;
-    println!("{:34}{}", "Access Time:", atime);
-    println!("{:34}{}", "Creation Time:", ctime);
-    println!("{:34}{}", "Modification Time:", mtime);
-    println!("{:34}{}", "MFT Record Modification Time:", mmtime);
+    println!("{:34}{}", "Access Time:", access_time);
+    println!("{:34}{}", "Creation Time:", creation_time);
+    println!("{:34}{}", "Modification Time:", modification_time);
+    println!(
+        "{:34}{}",
+        "MFT Record Modification Time:", mft_record_modification_time
+    );
 
     println!("{:34}{}", "Maximum Versions:", std_info.maximum_versions());
     println!("{:34}{}", "Version:", std_info.version());
@@ -378,20 +386,16 @@ fn fileinfo_std(attribute: NtfsAttribute) -> Result<()> {
     // NTFS 3.x extended information
     let owner_id = std_info
         .owner_id()
-        .map(|x| x.to_string())
-        .unwrap_or_else(|| "<NONE>".to_string());
+        .map_or_else(|| "<NONE>".to_string(), |x| x.to_string());
     let security_id = std_info
         .security_id()
-        .map(|x| x.to_string())
-        .unwrap_or_else(|| "<NONE>".to_string());
+        .map_or_else(|| "<NONE>".to_string(), |x| x.to_string());
     let quota_charged = std_info
         .quota_charged()
-        .map(|x| x.to_string())
-        .unwrap_or_else(|| "<NONE>".to_string());
+        .map_or_else(|| "<NONE>".to_string(), |x| x.to_string());
     let usn = std_info
         .usn()
-        .map(|x| x.to_string())
-        .unwrap_or_else(|| "<NONE>".to_string());
+        .map_or_else(|| "<NONE>".to_string(), |x| x.to_string());
     println!("{:34}{}", "Owner ID:", owner_id);
     println!("{:34}{}", "Security ID:", security_id);
     println!("{:34}{}", "Quota Charged:", quota_charged);
@@ -400,7 +404,7 @@ fn fileinfo_std(attribute: NtfsAttribute) -> Result<()> {
     Ok(())
 }
 
-fn fileinfo_filename<T>(info: &mut CommandInfo<T>, attribute: NtfsAttribute) -> Result<()>
+fn fileinfo_filename<T>(info: &mut CommandInfo<T>, attribute: &NtfsAttribute) -> Result<()>
 where
     T: Read + Seek,
 {
@@ -420,7 +424,7 @@ where
     Ok(())
 }
 
-fn fileinfo_data(attribute: NtfsAttribute) -> Result<()> {
+fn fileinfo_data(attribute: &NtfsAttribute) -> Result<()> {
     println!();
     println!("{:=^72}", " DATA STREAM ");
 
@@ -485,12 +489,9 @@ where
 
     // Open the desired file and find the $DATA attribute we are looking for.
     let file = parse_file_arg(file_name, info)?;
-    let data_item = match file.data(&mut info.fs, data_stream_name) {
-        Some(data_item) => data_item,
-        None => {
-            println!("The file does not have a \"{data_stream_name}\" $DATA attribute.");
-            return Ok(());
-        }
+    let Some(data_item) = file.data(&mut info.fs, data_stream_name) else {
+        println!("The file does not have a \"{data_stream_name}\" $DATA attribute.");
+        return Ok(());
     };
     let data_item = data_item?;
     let data_attribute = data_item.to_attribute()?;
@@ -515,7 +516,7 @@ where
     Ok(())
 }
 
-fn help(arg: &str) -> Result<()> {
+fn help(arg: &str) {
     match arg {
         "attr" => {
             println!("Usage: attr FILE");
@@ -592,8 +593,6 @@ fn help(arg: &str) -> Result<()> {
             );
         }
     }
-
-    Ok(())
 }
 
 fn help_file(command: &str) {
@@ -634,10 +633,7 @@ where
             let file = info.ntfs.file(&mut info.fs, record_number)?;
             Ok(file)
         } else {
-            bail!(
-                "Cannot parse record number argument \"{}\"",
-                record_number_arg
-            )
+            bail!("Cannot parse record number argument \"{record_number_arg}\"")
         }
     } else {
         let index = info
@@ -652,7 +648,7 @@ where
             let file = entry.to_file(info.ntfs, &mut info.fs)?;
             Ok(file)
         } else {
-            bail!("No such file or directory \"{}\".", arg)
+            bail!("No such file or directory \"{arg}\".")
         }
     }
 }

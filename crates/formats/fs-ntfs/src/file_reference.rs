@@ -5,13 +5,23 @@ use crate::file::NtfsFile;
 use crate::io::{Read, Seek};
 use crate::ntfs::Ntfs;
 
+fn sequence_number_from_raw(raw: u64) -> u16 {
+    u16::try_from(raw >> 48).expect("shifting a u64 right by 48 bits leaves at most 16 bits")
+}
+
 /// Absolute reference to a File Record on the filesystem, composed out of a File Record Number and a Sequence Number.
 ///
 /// Reference: <https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_reference.html>
 #[derive(Clone, Copy, Debug, FromBytes, Immutable, KnownLayout, Unaligned)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct NtfsFileReference([u8; 8]);
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for NtfsFileReference {
+    fn arbitrary(input: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(input.arbitrary()?))
+    }
+}
 
 impl NtfsFileReference {
     pub(crate) const fn new(file_reference_bytes: [u8; 8]) -> Self {
@@ -22,8 +32,9 @@ impl NtfsFileReference {
     // mutants::skip: the 48-bit record number and the seq<<48 term occupy
     // disjoint bit ranges after masking, so `|` and `^` are identical here.
     #[cfg_attr(test, mutants::skip)]
+    #[must_use]
     pub fn from_parts(file_record_number: u64, sequence_number: u16) -> Self {
-        let value = (file_record_number & 0xffff_ffff_ffff) | ((sequence_number as u64) << 48);
+        let value = (file_record_number & 0xffff_ffff_ffff) | (u64::from(sequence_number) << 48);
         Self(value.to_le_bytes())
     }
 
@@ -31,6 +42,7 @@ impl NtfsFileReference {
     ///
     /// This can be fed into [`Ntfs::file`] to create an [`NtfsFile`] object for the corresponding File Record
     /// (if you cannot use [`Self::to_file`] for some reason).
+    #[must_use]
     pub fn file_record_number(&self) -> u64 {
         u64::from_le_bytes(self.0) & 0xffff_ffff_ffff
     }
@@ -38,19 +50,25 @@ impl NtfsFileReference {
     /// Returns the 16-bit sequence number of the File Record.
     ///
     /// In a consistent file system, this number matches what [`NtfsFile::sequence_number`] returns.
+    #[must_use]
     pub fn sequence_number(&self) -> u16 {
-        (u64::from_le_bytes(self.0) >> 48) as u16
+        sequence_number_from_raw(u64::from_le_bytes(self.0))
     }
 
     /// Returns whether the referenced file is an NTFS system metafile
     /// (MFT records 0–23).
     ///
     /// See [`NtfsFile::is_system_metafile`] for details.
+    #[must_use]
     pub fn is_system_metafile(&self) -> bool {
         self.file_record_number() < 24
     }
 
     /// Returns an [`NtfsFile`] for the file referenced by this object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the referenced file record is malformed or cannot be read.
     pub fn to_file<'n, T>(&self, ntfs: &'n Ntfs, fs: &mut T) -> Result<NtfsFile<'n>>
     where
         T: Read + Seek,

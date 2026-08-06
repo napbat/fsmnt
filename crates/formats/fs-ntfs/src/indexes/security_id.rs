@@ -46,6 +46,7 @@ pub struct NtfsSecurityIdKey {
 
 impl NtfsSecurityIdKey {
     /// Returns the security ID.
+    #[must_use]
     pub fn security_id(&self) -> u32 {
         self.security_id
     }
@@ -73,7 +74,7 @@ impl fmt::Display for NtfsSecurityIdKey {
     }
 }
 
-/// The data type for $SII index entries: hash, security_id, SDS offset, and SDS size.
+/// The data type for $SII index entries: hash, `security_id`, SDS offset, and SDS size.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NtfsSecurityIdData {
     hash: u32,
@@ -84,21 +85,25 @@ pub struct NtfsSecurityIdData {
 
 impl NtfsSecurityIdData {
     /// Returns the hash of the security descriptor.
+    #[must_use]
     pub fn hash(&self) -> u32 {
         self.hash
     }
 
     /// Returns the security ID (matches the key).
+    #[must_use]
     pub fn security_id(&self) -> u32 {
         self.security_id
     }
 
     /// Returns the byte offset into the $SDS stream.
+    #[must_use]
     pub fn sds_offset(&self) -> u64 {
         self.sds_offset
     }
 
     /// Returns the size of the entry in the $SDS stream (header + descriptor).
+    #[must_use]
     pub fn sds_size(&self) -> u32 {
         self.sds_size
     }

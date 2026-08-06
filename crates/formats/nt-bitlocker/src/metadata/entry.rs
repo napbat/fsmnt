@@ -38,18 +38,18 @@ impl<'a> DatumHeader<'a> {
             DatumHeaderRaw::read_from_prefix(buf).map_err(|_| BitLockerError::InvalidMetadata {
                 block_index: 0,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: DATUM_HEADER_SIZE as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(DATUM_HEADER_SIZE).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             })?;
 
-        let size = header.size.get() as usize;
+        let size = usize::from(header.size.get());
         if size < DATUM_HEADER_SIZE || size > buf.len() {
             return Err(BitLockerError::InvalidMetadata {
                 block_index: 0,
                 reason: MetadataFailure::SizeBoundsExceeded {
-                    declared: size as u64,
-                    available: buf.len() as u64,
+                    declared: u64::try_from(size).unwrap_or(u64::MAX),
+                    available: u64::try_from(buf.len()).unwrap_or(u64::MAX),
                 },
             });
         }
@@ -61,26 +61,31 @@ impl<'a> DatumHeader<'a> {
     }
 
     #[must_use]
+    /// Returns the datum's total encoded size, including its header.
     pub fn size(&self) -> u16 {
         self.header.size.get()
     }
 
     #[must_use]
+    /// Returns the datum's role, such as VMK or FVEK.
     pub fn entry_type(&self) -> u16 {
         self.header.entry_type.get()
     }
 
     #[must_use]
+    /// Returns the datum's payload representation type.
     pub fn value_type(&self) -> u16 {
         self.header.value_type.get()
     }
 
     #[must_use]
+    /// Returns the bytes following the fixed datum header.
     pub fn payload(&self) -> &'a [u8] {
         &self.data[DATUM_HEADER_SIZE..]
     }
 
     #[must_use]
+    /// Returns the complete encoded datum, including its header.
     pub fn raw_data(&self) -> &'a [u8] {
         self.data
     }
@@ -93,6 +98,7 @@ pub struct DatumIter<'a> {
 }
 
 impl<'a> DatumIter<'a> {
+    /// Creates an iterator over consecutive valid datums in `data`.
     #[must_use]
     pub fn new(data: &'a [u8]) -> Self {
         Self { data, offset: 0 }
@@ -109,7 +115,7 @@ impl<'a> Iterator for DatumIter<'a> {
 
         let remaining = &self.data[self.offset..];
         let (raw, _) = DatumHeaderRaw::read_from_prefix(remaining).ok()?;
-        let size = raw.size.get() as usize;
+        let size = usize::from(raw.size.get());
         if size < DATUM_HEADER_SIZE || size > remaining.len() {
             return None;
         }
@@ -124,12 +130,11 @@ impl<'a> Iterator for DatumIter<'a> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
     fn make_datum(entry_type: u16, value_type: u16, size: u16) -> Vec<u8> {
-        let mut buf = vec![0u8; size as usize];
+        let mut buf = vec![0u8; usize::from(size)];
         buf[0..2].copy_from_slice(&size.to_le_bytes());
         buf[2..4].copy_from_slice(&entry_type.to_le_bytes());
         buf[4..6].copy_from_slice(&value_type.to_le_bytes());

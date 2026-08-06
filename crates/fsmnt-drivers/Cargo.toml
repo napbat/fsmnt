@@ -8,7 +8,7 @@ edition.workspace = true
 # This crate bridges them to `std::io`, so each one opts back into `std`
 # (plus whatever the individual adapter needs) explicitly here.
 [dependencies]
-chrono = { workspace = true }
+chrono = { workspace = true, features = ["std"] }
 fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
 

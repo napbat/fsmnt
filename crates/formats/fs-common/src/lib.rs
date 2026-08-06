@@ -9,8 +9,10 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+/// Error types shared by filesystem parsers.
 pub mod error;
 pub mod io;
+/// Fallible iterator traits for reader-backed data.
 pub mod iter;
 
 pub mod boot_sector;

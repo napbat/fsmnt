@@ -12,7 +12,7 @@
 //! where `c_partial` equals the first `tail_len` bytes of the AES-ECB
 //! encryption of the (XOR-with-prev) last full plaintext block, and
 //! `c_last_full` is the AES-ECB encryption of the zero-padded partial
-//! block XORed with that same intermediate. See `fs/crypto/fname.c`
+//! block `XORed` with that same intermediate. See `fs/crypto/fname.c`
 //! `__fname_encrypt` for the kernel's call into `cts(cbc(aes))`.
 //!
 //! Generic over the underlying AES variant: AES-256-CBC-CTS for

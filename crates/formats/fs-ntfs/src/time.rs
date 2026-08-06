@@ -6,14 +6,17 @@ use zerocopy::{FromBytes, Immutable, KnownLayout, LittleEndian, U64, Unaligned};
 #[cfg(any(feature = "chrono", feature = "time", feature = "std"))]
 const EPOCH_DIFFERENCE_IN_INTERVALS: i64 = 116_444_736_000_000_000;
 
+/// Unsigned form of the NTFS-to-Unix epoch delta for `SystemTime` arithmetic.
+#[cfg(feature = "std")]
+const EPOCH_DIFFERENCE_IN_INTERVALS_U64: u64 = 116_444_736_000_000_000;
+
 /// Number of 100-nanosecond intervals in a second.
 #[cfg(any(feature = "chrono", feature = "std"))]
 const INTERVALS_PER_SECOND: u64 = 10_000_000;
 
 /// Difference in seconds between the Windows/NTFS epoch (1601-01-01) and the Unix epoch (1970-01-01).
 #[cfg(feature = "chrono")]
-const EPOCH_DIFFERENCE_IN_SECONDS: i64 =
-    EPOCH_DIFFERENCE_IN_INTERVALS / (INTERVALS_PER_SECOND as i64);
+const EPOCH_DIFFERENCE_IN_SECONDS: i64 = EPOCH_DIFFERENCE_IN_INTERVALS / 10_000_000;
 
 /// An NTFS timestamp, used for expressing file times.
 ///
@@ -27,6 +30,7 @@ pub struct NtfsTime(U64<LittleEndian>);
 
 impl NtfsTime {
     /// Returns the stored NT timestamp (number of 100-nanosecond intervals since January 1, 1601).
+    #[must_use]
     pub fn nt_timestamp(&self) -> u64 {
         self.0.get()
     }
@@ -64,16 +68,19 @@ impl Default for TimestampBounds {
 
 impl TimestampBounds {
     /// Returns the bounds as an inclusive range.
+    #[must_use]
     pub fn range(&self) -> RangeInclusive<u64> {
         self.min..=self.max
     }
 
     /// Returns `true` if the given timestamp falls within the bounds.
+    #[must_use]
     pub fn contains(&self, ts: u64) -> bool {
         self.range().contains(&ts)
     }
 
-    /// Returns `true` if all four FILE_NAME timestamps are plausible.
+    /// Returns `true` if all four `FILE_NAME` timestamps are plausible.
+    #[must_use]
     pub fn all_plausible(&self, timestamps: &[NtfsTime]) -> bool {
         if timestamps.is_empty() {
             return false;
@@ -125,10 +132,12 @@ impl<Tz: chrono::TimeZone> TryFrom<chrono::DateTime<Tz>> for NtfsTime {
 #[cfg_attr(docsrs, doc(cfg(feature = "chrono")))]
 impl From<NtfsTime> for chrono::DateTime<chrono::Utc> {
     fn from(nt: NtfsTime) -> Self {
-        let seconds_since_windows_epoch = (nt.nt_timestamp() / INTERVALS_PER_SECOND) as i64;
+        let seconds_since_windows_epoch = i64::try_from(nt.nt_timestamp() / INTERVALS_PER_SECOND)
+            .expect("every u64 NTFS timestamp contains an i64-representable number of seconds");
         let seconds_since_unix_epoch = seconds_since_windows_epoch - EPOCH_DIFFERENCE_IN_SECONDS;
 
-        let subintervals = (nt.nt_timestamp() % INTERVALS_PER_SECOND) as u32;
+        let subintervals = u32::try_from(nt.nt_timestamp() % INTERVALS_PER_SECOND)
+            .expect("a subsecond interval count is less than ten million");
         let subsec_nanos = subintervals * 100;
 
         Self::from_timestamp(seconds_since_unix_epoch, subsec_nanos).unwrap()
@@ -179,10 +188,10 @@ impl TryFrom<std::time::SystemTime> for NtfsTime {
             .checked_mul(INTERVALS_PER_SECOND)
             .ok_or(crate::error::NtfsError::InvalidTime)?;
         let intervals_since_unix_epoch = intervals_since_unix_epoch
-            .checked_add(duration_since_unix_epoch.subsec_nanos() as u64 / 100)
+            .checked_add(u64::from(duration_since_unix_epoch.subsec_nanos()) / 100)
             .ok_or(crate::error::NtfsError::InvalidTime)?;
         let intervals_since_windows_epoch = intervals_since_unix_epoch
-            .checked_add(EPOCH_DIFFERENCE_IN_INTERVALS as u64)
+            .checked_add(EPOCH_DIFFERENCE_IN_INTERVALS_U64)
             .ok_or(crate::error::NtfsError::InvalidTime)?;
 
         Ok(Self::from(intervals_since_windows_epoch))
@@ -193,14 +202,14 @@ impl TryFrom<std::time::SystemTime> for NtfsTime {
 pub(crate) mod tests {
     use super::*;
 
-    pub(crate) const NT_TIMESTAMP_2021_01_01: u64 = 132539328000000000u64;
+    pub(crate) const NT_TIMESTAMP_2021_01_01: u64 = 132_539_328_000_000_000;
 
     #[cfg(feature = "chrono")]
     #[test]
     fn test_chrono_datetime() {
         let dt = chrono::DateTime::parse_from_rfc3339("2013-01-05T18:15:00Z").unwrap();
         let nt = NtfsTime::try_from(dt).unwrap();
-        assert_eq!(nt.nt_timestamp(), 130018833000000000u64);
+        assert_eq!(nt.nt_timestamp(), 130_018_833_000_000_000);
 
         let dt2 = chrono::DateTime::from(nt);
         assert_eq!(dt, dt2);
@@ -229,7 +238,7 @@ pub(crate) mod tests {
 
         let dt = datetime!(2013-01-05 18:15 UTC);
         let nt = NtfsTime::try_from(dt).unwrap();
-        assert_eq!(nt.nt_timestamp(), 130018833000000000u64);
+        assert_eq!(nt.nt_timestamp(), 130_018_833_000_000_000);
 
         let dt2 = time::OffsetDateTime::from(nt);
         assert_eq!(dt, dt2);
@@ -321,13 +330,13 @@ pub(crate) mod tests {
         let dt = chrono::DateTime::parse_from_rfc3339("2013-01-05T18:15:00.0005Z").unwrap();
         let nt = NtfsTime::try_from(dt).unwrap();
         // 130018833000000000 (whole seconds) + 5000 sub-intervals.
-        assert_eq!(nt.nt_timestamp(), 130018833000000000u64 + 5000);
+        assert_eq!(nt.nt_timestamp(), 130_018_833_000_000_000_u64 + 5_000);
 
         // Round-trips back to the same instant (exercises `% INTERVALS_PER_SECOND`
         // and `* 100` in the reverse direction).
         let dt2 = chrono::DateTime::<chrono::Utc>::from(nt);
         assert_eq!(dt2.timestamp_subsec_nanos(), 500_000);
-        assert_eq!(dt2.timestamp(), 1357409700);
+        assert_eq!(dt2.timestamp(), 1_357_409_700);
     }
 
     #[cfg(feature = "std")]
@@ -337,7 +346,7 @@ pub(crate) mod tests {
         // Distinguishes `/ 100` from `% 100` (700 % 100 == 0) and `* 100`.
         let st = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::new(1, 700);
         let nt = NtfsTime::try_from(st).unwrap();
-        let expected = EPOCH_DIFFERENCE_IN_INTERVALS as u64 + INTERVALS_PER_SECOND + 7;
+        let expected = EPOCH_DIFFERENCE_IN_INTERVALS_U64 + INTERVALS_PER_SECOND + 7;
         assert_eq!(nt.nt_timestamp(), expected);
     }
 }

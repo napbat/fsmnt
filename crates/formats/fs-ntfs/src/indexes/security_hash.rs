@@ -39,7 +39,7 @@ impl NtfsIndexEntryHasData for NtfsSecurityHashIndex {
     type DataType = NtfsSecurityHashData;
 }
 
-/// The key type for $SDH index entries: a composite (hash, security_id).
+/// The key type for $SDH index entries: a composite (hash, `security_id`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NtfsSecurityHashKey {
     hash: u32,
@@ -48,11 +48,13 @@ pub struct NtfsSecurityHashKey {
 
 impl NtfsSecurityHashKey {
     /// Returns the security descriptor hash.
+    #[must_use]
     pub fn hash(&self) -> u32 {
         self.hash
     }
 
     /// Returns the security ID.
+    #[must_use]
     pub fn security_id(&self) -> u32 {
         self.security_id
     }
@@ -81,7 +83,7 @@ impl fmt::Display for NtfsSecurityHashKey {
     }
 }
 
-/// The data type for $SDH index entries: hash, security_id, SDS offset, and
+/// The data type for $SDH index entries: hash, `security_id`, SDS offset, and
 /// SDS size.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NtfsSecurityHashData {
@@ -93,21 +95,25 @@ pub struct NtfsSecurityHashData {
 
 impl NtfsSecurityHashData {
     /// Returns the hash of the security descriptor.
+    #[must_use]
     pub fn hash(&self) -> u32 {
         self.hash
     }
 
     /// Returns the security ID.
+    #[must_use]
     pub fn security_id(&self) -> u32 {
         self.security_id
     }
 
     /// Returns the byte offset into the $SDS stream.
+    #[must_use]
     pub fn sds_offset(&self) -> u64 {
         self.sds_offset
     }
 
     /// Returns the size of the entry in the $SDS stream (header + descriptor).
+    #[must_use]
     pub fn sds_size(&self) -> u32 {
         self.sds_size
     }

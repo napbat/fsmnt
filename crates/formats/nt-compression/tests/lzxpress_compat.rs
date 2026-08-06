@@ -1,10 +1,10 @@
-// Cross-compatibility tests using test vectors from MagnetForensics/rust-lzxpress.
-//
-// Copyright (c) MagnetForensics — MIT License.
-// <https://github.com/MagnetForensics/rust-lzxpress>
-//
-// OSS-Fuzz crash reproducers are sourced from the same repository.
-// LZNT1 "Beethoven" vector and binary fixtures are independently authored.
+//! Cross-compatibility tests using vectors from `MagnetForensics/rust-lzxpress`.
+//!
+//! Copyright (c) `MagnetForensics` — `MIT` License.
+//! <https://github.com/MagnetForensics/rust-lzxpress>
+//!
+//! `OSS-Fuzz` crash reproducers are sourced from the same repository.
+//! `LZNT1` "Beethoven" vectors and binary fixtures are independently authored.
 
 extern crate alloc;
 

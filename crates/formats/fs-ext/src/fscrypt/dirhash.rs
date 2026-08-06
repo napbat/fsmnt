@@ -9,7 +9,7 @@ use siphasher::sip::SipHasher24;
 use crate::fscrypt::kdf_v2;
 use crate::fscrypt::types::{FscryptMasterKey, FscryptPolicyKind};
 
-/// Derive the 16-byte SipHash key for an encrypted+casefolded directory
+/// Derive the 16-byte `SipHash` key for an encrypted+casefolded directory
 /// (v2 only; v1 + casefold is rejected by the kernel).
 pub(crate) fn derive_dirhash_key(master_key: &FscryptMasterKey, nonce: &[u8; 16]) -> [u8; 16] {
     use zeroize::Zeroizing;
@@ -78,7 +78,8 @@ pub(crate) fn dirhash_key_for_directory<R: crate::io::Read + crate::io::Seek>(
     crate::fscrypt::policy::validate_supported(
         &policy,
         inode.inode_number(),
-        ext.block_size.trailing_zeros() as u8,
+        u8::try_from(ext.block_size.trailing_zeros())
+            .expect("a u32 trailing-zero count never exceeds 32"),
         ext.compat
             .contains(crate::feature_flags::CompatFeatures::STABLE_INODES),
     )?;

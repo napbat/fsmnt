@@ -7,9 +7,9 @@ use crate::types::NtfsPosition;
 
 use super::NtfsIndexEntryKey;
 
-/// Minimum size of a QUOTA_CONTROL_ENTRY before the variable-length SID:
-/// version(4) + flags(4) + quota_used(8) + change_time(8)
-/// + quota_threshold(8) + quota_limit(8) + exceeded_time(8) = 48 bytes.
+/// Minimum size of a `QUOTA_CONTROL_ENTRY` before the variable-length SID:
+/// version(4) + flags(4) + `quota_used(8)` + `change_time(8)`
+/// + `quota_threshold(8)` + `quota_limit(8)` + `exceeded_time(8)` = 48 bytes.
 const QUOTA_CONTROL_FIXED_SIZE: usize = 48;
 
 /// Defines the [`NtfsIndexEntryType`] for $Q (Quota) index entries
@@ -33,6 +33,7 @@ pub struct NtfsQuotaOwnerIdKey {
 
 impl NtfsQuotaOwnerIdKey {
     /// Returns the owner ID.
+    #[must_use]
     pub fn owner_id(&self) -> u32 {
         self.owner_id
     }
@@ -59,7 +60,7 @@ impl fmt::Display for NtfsQuotaOwnerIdKey {
     }
 }
 
-/// The data type for $Q index entries: a QUOTA_CONTROL_ENTRY
+/// The data type for $Q index entries: a `QUOTA_CONTROL_ENTRY`
 /// containing version, flags, usage, timestamps, thresholds,
 /// and the owner SID.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,43 +77,51 @@ pub struct NtfsQuotaControlData {
 
 impl NtfsQuotaControlData {
     /// Returns the version of the quota entry (expected to be 2).
+    #[must_use]
     pub fn version(&self) -> u32 {
         self.version
     }
 
     /// Returns the quota flags.
+    #[must_use]
     pub fn flags(&self) -> u32 {
         self.flags
     }
 
     /// Returns the number of bytes charged against this quota.
+    #[must_use]
     pub fn quota_used(&self) -> u64 {
         self.quota_used
     }
 
     /// Returns the change time as a raw NTFS timestamp (100-ns
     /// intervals since 1601-01-01).
+    #[must_use]
     pub fn change_time(&self) -> i64 {
         self.change_time
     }
 
     /// Returns the warning threshold in bytes (-1 means no limit).
+    #[must_use]
     pub fn quota_threshold(&self) -> i64 {
         self.quota_threshold
     }
 
     /// Returns the hard limit in bytes (-1 means no limit).
+    #[must_use]
     pub fn quota_limit(&self) -> i64 {
         self.quota_limit
     }
 
     /// Returns the time at which the quota was last exceeded
     /// (0 if never exceeded).
+    #[must_use]
     pub fn exceeded_time(&self) -> i64 {
         self.exceeded_time
     }
 
     /// Returns the SID of the quota owner.
+    #[must_use]
     pub fn sid(&self) -> &NtfsSid {
         &self.sid
     }
@@ -199,6 +208,7 @@ pub struct NtfsQuotaSidKey {
 
 impl NtfsQuotaSidKey {
     /// Returns the SID of the quota owner.
+    #[must_use]
     pub fn sid(&self) -> &NtfsSid {
         &self.sid
     }
@@ -228,6 +238,7 @@ pub struct NtfsQuotaOwnerIdData {
 
 impl NtfsQuotaOwnerIdData {
     /// Returns the owner ID.
+    #[must_use]
     pub fn owner_id(&self) -> u32 {
         self.owner_id
     }
@@ -267,7 +278,7 @@ mod tests {
         ]
     }
 
-    /// Assembles a complete QUOTA_CONTROL_ENTRY with the given SID
+    /// Assembles a complete `QUOTA_CONTROL_ENTRY` with the given SID
     /// appended after the 48-byte fixed header.
     fn build_quota_control_data(sid: &[u8]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(QUOTA_CONTROL_FIXED_SIZE + sid.len());

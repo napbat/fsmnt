@@ -90,6 +90,11 @@ impl FusionWbc {
     /// # Errors
     ///
     /// Returns [`ApfsError::Truncated`] for a short block.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width write-back-cache field ceases to fit the
+    /// minimum block length checked before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < OBJ_PHYS_SIZE + 56 {
             return Err(ApfsError::Truncated {
@@ -152,6 +157,11 @@ impl FusionWbcList {
     ///
     /// Returns [`ApfsError::Truncated`] or [`ApfsError::Malformed`] when the
     /// declared entry count does not fit the block.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width list field ceases to fit the bounds
+    /// validated before parsing.
     pub fn parse(block: &[u8]) -> Result<Self> {
         if block.len() < FUSION_WBC_LIST_ENTRIES_OFFSET {
             return Err(ApfsError::Truncated {
@@ -238,6 +248,11 @@ impl FusionMtVal {
     /// # Errors
     ///
     /// Returns [`ApfsError::Truncated`] for a short value.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a fixed-width middle-tree field ceases to fit the
+    /// minimum value length checked before parsing.
     pub fn parse(value: &[u8]) -> Result<Self> {
         if value.len() < 16 {
             return Err(ApfsError::Truncated {
@@ -441,7 +456,7 @@ mod tests {
         assert!(!main.tier2);
         assert_eq!(main.block, 1234);
 
-        let tier2 = decode_address(marker | 1234, 4096);
+        let tier2 = decode_address(marker | 0x04D2, 4096);
         assert!(tier2.tier2);
         assert_eq!(tier2.block, 1234);
     }
@@ -597,18 +612,24 @@ mod tests {
         // produces a Malformed error on a buffer that should parse cleanly.
         let count = 3usize;
         let mut b = vec![0u8; FUSION_WBC_LIST_ENTRIES_OFFSET + count * FUSION_WBC_LIST_ENTRY_SIZE];
-        b[OBJ_PHYS_SIZE + 20..OBJ_PHYS_SIZE + 24].copy_from_slice(&(count as u32).to_le_bytes());
+        b[OBJ_PHYS_SIZE + 20..OBJ_PHYS_SIZE + 24].copy_from_slice(
+            &u32::try_from(count)
+                .expect("the test fixture value fits in u32")
+                .to_le_bytes(),
+        );
         for i in 0..count {
             let off = FUSION_WBC_LIST_ENTRIES_OFFSET + i * FUSION_WBC_LIST_ENTRY_SIZE;
-            b[off..off + 8].copy_from_slice(&((i as i64) + 1).to_le_bytes());
-            b[off + 8..off + 16].copy_from_slice(&(((i as i64) + 1) * 100).to_le_bytes());
+            let fixture_lba = i64::try_from(i).expect("the test fixture index fits in i64") + 1;
+            b[off..off + 8].copy_from_slice(&fixture_lba.to_le_bytes());
+            b[off + 8..off + 16].copy_from_slice(&(fixture_lba * 100).to_le_bytes());
             b[off + 16..off + 24].copy_from_slice(&1u64.to_le_bytes());
         }
         let list = FusionWbcList::parse(&b).unwrap();
         assert_eq!(list.entries.len(), count);
         for (i, entry) in list.entries.iter().enumerate() {
-            assert_eq!(entry.wbc_lba, (i as i64) + 1);
-            assert_eq!(entry.target_lba, ((i as i64) + 1) * 100);
+            let expected_lba = i64::try_from(i).expect("the test fixture index fits in i64") + 1;
+            assert_eq!(entry.wbc_lba, expected_lba);
+            assert_eq!(entry.target_lba, expected_lba * 100);
         }
     }
 
@@ -671,8 +692,13 @@ mod tests {
 
     /// A device image of `blocks` blocks, with block `mark` filled `byte`.
     fn device(blocks: u64, mark: u64, byte: u8) -> Cursor<Vec<u8>> {
-        let mut data = vec![0u8; (blocks * u64::from(BS)) as usize];
-        let start = (mark * u64::from(BS)) as usize;
+        let mut data = vec![
+            0u8;
+            usize::try_from(blocks * u64::from(BS))
+                .expect("the test fixture value fits in usize")
+        ];
+        let start =
+            usize::try_from(mark * u64::from(BS)).expect("the test fixture value fits in usize");
         data[start..start + BS as usize].fill(byte);
         Cursor::new(data)
     }

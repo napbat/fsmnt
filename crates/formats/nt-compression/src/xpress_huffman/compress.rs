@@ -12,6 +12,7 @@ use crate::{Error, Result};
 use super::{BLOCK_SIZE, HEADER_SIZE, MAX_CODE_BITS, NUM_SYMBOLS};
 
 /// Worst-case compressed size for XPRESS Huffman.
+#[must_use]
 pub fn compress_bound(input_len: usize) -> usize {
     let num_blocks = input_len.div_ceil(BLOCK_SIZE).max(1);
     // 256-byte header per block + bitstream (worst case same as input)
@@ -30,6 +31,7 @@ pub struct Compressor {
 
 impl Compressor {
     /// Create a new compressor with pre-allocated buffers.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             finder: MatchFinder::standard(65535, 65535, 32),
@@ -41,6 +43,10 @@ impl Compressor {
     /// Compress `input` using XPRESS Huffman.
     ///
     /// Returns the number of bytes written to `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `output` is too small for the encoded blocks.
     pub fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
         if input.is_empty() {
             return Ok(0);
@@ -77,8 +83,105 @@ impl Default for Compressor {
 /// Compress `input` using XPRESS Huffman.
 ///
 /// Returns the number of bytes written to `output`.
+///
+/// # Errors
+///
+/// Returns an error when `output` is too small for the encoded blocks.
 pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     Compressor::new().compress(input, output)
+}
+
+/// Encode bits into the accumulator, flushing when a deficit occurs.
+///
+/// When a deficit occurs, the word flushed to `ptr0` combines the pending
+/// accumulator bits with the leading bits of the new code. The remaining
+/// code bits stay in the accumulator for the next flush.
+#[inline]
+fn encode_bits(
+    stream: &mut Vec<u8>,
+    ptr0: &mut usize,
+    ptr1: &mut usize,
+    accum: &mut u16,
+    extra_bits: &mut i32,
+    value: u32,
+    count: u32,
+) {
+    if count == 0 {
+        return;
+    }
+    let masked = u16::try_from(value & ((1 << count) - 1))
+        .expect("XPRESS Huffman codes use at most 15 bits");
+    let old_extra = *extra_bits;
+    *extra_bits -= i32::try_from(count).expect("XPRESS Huffman codes use at most 15 bits");
+    if *extra_bits < 0 {
+        let deficit =
+            u32::try_from(-*extra_bits).expect("this flush branch requires a negative bit budget");
+        let old_extra = u32::try_from(old_extra).expect("the pre-flush bit budget is nonnegative");
+        let word = (*accum << old_extra) | (masked >> deficit);
+        let le = word.to_le_bytes();
+        stream[*ptr0] = le[0];
+        stream[*ptr0 + 1] = le[1];
+        *ptr0 = *ptr1;
+        *ptr1 = stream.len();
+        stream.push(0);
+        stream.push(0);
+        *accum = masked;
+        *extra_bits += 16;
+    } else {
+        *accum = (*accum << count) | masked;
+    }
+}
+
+/// Tokenize one block and count the resulting Huffman symbols.
+fn tokenize_block(
+    block: &[u8],
+    finder: &mut MatchFinder,
+    symbols: &mut Vec<SymbolEntry>,
+) -> [u32; NUM_SYMBOLS] {
+    finder.reset();
+    symbols.clear();
+    let mut frequencies = [0u32; NUM_SYMBOLS];
+
+    finder.tokenize_streaming(block, |token| match token {
+        Token::Literal(byte) => {
+            let symbol = u16::from(byte);
+            frequencies[usize::from(symbol)] += 1;
+            symbols.push(SymbolEntry {
+                symbol,
+                distance_extra_value: 0,
+                distance_extra_count: 0,
+                length_ext: LengthExt::None,
+            });
+        }
+        Token::Match(matched) => {
+            let distance = matched.offset as usize;
+            let distance_u32 = matched.offset;
+            let distance_log = if distance == 1 {
+                0
+            } else {
+                32 - distance_u32.leading_zeros() - 1
+            };
+            let distance_extra = if distance_log == 0 {
+                0
+            } else {
+                distance_u32 - (1 << distance_log)
+            };
+            let (length_header, length_ext) = encode_length(matched.length as usize);
+            let symbol = 256
+                + u16::try_from(distance_log).expect("XPRESS distance logarithms are at most 16")
+                    * 16
+                + length_header;
+            frequencies[usize::from(symbol)] += 1;
+            symbols.push(SymbolEntry {
+                symbol,
+                distance_extra_value: distance_extra,
+                distance_extra_count: distance_log,
+                length_ext,
+            });
+        }
+    });
+
+    frequencies
 }
 
 /// Compress a single 64KB block.
@@ -89,56 +192,13 @@ fn compress_block(
     symbols: &mut Vec<SymbolEntry>,
     stream: &mut Vec<u8>,
 ) -> Result<usize> {
-    // Step 1: LZ77 tokenize with streaming callback to combine
-    // tokenization and frequency counting in one pass.
-    finder.reset();
-    symbols.clear();
-    let mut freqs = [0u32; NUM_SYMBOLS];
-    let mut output_pos: usize = 0;
-
-    finder.tokenize_streaming(block, |token| match token {
-        Token::Literal(b) => {
-            output_pos += 1;
-            let sym = b as u16;
-            freqs[sym as usize] += 1;
-            symbols.push(SymbolEntry {
-                symbol: sym,
-                distance_extra_value: 0,
-                distance_extra_count: 0,
-                length_ext: LengthExt::None,
-            });
-        }
-        Token::Match(m) => {
-            let distance = m.offset as usize;
-            let length = m.length as usize;
-            output_pos += length;
-
-            let distance_log = if distance == 1 {
-                0u32
-            } else {
-                32 - (distance as u32).leading_zeros() - 1
-            };
-            let distance_extra = if distance_log == 0 {
-                0u32
-            } else {
-                distance as u32 - (1 << distance_log)
-            };
-
-            let (length_header, length_ext) = encode_length(length);
-            let sym = 256 + distance_log as u16 * 16 + length_header;
-            freqs[sym as usize] += 1;
-
-            symbols.push(SymbolEntry {
-                symbol: sym,
-                distance_extra_value: distance_extra,
-                distance_extra_count: distance_log,
-                length_ext,
-            });
-        }
-    });
+    let freqs = tokenize_block(block, finder, symbols);
 
     // Step 3: Build Huffman code lengths.
-    let lengths = build_code_lengths(&freqs, MAX_CODE_BITS as u8)?;
+    let lengths = build_code_lengths(
+        &freqs,
+        u8::try_from(MAX_CODE_BITS).expect("XPRESS Huffman codes are capped at 15 bits"),
+    );
 
     // Ensure at least one symbol has a non-zero length for valid table.
     if lengths.iter().all(|l| *l == 0) {
@@ -180,48 +240,6 @@ fn compress_block(
     let mut ptr1: usize = 2; // middle word slot
     let mut accum: u16 = 0;
     let mut extra_bits: i32 = 16;
-
-    /// Encode bits into the accumulator, flushing when deficit occurs.
-    ///
-    /// When a deficit happens (extra_bits goes negative), the word
-    /// flushed to ptr0 contains: `(accum << old_extra) | (code >> deficit)`.
-    /// The remaining bits of the code stay in accum for the next flush.
-    #[inline]
-    fn encode_bits(
-        stream: &mut Vec<u8>,
-        ptr0: &mut usize,
-        ptr1: &mut usize,
-        accum: &mut u16,
-        extra_bits: &mut i32,
-        value: u32,
-        count: u32,
-    ) {
-        if count == 0 {
-            return;
-        }
-        let masked = (value & ((1 << count) - 1)) as u16;
-        let old_extra = *extra_bits;
-        *extra_bits -= count as i32;
-        if *extra_bits < 0 {
-            // Deficit: flush a word to the oldest slot.
-            let deficit = (-*extra_bits) as u32;
-            let word = (*accum << (old_extra as u32)) | (masked >> deficit);
-            let le = word.to_le_bytes();
-            stream[*ptr0] = le[0];
-            stream[*ptr0 + 1] = le[1];
-            // Rotate pointers and reserve a new word slot.
-            *ptr0 = *ptr1;
-            *ptr1 = stream.len();
-            stream.push(0);
-            stream.push(0);
-            // Keep the full code value; upper junk bits are naturally
-            // truncated by u16 wrapping on subsequent shifts.
-            *accum = masked;
-            *extra_bits += 16;
-        } else {
-            *accum = (*accum << count) | masked;
-        }
-    }
 
     for sym_entry in symbols.iter() {
         let (code, len) = codes[sym_entry.symbol as usize];
@@ -269,7 +287,8 @@ fn compress_block(
     }
 
     // Final flush: write remaining accumulated bits to ptr0, zero ptr1.
-    let final_word = accum << (extra_bits as u32);
+    let final_word =
+        accum << u32::try_from(extra_bits).expect("the final bit budget is nonnegative");
     let le = final_word.to_le_bytes();
     stream[ptr0] = le[0];
     stream[ptr0 + 1] = le[1];
@@ -314,7 +333,7 @@ struct SymbolEntry {
     length_ext: LengthExt,
 }
 
-/// Encode match length into length_header (0-15) and optional
+/// Encode match length into `length_header` (0-15) and optional
 /// extension, matching the RTL decompressor's cascade.
 ///
 /// The u16 and u32 extensions encode `match_length - 3`, not the
@@ -322,23 +341,44 @@ struct SymbolEntry {
 fn encode_length(length: usize) -> (u16, LengthExt) {
     let base = length - 3;
     if base < 15 {
-        return (base as u16, LengthExt::None);
+        return (
+            u16::try_from(base).expect("the inline XPRESS length field is four bits"),
+            LengthExt::None,
+        );
     }
 
     // length_header = 15, need byte extension.
     let extra = base - 15;
     if extra < 255 {
-        return (15, LengthExt::Byte(extra as u8));
+        return (
+            15,
+            LengthExt::Byte(
+                u8::try_from(extra).expect("the first XPRESS length extension is one byte"),
+            ),
+        );
     }
 
     // byte ext = 255, then u16 encoding match_length - 3.
     let encoded = length - 3;
     if encoded <= 65535 {
-        return (15, LengthExt::ByteAndU16(255, encoded as u16));
+        return (
+            15,
+            LengthExt::ByteAndU16(
+                255,
+                u16::try_from(encoded).expect("the second XPRESS length extension is two bytes"),
+            ),
+        );
     }
 
     // u32 extension for very large lengths (> 65538).
-    (15, LengthExt::ByteU16AndU32(255, 0, encoded as u32))
+    (
+        15,
+        LengthExt::ByteU16AndU32(
+            255,
+            0,
+            u32::try_from(encoded).expect("XPRESS match lengths are represented in 32 bits"),
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -358,7 +398,9 @@ mod tests {
 
     #[test]
     fn compress_roundtrip_literals() {
-        let input: Vec<u8> = (0..100).map(|i| i as u8).collect();
+        let input: Vec<u8> = (0..100)
+            .map(|i| u8::try_from(i).expect("the test range is below 256"))
+            .collect();
         let bound = compress_bound(input.len());
         let mut compressed = vec![0u8; bound];
         let c_len = compress(&input, &mut compressed).expect("compress");
@@ -385,7 +427,7 @@ mod tests {
         // Larger than one block (65536).
         let mut input = vec![0u8; 70000];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i % 251) as u8;
+            *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
         }
         let patch: Vec<u8> = input[1000..2000].to_vec();
         input[30000..31000].copy_from_slice(&patch);
@@ -405,7 +447,7 @@ mod tests {
         // Exactly one full block (65536 bytes).
         let mut input = vec![0u8; 65536];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i % 251) as u8;
+            *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
         }
         let patch: Vec<u8> = input[1000..2000].to_vec();
         input[30000..31000].copy_from_slice(&patch);
@@ -426,7 +468,7 @@ mod tests {
         // Just under one block — 60000 bytes with repetition.
         let mut input = vec![0u8; 60000];
         for (i, byte) in input.iter_mut().enumerate() {
-            *byte = (i % 251) as u8;
+            *byte = u8::try_from(i % 251).expect("the modulus limits values below 251");
         }
         let patch: Vec<u8> = input[1000..2000].to_vec();
         input[30000..31000].copy_from_slice(&patch);
@@ -464,7 +506,7 @@ mod tests {
         // Create data with a very long match to test length extensions.
         let mut input = vec![0u8; 1000];
         for (i, byte) in input[..50].iter_mut().enumerate() {
-            *byte = (i * 3 + 7) as u8;
+            *byte = (i * 3 + 7).to_le_bytes()[0];
         }
         // Repeat the pattern many times.
         for chunk_start in (50..1000).step_by(50) {

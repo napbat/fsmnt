@@ -31,6 +31,11 @@ use crate::io::{Read, Seek};
 ///
 /// The `secure_file` parameter should be the `$Secure` file
 /// (MFT entry 9), obtained via `ntfs.file(&mut fs, 9)`.
+///
+/// # Errors
+///
+/// Returns an error if the `$SDS` attribute is missing, cannot be opened, or
+/// its stream length cannot be read.
 pub fn ntfs_secure_sds_entries<'n, 'f, T>(
     secure_file: &'f NtfsFile<'n>,
     fs: &mut T,
@@ -50,6 +55,11 @@ where
 /// This is a convenience wrapper around
 /// [`ntfs_secure_sds_entries`] that iterates every entry and
 /// accumulates counts.
+///
+/// # Errors
+///
+/// Returns an error if the `$SDS` stream cannot be opened or a transport
+/// error occurs while reading its entries.
 pub fn ntfs_secure_sds_info<T>(secure_file: &NtfsFile<'_>, fs: &mut T) -> Result<NtfsSdsStreamInfo>
 where
     T: Read + Seek,
@@ -99,7 +109,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::KnownNtfsFileRecordNumber;
     use crate::ntfs::Ntfs;
 
     use crate::types::NtfsPosition;
@@ -109,7 +118,9 @@ mod tests {
     };
     use lookup::{open_sdh_index, open_sii_index};
 
-    /// Helper: find any MFT entry with a nonzero security_id.
+    const SECURE_FILE_RECORD_NUMBER: u64 = 9;
+
+    /// Helper: find any MFT entry with a nonzero `security_id`.
     fn find_nonzero_security_id(ntfs: &Ntfs, fs: &mut std::io::Cursor<Vec<u8>>) -> Option<u32> {
         for record in 0..12u64 {
             if let Ok(file) = ntfs.file(fs, record)
@@ -130,13 +141,10 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
-        let security_id = match find_nonzero_security_id(&ntfs, &mut testfs1) {
-            Some(sid) => sid,
-            None => return,
+        let Some(security_id) = find_nonzero_security_id(&ntfs, &mut testfs1) else {
+            return;
         };
 
         let mut buf = Vec::new();
@@ -156,9 +164,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut buf = Vec::new();
         let result = ntfs_secure_lookup(&secure_file, &mut testfs1, 0xDEAD_BEEF, &mut buf);
@@ -172,9 +178,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut buf = Vec::new();
         let result = ntfs_secure_lookup(&secure_file, &mut testfs1, 0, &mut buf);
@@ -188,9 +192,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
         assert!(!secure_file.is_directory());
         assert!(secure_file.hard_link_count() > 0);
     }
@@ -202,9 +204,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let result = open_sdh_index(&secure_file, &mut testfs1);
         assert!(result.is_ok(), "failed to open $SDH index: {result:?}");
@@ -217,13 +217,10 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
-        let security_id = match find_nonzero_security_id(&ntfs, &mut testfs1) {
-            Some(sid) => sid,
-            None => return,
+        let Some(security_id) = find_nonzero_security_id(&ntfs, &mut testfs1) else {
+            return;
         };
 
         let sii_index = open_sii_index(&secure_file, &mut testfs1).unwrap();
@@ -257,13 +254,10 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
-        let security_id = match find_nonzero_security_id(&ntfs, &mut testfs1) {
-            Some(sid) => sid,
-            None => return,
+        let Some(security_id) = find_nonzero_security_id(&ntfs, &mut testfs1) else {
+            return;
         };
 
         let sii_index = open_sii_index(&secure_file, &mut testfs1).unwrap();
@@ -285,13 +279,10 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
-        let security_id = match find_nonzero_security_id(&ntfs, &mut testfs1) {
-            Some(sid) => sid,
-            None => return,
+        let Some(security_id) = find_nonzero_security_id(&ntfs, &mut testfs1) else {
+            return;
         };
 
         let sii_index = open_sii_index(&secure_file, &mut testfs1).unwrap();
@@ -319,9 +310,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut buf = Vec::new();
         let result = ntfs_secure_lookup_by_hash(&secure_file, &mut testfs1, 0xDEAD_BEEF, &mut buf);
@@ -364,9 +353,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut entries_iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -375,7 +362,8 @@ mod tests {
         while let Some(result) = entries_iter.next(&mut testfs1, &mut buf) {
             let entry = result.unwrap();
             assert!(
-                entry.entry_size() as usize >= SDS_HEADER_SIZE,
+                usize::try_from(entry.entry_size()).expect("test SDS entry size fits usize")
+                    >= SDS_HEADER_SIZE,
                 "entry_size {} too small at offset {:#x}",
                 entry.entry_size(),
                 entry.stream_offset(),
@@ -397,9 +385,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let entries = ntfs_secure_sdh_entries(&secure_file, &mut testfs1, 0xDEAD_BEEF).unwrap();
         assert!(entries.is_empty());
@@ -412,9 +398,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut entries_iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut sds_buf = Vec::new();
@@ -425,9 +409,9 @@ mod tests {
             let entry = result.unwrap();
             let sid = entry.security_id();
 
-            let sii_desc = match ntfs_secure_lookup(&secure_file, &mut testfs1, sid, &mut sii_buf) {
-                Ok(d) => d,
-                Err(_) => continue,
+            let Ok(sii_desc) = ntfs_secure_lookup(&secure_file, &mut testfs1, sid, &mut sii_buf)
+            else {
+                continue;
             };
 
             let sds_desc = entry.descriptor().unwrap();
@@ -451,9 +435,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut entries_iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let stream_len = entries_iter.stream_len();
@@ -501,9 +483,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut entries_iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -549,9 +529,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut entries_iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -579,9 +557,7 @@ mod tests {
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
 
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let info = ntfs_secure_sds_info(&secure_file, &mut testfs1).unwrap();
 
@@ -623,9 +599,8 @@ mod tests {
             lookup::find_named_data_attribute(secure_file, testfs, "$SDS").expect("$SDS attribute");
         let sds_attr = sds_item.to_attribute().expect("attribute");
         let sds_value = sds_attr.value(testfs).expect("value");
-        let non_resident = match sds_value {
-            NtfsAttributeValue::NonResident(nr) => nr,
-            _ => panic!("$SDS should be non-resident"),
+        let NtfsAttributeValue::NonResident(non_resident) = sds_value else {
+            panic!("$SDS should be non-resident");
         };
         let map = DataRunMap::from_data_runs(non_resident.data_runs()).expect("data run map");
 
@@ -634,7 +609,7 @@ mod tests {
             if let Some((pos, _remaining)) = map.resolve_position(virtual_offset)
                 && let Some(nz) = pos.value()
             {
-                offsets.push(nz.get() as usize);
+                offsets.push(usize::try_from(nz.get()).expect("test value fits usize"));
             }
         }
         assert!(
@@ -645,7 +620,7 @@ mod tests {
         offsets
     }
 
-    /// Corrupt the entry_size field at physical locations.
+    /// Corrupt the `entry_size` field at physical locations.
     fn corrupt_sds_entry_size(
         testfs: &mut std::io::Cursor<Vec<u8>>,
         secure_file: &NtfsFile<'_>,
@@ -672,9 +647,7 @@ mod tests {
             return;
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -720,9 +693,7 @@ mod tests {
             return;
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -734,7 +705,8 @@ mod tests {
         let entry_size = u64::from(entry.entry_size());
 
         let mut iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
-        iter.stream_len = SDS_HEADER_SIZE as u64 + entry_size / 2;
+        iter.stream_len = u64::try_from(SDS_HEADER_SIZE).expect("the 20-byte SDS header fits u64")
+            + entry_size / 2;
 
         let mut buf = Vec::new();
         let result = iter.next(&mut testfs1, &mut buf);
@@ -764,9 +736,7 @@ mod tests {
             return;
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -779,9 +749,7 @@ mod tests {
         let raw = corrupt_sds_entry_size(&mut testfs1, &secure_file, stream_offset, corrupt_size);
 
         let (mut cursor, ntfs2) = ntfs_from_raw_bytes(raw);
-        let secure2 = ntfs2
-            .file(&mut cursor, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure2 = ntfs2.file(&mut cursor, SECURE_FILE_RECORD_NUMBER).unwrap();
         let mut iter = ntfs_secure_sds_entries(&secure2, &mut cursor).unwrap();
         let mut buf = Vec::new();
 
@@ -815,7 +783,10 @@ mod tests {
 
     #[test]
     fn test_sds_entry_exceeds_maximum_size() {
-        assert_corrupt_first_entry_size_error((SDS_MAX_SIZE + 1) as u32, "exceeds maximum");
+        assert_corrupt_first_entry_size_error(
+            u32::try_from(SDS_MAX_SIZE + 1).expect("test value fits u32"),
+            "exceeds maximum",
+        );
     }
 
     #[test]
@@ -824,9 +795,7 @@ mod tests {
             return;
         };
         let ntfs = Ntfs::new(&mut testfs1).unwrap();
-        let secure_file = ntfs
-            .file(&mut testfs1, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let mut iter = ntfs_secure_sds_entries(&secure_file, &mut testfs1).unwrap();
         let mut buf = Vec::new();
@@ -849,17 +818,15 @@ mod tests {
             return;
         }
 
-        let cross_size = (SDS_BLOCK_SIZE - rel + 1) as u32;
-        if cross_size as usize > SDS_MAX_SIZE {
+        let cross_size = u32::try_from(SDS_BLOCK_SIZE - rel + 1).expect("test value fits u32");
+        if usize::try_from(cross_size).expect("test cross-block size fits usize") > SDS_MAX_SIZE {
             return;
         }
 
         let raw = corrupt_sds_entry_size(&mut testfs1, &secure_file, second_offset, cross_size);
 
         let (mut cursor, ntfs2) = ntfs_from_raw_bytes(raw);
-        let secure2 = ntfs2
-            .file(&mut cursor, KnownNtfsFileRecordNumber::Secure as u64)
-            .unwrap();
+        let secure2 = ntfs2.file(&mut cursor, SECURE_FILE_RECORD_NUMBER).unwrap();
         let mut iter = ntfs_secure_sds_entries(&secure2, &mut cursor).unwrap();
         let mut buf = Vec::new();
 

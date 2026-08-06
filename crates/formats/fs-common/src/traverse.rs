@@ -83,6 +83,10 @@ pub trait FsDirEntry<R: Read + Seek> {
 
     /// Open this entry as a directory for recursive traversal.
     /// Returns `Ok(None)` if this entry is not a directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an implementation-defined error when the directory cannot be opened.
     fn open_dir(&self, r: &mut R) -> Result<Option<Self::Dir>, Self::Error>;
 }
 
@@ -107,6 +111,10 @@ pub trait FsDirectory<R: Read + Seek> {
     type EntryIter: FsTryIterator<R, Error = Self::Error>;
 
     /// Returns an iterator over this directory's entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an implementation-defined error when enumeration cannot begin.
     fn entries(&mut self, r: &mut R) -> Result<Self::EntryIter, Self::Error>;
 
     /// Stable identifier for this directory, used to seed
@@ -149,6 +157,10 @@ const MAX_WALK_DEPTH: usize = 4096;
 /// iterators with non-`'static` lifetime parameters.
 ///
 /// [`FsTryIteratorType`]: crate::iter::FsTryIteratorType
+///
+/// # Errors
+///
+/// Returns the first directory-open or iteration error encountered during traversal.
 pub fn walk_dir<R, D, F>(
     r: &mut R,
     dir: &mut D,
@@ -470,7 +482,7 @@ mod tests {
                 };
             }
             let mut name = b"dir_".to_vec();
-            name.push(b'0' + depth as u8);
+            name.push(b'0' + u8::try_from(depth).expect("test depth fits u8"));
             MockChild {
                 name,
                 kind: EntryKind::Directory,

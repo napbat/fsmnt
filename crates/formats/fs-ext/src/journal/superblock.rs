@@ -23,6 +23,10 @@ pub(crate) const JBD_MAGIC: u32 = 0xC03B_3998;
 pub(crate) const JBD_SUPERBLOCK_OFFSET: u64 = 0;
 
 /// 12-byte journal block header present on every jbd2 metadata block.
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical jbd2 h_* on-disk identifiers"
+)]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
 pub(crate) struct JbdHeader {
@@ -36,6 +40,10 @@ pub(crate) struct JbdHeader {
 #[allow(
     dead_code,
     reason = "on-disk padding/reserved fields are populated but never read"
+)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical jbd2 s_* on-disk identifiers"
 )]
 #[derive(FromBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C)]
@@ -90,7 +98,7 @@ pub(crate) fn parse_superblock_version(buf: &[u8; 1024]) -> Result<JournalSuperb
 /// Verify the jbd2 superblock checksum. Input `buf` contains the full 1024
 /// bytes of the journal superblock with `s_checksum` stored at offset 0xFC.
 ///
-/// Callers must only invoke this under CSUM_V2 or CSUM_V3.
+/// Callers must only invoke this under `CSUM_V2` or `CSUM_V3`.
 pub(crate) fn verify_jbd_superblock_checksum(buf: &[u8; 1024]) -> Result<()> {
     let stored = u32::from_be_bytes(
         buf[JBD_SB_CHECKSUM_OFFSET..JBD_SB_CHECKSUM_OFFSET + 4]
@@ -181,15 +189,14 @@ const JBD_INCOMPAT_RECOGNIZED: u32 = JBD_FEATURE_INCOMPAT_REVOKE
     | JBD_FEATURE_INCOMPAT_CSUM_V3
     | JBD_FEATURE_INCOMPAT_FAST_COMMIT;
 
-/// Parse a jbd2 superblock buffer into a normalized `JournalSource`.
-///
-/// Applies all Section-2 rejections: bad magic/blocktype, invalid checksum
-/// under CSUM_V2/V3, unsupported unknown bits, `JournalInvariant`
-/// violations, and unsupported checksum type codes.
-pub(crate) fn parse_journal_superblock(buf: &[u8; 1024]) -> Result<JournalSource> {
-    let version = parse_superblock_version(buf)?;
-    let sb = JbdSuperblockRaw::ref_from_bytes(buf).expect("validated by parse_superblock_version");
+#[derive(Clone, Copy)]
+struct JournalGeometry {
+    block_size: u32,
+    maxlen: u32,
+    first: u32,
+}
 
+fn journal_geometry(sb: &JbdSuperblockRaw) -> Result<JournalGeometry> {
     let block_size = sb.s_blocksize.get();
     if block_size < 1024 || !block_size.is_power_of_two() {
         return Err(ExtError::InvalidJournalSuperblock {
@@ -208,25 +215,17 @@ pub(crate) fn parse_journal_superblock(buf: &[u8; 1024]) -> Result<JournalSource
             reason: "s_first >= s_maxlen",
         });
     }
+    Ok(JournalGeometry {
+        block_size,
+        maxlen,
+        first,
+    })
+}
 
-    if matches!(version, JournalSuperblockVersion::V1) {
-        return Ok(JournalSource {
-            block_size,
-            maxlen,
-            first,
-            sequence: sb.s_sequence.get(),
-            start: sb.s_start.get(),
-            version,
-            features: JournalIncompatFeatures::empty(),
-            checksum_mode: JournalChecksumMode::None,
-            uuid: [0u8; 16],
-            num_fc_blocks: 0,
-            fc_head: 0,
-        });
-    }
-
-    let raw_incompat = sb.s_feature_incompat.get();
-
+fn checksum_mode_from_features(
+    sb: &JbdSuperblockRaw,
+    raw_incompat: u32,
+) -> Result<JournalChecksumMode> {
     let unknown = raw_incompat & !JBD_INCOMPAT_RECOGNIZED;
     if unknown != 0 {
         return Err(ExtError::JournalUnsupportedFeature { flags: unknown });
@@ -239,8 +238,7 @@ pub(crate) fn parse_journal_superblock(buf: &[u8; 1024]) -> Result<JournalSource
             kind: JournalInvariantKind::ChecksumModeConflict,
         });
     }
-
-    let checksum_mode = if has_v3 {
+    let mode = if has_v3 {
         JournalChecksumMode::V3Crc32c
     } else if has_v2 {
         JournalChecksumMode::V2Crc32c
@@ -249,35 +247,24 @@ pub(crate) fn parse_journal_superblock(buf: &[u8; 1024]) -> Result<JournalSource
     } else {
         JournalChecksumMode::None
     };
-
-    if raw_incompat & JBD_FEATURE_INCOMPAT_ASYNC_COMMIT != 0
-        && !matches!(
-            checksum_mode,
-            JournalChecksumMode::V2Crc32c | JournalChecksumMode::V3Crc32c
-        )
-    {
+    let modern_checksum = matches!(
+        mode,
+        JournalChecksumMode::V2Crc32c | JournalChecksumMode::V3Crc32c
+    );
+    if raw_incompat & JBD_FEATURE_INCOMPAT_ASYNC_COMMIT != 0 && !modern_checksum {
         return Err(ExtError::JournalInvariant {
             kind: JournalInvariantKind::AsyncWithoutCsum,
         });
     }
-
-    if matches!(
-        checksum_mode,
-        JournalChecksumMode::V2Crc32c | JournalChecksumMode::V3Crc32c
-    ) && sb.s_checksum_type != 4
-    {
+    if modern_checksum && sb.s_checksum_type != 4 {
         return Err(ExtError::JournalUnsupportedChecksumType {
             code: sb.s_checksum_type,
         });
     }
+    Ok(mode)
+}
 
-    if matches!(
-        checksum_mode,
-        JournalChecksumMode::V2Crc32c | JournalChecksumMode::V3Crc32c
-    ) {
-        verify_jbd_superblock_checksum(buf)?;
-    }
-
+fn normalized_incompat_features(raw_incompat: u32) -> JournalIncompatFeatures {
     let mut features = JournalIncompatFeatures::empty();
     if raw_incompat & JBD_FEATURE_INCOMPAT_REVOKE != 0 {
         features |= JournalIncompatFeatures::REVOKE;
@@ -291,15 +278,53 @@ pub(crate) fn parse_journal_superblock(buf: &[u8; 1024]) -> Result<JournalSource
     if raw_incompat & JBD_FEATURE_INCOMPAT_FAST_COMMIT != 0 {
         features |= JournalIncompatFeatures::FAST_COMMIT;
     }
+    features
+}
+
+/// Parse a jbd2 superblock buffer into a normalized `JournalSource`.
+///
+/// Applies all Section-2 rejections: bad magic/blocktype, invalid checksum
+/// under `CSUM_V2/V3`, unsupported unknown bits, `JournalInvariant`
+/// violations, and unsupported checksum type codes.
+pub(crate) fn parse_journal_superblock(buf: &[u8; 1024]) -> Result<JournalSource> {
+    let version = parse_superblock_version(buf)?;
+    let sb = JbdSuperblockRaw::ref_from_bytes(buf).expect("validated by parse_superblock_version");
+    let geometry = journal_geometry(sb)?;
+
+    if matches!(version, JournalSuperblockVersion::V1) {
+        return Ok(JournalSource {
+            block_size: geometry.block_size,
+            maxlen: geometry.maxlen,
+            first: geometry.first,
+            sequence: sb.s_sequence.get(),
+            start: sb.s_start.get(),
+            version,
+            features: JournalIncompatFeatures::empty(),
+            checksum_mode: JournalChecksumMode::None,
+            uuid: [0u8; 16],
+            num_fc_blocks: 0,
+            fc_head: 0,
+        });
+    }
+
+    let raw_incompat = sb.s_feature_incompat.get();
+    let checksum_mode = checksum_mode_from_features(sb, raw_incompat)?;
+
+    if matches!(
+        checksum_mode,
+        JournalChecksumMode::V2Crc32c | JournalChecksumMode::V3Crc32c
+    ) {
+        verify_jbd_superblock_checksum(buf)?;
+    }
 
     Ok(JournalSource {
-        block_size,
-        maxlen,
-        first,
+        block_size: geometry.block_size,
+        maxlen: geometry.maxlen,
+        first: geometry.first,
         sequence: sb.s_sequence.get(),
         start: sb.s_start.get(),
         version,
-        features,
+        features: normalized_incompat_features(raw_incompat),
         checksum_mode,
         uuid: sb.s_uuid,
         num_fc_blocks: sb.s_num_fc_blocks.get(),

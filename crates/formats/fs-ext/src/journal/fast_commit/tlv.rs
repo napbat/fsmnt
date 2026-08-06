@@ -168,14 +168,18 @@ pub(crate) struct FcTail {
     pub crc: u32,
 }
 
-/// ADD_RANGE payload decoded.
+/// `ADD_RANGE` payload decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FcAddRange {
     pub fc_ino: u32,
     pub raw_extent: [u8; 12],
 }
 
-/// DEL_RANGE payload decoded.
+/// `DEL_RANGE` payload decoded.
+#[allow(
+    clippy::struct_field_names,
+    reason = "field names preserve canonical ext4 fc_* fast-commit identifiers"
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FcDelRange {
     pub fc_ino: u32,
@@ -338,7 +342,10 @@ mod tests {
     fn tlv_bytes(tag: u16, payload: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(4 + payload.len());
         v.extend_from_slice(&tag.to_le_bytes());
-        v.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        v.extend_from_slice(
+            &(u16::try_from(payload.len()).expect("the test fixture value fits in u16"))
+                .to_le_bytes(),
+        );
         v.extend_from_slice(payload);
         v
     }

@@ -41,10 +41,10 @@ pub enum NtfsAttributeValue<'n, 'f> {
     CompressedNonResident(NtfsCompressedNonResidentAttributeValue<'n, 'f>),
 }
 
-impl<'n, 'f> NtfsAttributeValue<'n, 'f> {
+impl NtfsAttributeValue<'_, '_> {
     /// Returns a variant of this reader that implements [`Read`] and [`Seek`]
     /// by mutably borrowing the filesystem reader.
-    pub fn attach<'a, T>(self, fs: &'a mut T) -> fs_common::io::Attached<'a, Self, T>
+    pub fn attach<T>(self, fs: &mut T) -> fs_common::io::Attached<'_, Self, T>
     where
         T: Read + Seek,
     {
@@ -72,6 +72,7 @@ impl<'n, 'f> NtfsAttributeValue<'n, 'f> {
     ///   * The current seek position is outside the valid range, or
     ///   * The attribute does not have a Data Run, or
     ///   * The current Data Run is a "sparse" Data Run.
+    #[must_use]
     pub fn data_position(&self) -> NtfsPosition {
         match self {
             Self::Resident(inner) => inner.data_position(),
@@ -83,11 +84,13 @@ impl<'n, 'f> NtfsAttributeValue<'n, 'f> {
     }
 
     /// Returns `true` if the attribute value contains no data.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the total length of the attribute value data, in bytes.
+    #[must_use]
     pub fn len(&self) -> u64 {
         match self {
             Self::Resident(inner) => inner.len(),
@@ -99,6 +102,7 @@ impl<'n, 'f> NtfsAttributeValue<'n, 'f> {
     }
 
     /// Returns the current stream position within this value, in bytes.
+    #[must_use]
     pub fn stream_position(&self) -> u64 {
         match self {
             Self::Resident(inner) => inner.stream_position(),
@@ -171,9 +175,9 @@ pub(crate) fn seek_contiguous(
     };
 
     let new_pos = if offset >= 0 {
-        base_pos.checked_add(offset as u64)
+        base_pos.checked_add(offset.unsigned_abs())
     } else {
-        base_pos.checked_sub(offset.wrapping_neg() as u64)
+        base_pos.checked_sub(offset.unsigned_abs())
     };
 
     match new_pos {

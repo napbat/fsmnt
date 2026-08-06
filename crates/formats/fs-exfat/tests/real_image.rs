@@ -7,7 +7,7 @@
 //! created by real tools, not just hand-crafted byte arrays.
 
 use std::collections::BTreeSet;
-use std::io::{Cursor, Read as _};
+use std::io::Cursor;
 
 use fs_common::FsReadSeek;
 use fs_common::traverse::{EntryKind, walk_dir};
@@ -15,18 +15,14 @@ use fs_exfat::{ExFat, ExFatDirectory, ExFatTraversalEntry};
 
 fn load_test_image() -> Option<Cursor<Vec<u8>>> {
     let path = "testdata/testfs1";
-    if !std::path::Path::new(path).exists() {
+    let Some(buffer) = fsmnt_testkit::read_optional_fixture(env!("CARGO_MANIFEST_DIR"), path)
+    else {
         eprintln!(
             "SKIPPED: {path} not found — run: \
              sudo bash testdata/create-testfs1.sh"
         );
         return None;
-    }
-    let mut buffer = Vec::new();
-    std::fs::File::open(path)
-        .unwrap()
-        .read_to_end(&mut buffer)
-        .unwrap();
+    };
     Some(Cursor::new(buffer))
 }
 

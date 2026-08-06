@@ -115,7 +115,10 @@ pub(crate) fn validate_orphan_file_inode<'e, T: Read + Seek>(
             reason: "inode size is not a whole number of blocks",
         });
     }
-    let block_count = (size / block_size) as u32;
+    let block_count =
+        u32::try_from(size / block_size).map_err(|_| ExtError::InvalidOrphanFile {
+            reason: "orphan file has more than u32::MAX blocks",
+        })?;
     let generation = inode.generation();
     Ok(ValidatedOrphanFile {
         inode,
@@ -339,7 +342,8 @@ mod tests {
             validate_orphan_file_inode(&ext, &mut fs, inum).expect("orphan-file inode validates");
 
         let block_size = u64::from(ext.block_size());
-        let expected_blocks = (validated.inode.size() / block_size) as u32;
+        let expected_blocks = u32::try_from(validated.inode.size() / block_size)
+            .expect("the test fixture value fits in u32");
         assert!(
             expected_blocks > 0,
             "orphan-file inode must span at least one block (kills / -> % via {} % {} = 0)",
