@@ -1,0 +1,26 @@
+[workspace]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# All dependencies are declared here. Member crates import them with
+# `<name> = { workspace = true }` — never with a version of their own.
+
+[workspace.lints.rust]
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+
+[package]
+name = "fsmnt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
