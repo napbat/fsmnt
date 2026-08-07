@@ -4,9 +4,9 @@ mod support;
 
 use fsmnt_testkit::Cursor;
 
-use fs_common::io::{FsReadSeek, SeekFrom};
-use fs_common::iter::FsTryIterator;
-use fs_common::traverse::FsDirectory;
+use fsmnt_parser_core::io::{FsReadSeek, SeekFrom};
+use fsmnt_parser_core::iter::FsTryIterator;
+use fsmnt_parser_core::traverse::FsDirectory;
 
 type Fs = Cursor<Vec<u8>>;
 
@@ -334,7 +334,7 @@ fn inline_directory_lookup() {
     let entry = dir.lookup(&mut fs, b"tiny.txt").unwrap();
     assert_eq!(
         entry.kind,
-        fs_common::traverse::EntryKind::File,
+        fsmnt_parser_core::traverse::EntryKind::File,
         "tiny.txt should be a file"
     );
     assert_eq!(&entry.name, b"tiny.txt");

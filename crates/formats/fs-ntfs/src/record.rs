@@ -1,7 +1,7 @@
 use core::mem;
 
 use alloc::vec::Vec;
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 use memoffset::{offset_of, span_of};
 
 use crate::error::{NtfsError, Result};

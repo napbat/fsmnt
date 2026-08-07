@@ -13,12 +13,14 @@ mod dir;
 use std::io;
 
 use chrono::{DateTime, Utc};
-use fs_common::io::FsReadSeek;
-use fs_common::traverse::EntryKind;
 use fs_ext::io::{Read, Seek, SeekFrom};
 use fs_ext::{Ext, ExtError, ExtTimestamp, JournalReplay, OrphanReplay, OverlayReader};
 use fsmnt_core::{FsEntry, FsError, FsMetadata, FsResult, TargetFilesystem};
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::traverse::EntryKind;
+
+use crate::adapter::{found, read_up_to};
 
 /// Root inode number for ext2/ext3/ext4.
 const EXT4_ROOT_INO: u32 = 2;
@@ -271,32 +273,16 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
             if !inode.is_regular_file() {
                 return Err(FsError::NotAFile(path.to_string()));
             }
-            let size = usize::try_from(inode.size()).map_err(|_| {
-                FsError::Filesystem("file too large to read in one call".to_string())
-            })?;
             let mut file = inode.open_file().map_err(|e| map_ext_error(e, path))?;
-            let mut buffer = vec![0u8; size];
-            let mut total = 0;
-            while total < size {
-                let n = file
-                    .read(reader, &mut buffer[total..])
-                    .map_err(|e| map_ext_error(e, path))?;
-                if n == 0 {
-                    break;
-                }
-                total += n;
-            }
-            buffer.truncate(total);
-            Ok(buffer)
+            read_up_to(inode.size(), |buffer| {
+                file.read(reader, buffer)
+                    .map_err(|e| map_ext_error(e, path))
+            })
         })
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        match self.navigate_to_inode(path) {
-            Ok(_) => Ok(true),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        found(self.navigate_to_inode(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {

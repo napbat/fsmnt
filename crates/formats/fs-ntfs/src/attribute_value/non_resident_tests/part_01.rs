@@ -1,6 +1,6 @@
 use crate::io::{Read, Seek, SeekFrom};
 
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 use super::{NtfsDataRun, NtfsDataRuns, NtfsNonResidentAttributeValue, StreamState};
 use crate::indexes::NtfsFileNameIndex;

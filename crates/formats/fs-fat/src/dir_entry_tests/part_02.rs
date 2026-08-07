@@ -205,7 +205,7 @@ fn fat_dir_entries_try_next_returns_some_for_present_entry() {
     // Catches `<impl FsTryIterator>::try_next -> Ok(None)`: the
     // adapter must surface the same entries as `next`.
     use crate::fat::Fat;
-    use fs_common::iter::FsTryIterator;
+    use fsmnt_parser_core::iter::FsTryIterator;
     use fsmnt_testkit::Cursor;
 
     let img = build_fat16_image_with_single_file(b"NOTE       ");

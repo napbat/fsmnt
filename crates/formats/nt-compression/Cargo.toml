@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-fs-common = { workspace = true }
+fsmnt-parser-core = { workspace = true }
 thiserror = { workspace = true }
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]

@@ -14,9 +14,11 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::mem::size_of;
 
-use crate::detect::{BOOT_SECTOR_SIZE, DetectedBootSector, FS_DETECT_PROBE_SIZE};
-use crate::partition::{GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry, read_gpt_header};
 use crate::partition_reader::PartitionReader;
+use crate::{
+    BOOT_SECTOR_SIZE, DetectedBootSector, FS_DETECT_PROBE_SIZE, GptHeader, GptPartitionEntry, Mbr,
+    MbrPartitionEntry, read_gpt_header,
+};
 
 /// The layout/structure of a disk.
 #[derive(Debug, Clone)]

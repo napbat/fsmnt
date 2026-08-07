@@ -1,6 +1,6 @@
 //! Regression tests for malformed root-directory fuzz artifacts.
 
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 use fsmnt_testkit::Cursor;
 use fsmnt_testkit::read_required_fixture;
 

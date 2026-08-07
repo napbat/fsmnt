@@ -2,7 +2,7 @@
 
 mod support;
 
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 #[test]
 fn open_file_rejects_directory() {

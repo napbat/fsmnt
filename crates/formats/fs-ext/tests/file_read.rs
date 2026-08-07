@@ -4,8 +4,8 @@ mod support;
 
 use fsmnt_testkit::Cursor;
 
-use fs_common::io::{FsReadSeek, SeekFrom};
 use fs_ext::ExtFile;
+use fsmnt_parser_core::io::{FsReadSeek, SeekFrom};
 
 type Fs = Cursor<Vec<u8>>;
 

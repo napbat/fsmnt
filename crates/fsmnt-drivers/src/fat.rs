@@ -9,13 +9,15 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use fs_common::io::FsReadSeek;
-use fs_common::iter::FsTryIterator;
 use fs_fat::{Fat, FatAttributes, FatTime};
 use fsmnt_core::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::iter::FsTryIterator;
+
+use crate::adapter::{found, found_and, read_up_to};
 
 /// Timestamps and DOS attribute bits read from a directory entry.
 #[derive(Debug, Default, Clone, Copy)]
@@ -153,50 +155,40 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
 
         let mut data_value = file.data().map_err(|e| map_fat_error(e, path))?;
 
-        let size = usize::try_from(file.file_size())
-            .map_err(|_| FsError::Filesystem("file too large to read in one call".to_string()))?;
-        let mut buffer = vec![0u8; size];
-
-        let mut total_read = 0;
-        while total_read < size {
-            let bytes_read = data_value
-                .read(&mut self.reader, &mut buffer[total_read..])
-                .map_err(|e| map_fat_error(e, path))?;
-            if bytes_read == 0 {
-                break;
-            }
-            total_read += bytes_read;
-        }
-
-        buffer.truncate(total_read);
-        Ok(buffer)
+        read_up_to(u64::from(file.file_size()), |buffer| {
+            data_value
+                .read(&mut self.reader, buffer)
+                .map_err(|e| map_fat_error(e, path))
+        })
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
         let normalized = normalize_path(path);
-        match self.fat.open(&mut self.reader, &normalized) {
-            Ok(_) => Ok(true),
-            Err(fs_fat::FatError::NotFound) => Ok(false),
-            Err(e) => Err(map_fat_error(e, path)),
-        }
+        found(
+            self.fat
+                .open(&mut self.reader, &normalized)
+                .map_err(|e| map_fat_error(e, path)),
+        )
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
         let normalized = normalize_path(path);
-        match self.fat.open(&mut self.reader, &normalized) {
-            Ok(f) => Ok(f.is_directory()),
-            Err(fs_fat::FatError::NotFound) => Ok(false),
-            Err(e) => Err(map_fat_error(e, path)),
-        }
+        found_and(
+            self.fat
+                .open(&mut self.reader, &normalized)
+                .map_err(|e| map_fat_error(e, path)),
+            |file| file.is_directory(),
+        )
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
         let normalized = normalize_path(path);
-        match self.fat.open(&mut self.reader, &normalized) {
-            Ok(f) => Ok(!f.is_directory()),
-            Err(fs_fat::FatError::NotFound) => Ok(false),
-            Err(e) => Err(map_fat_error(e, path)),
-        }
+        found_and(
+            self.fat
+                .open(&mut self.reader, &normalized)
+                .map_err(|e| map_fat_error(e, path)),
+            |file| !file.is_directory(),
+        )
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {

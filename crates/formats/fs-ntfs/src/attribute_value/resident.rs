@@ -5,8 +5,8 @@
 //! Further accesses to the record data can then happen via slices.
 
 use super::seek_contiguous;
-use fs_common::error::IoError;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::error::IoError;
+use fsmnt_parser_core::io::FsReadSeek;
 
 use crate::error::{NtfsError, Result};
 use crate::io::{Read, Seek, SeekFrom};
@@ -121,7 +121,7 @@ mod tests {
     use crate::indexes::NtfsFileNameIndex;
     use crate::ntfs::Ntfs;
     use crate::types::NtfsPosition;
-    use fs_common::io::FsReadSeek;
+    use fsmnt_parser_core::io::FsReadSeek;
 
     use super::NtfsResidentAttributeValue;
 

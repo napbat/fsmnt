@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::error::{ExFatError, Result};
 use crate::exfat::ExFat;
 use crate::io::{Read, Seek, SeekFrom};
-use fs_common::FsReadSeek;
+use fsmnt_parser_core::FsReadSeek;
 
 /// Read-only handle to an exFAT file's data stream.
 ///

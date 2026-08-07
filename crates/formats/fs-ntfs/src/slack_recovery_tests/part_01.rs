@@ -1,7 +1,7 @@
 use super::*;
 use crate::time::{NTFS_TIMESTAMP_1997, NtfsTime};
 use crate::types::NtfsPosition;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 /// An NTFS timestamp comfortably inside the default plausible range
 /// (2021-01-01).

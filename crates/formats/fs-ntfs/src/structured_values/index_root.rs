@@ -243,7 +243,7 @@ mod tests {
     use crate::attribute::NtfsAttributeType;
     use crate::ntfs::Ntfs;
     use crate::structured_values::NtfsIndexRoot;
-    use fs_common::iter::FsTryIterator;
+    use fsmnt_parser_core::iter::FsTryIterator;
 
     /// Build a synthetic `$INDEX_ROOT` attribute slice.
     ///

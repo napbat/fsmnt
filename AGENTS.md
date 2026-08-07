@@ -13,19 +13,23 @@ kept as a thin wrapper over it. Member crates under `crates/`:
 
 - `fsmnt-core` — `TargetFilesystem` trait, entry/metadata types,
   `DirFilesystem` host-directory backend, listing filters. Platform-neutral.
+- `fsmnt-parser-core` — canonical `no_std` parser foundation: reader/error
+  traits, traversal interfaces, BPB and filesystem detection, and GPT/MBR
+  structures. Format crates depend on it; `fsmnt-device` re-exports its
+  device-facing parsing API.
 - `fsmnt-device` — block-device abstraction: `HostDriveEnumerator` trait,
-  GPT/MBR parsing (`Disk`), `PartitionReader`, boot-sector detection, and
-  the `FilesystemDriver`/`DriverRegistry` plug-in point for filesystem
-  parsers. fsmnt ships **no** parsers; consumers register drivers.
+  disk-layout handling (`Disk`), `PartitionReader`, the stable façade for
+  parser-core boot-sector/partition types, and the
+  `FilesystemDriver`/`DriverRegistry` plug-in point. The device crate ships
+  no filesystem drivers; consumers register them.
 - `fsmnt-device-windows` / `-linux` / `-macos` — per-OS drive enumeration
   and raw opening.
 - `fsmnt-fuse` / `fsmnt-dokan` — the mount backends (Unix FUSE / Windows
   Dokan).
 - `crates/formats/` — parent directory (not a crate) for filesystem-format
   parser crates (`fs-ntfs`, `fs-fat`, `fs-ext`, `fs-apfs`, `fs-exfat`,
-  plus `fs-common`, `nt-compression`, `nt-bitlocker`); members via the
-  `crates/formats/*` glob. These are **vendored** from tracium — see
-  "Vendored crates" below.
+  `nt-compression`, and `nt-bitlocker`); members via the `crates/formats/*`
+  glob. These are **vendored** from tracium — see "Vendored crates" below.
 - `fsmnt-drivers` — adapters binding the vendored parsers to
   `TargetFilesystem` / `FilesystemDriver`, so device and image mounting can
   open real partitions (NTFS, FAT12/16/32, exFAT, ext2/3/4, APFS, and
@@ -60,6 +64,24 @@ tests skip themselves when the images are absent. The canonical exFAT
 `testfs1` and ext4 fscrypt image are copied from upstream and tracked so
 their integration tests run on clean checkouts. Recorded fuzz regressions
 under `crashes/` are also tracked.
+
+## Parser layering
+
+Portable format logic has one owner:
+
+- `fsmnt-parser-core` owns byte parsing and parser-facing abstractions. It
+  must not depend on `fsmnt-core` or any mount backend.
+- Vendored format crates depend on `fsmnt-parser-core` and expose their own
+  parser APIs. They do not implement the std-based mount traits.
+- `fsmnt-device` owns device I/O and keeps its established parsing API by
+  re-exporting the corresponding `fsmnt-parser-core` items; do not copy
+  parser implementations back into the device crate.
+- `fsmnt-drivers` is the std boundary. Its adapters translate parser errors,
+  paths, metadata, and readers into `TargetFilesystem` and
+  `FilesystemDriver`.
+
+This dependency direction preserves `no_std` parsers while preventing the
+old `fs-common`/`fsmnt-device` parsing duplication.
 
 Platform-specific crates must self-gate: their dependencies live under
 `[target.'cfg(...)'.dependencies]` and their modules behind `#[cfg(...)]`,
@@ -168,9 +190,9 @@ prek run --all-files   # includes the first-party-only clippy gate
 cargo test --workspace
 ```
 
-`cargo test --workspace` has a known baseline of ~370 failures inside the
-vendored crates, caused solely by absent (gitignored) test fixtures. Judge
-your change by whether it adds failures, not by a green total.
+`cargo test --workspace` is expected to pass on a clean checkout. Tests for
+optional generated fixtures may skip when those gitignored images are
+absent; tracked canonical fixtures and fuzz regressions must still run.
 
 The same checks run as git pre-commit hooks via prek. Never commit with
 `--no-verify`.

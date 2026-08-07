@@ -8,7 +8,7 @@ use crate::io::{Read, Seek, SeekFrom};
 use crate::ntfs::Ntfs;
 use crate::structured_values::NtfsStructuredValue;
 use crate::types::Vcn;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 /// Structure of an $`INDEX_ALLOCATION` attribute.
 ///
@@ -170,12 +170,12 @@ impl<'n, 'f> NtfsIndexRecords<'n, 'f> {
     }
 }
 
-impl fs_common::iter::FsTryIteratorType for NtfsIndexRecords<'_, '_> {
+impl fsmnt_parser_core::iter::FsTryIteratorType for NtfsIndexRecords<'_, '_> {
     type Error = NtfsError;
     type Item<'a> = NtfsIndexRecord;
 }
 
-impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for NtfsIndexRecords<'_, '_> {
+impl<R: Read + Seek> fsmnt_parser_core::iter::FsTryIterator<R> for NtfsIndexRecords<'_, '_> {
     fn try_next(&mut self, r: &mut R) -> Result<Option<NtfsIndexRecord>> {
         self.next(r).transpose()
     }
@@ -229,7 +229,7 @@ impl<T> FusedIterator for NtfsIndexRecordsAttached<'_, '_, '_, T> where T: Read 
 mod tests {
     use crate::indexes::NtfsFileNameIndex;
     use crate::ntfs::Ntfs;
-    use fs_common::iter::FsTryIterator;
+    use fsmnt_parser_core::iter::FsTryIterator;
 
     #[test]
     fn test_index_allocation_records_in_many_subdirs() {

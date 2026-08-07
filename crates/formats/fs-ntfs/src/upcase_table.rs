@@ -10,7 +10,7 @@ use crate::error::{NtfsError, Result};
 use crate::file::KnownNtfsFileRecordNumber;
 use crate::io::{Read, Seek};
 use crate::ntfs::Ntfs;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 /// The Upcase Table contains an uppercase character for each Unicode character of the Basic Multilingual Plane.
 const UPCASE_CHARACTER_COUNT: usize = 65536;

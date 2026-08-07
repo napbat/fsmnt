@@ -9,7 +9,7 @@ use crate::error::{NtfsError, Result};
 use crate::file::KnownNtfsFileRecordNumber;
 use crate::io::{Read, Seek};
 use crate::ntfs::Ntfs;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 /// Size of a single `$AttrDef` entry on disk, in bytes.
 const ATTR_DEF_ENTRY_SIZE: usize = 160;

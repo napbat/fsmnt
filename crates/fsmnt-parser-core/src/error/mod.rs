@@ -13,7 +13,7 @@ pub use std_bridge::IntoStdIoError;
 /// Every fs crate's error enum implements this trait, enabling generic code
 /// to inspect I/O category and byte-level provenance without knowing the
 /// concrete error type.
-pub trait FsError: From<IoError> + core::fmt::Debug {
+pub trait ParserError: From<IoError> + core::fmt::Debug {
     /// Returns the [`ErrorKind`] if this error originated from an I/O operation.
     fn io_kind(&self) -> Option<ErrorKind>;
 
@@ -26,7 +26,7 @@ pub trait FsError: From<IoError> + core::fmt::Debug {
 mod tests {
     use super::*;
 
-    // Minimal test error that implements FsError
+    // Minimal test error that implements ParserError
     #[derive(Debug)]
     enum TestError {
         Io(IoError),
@@ -39,7 +39,7 @@ mod tests {
         }
     }
 
-    impl FsError for TestError {
+    impl ParserError for TestError {
         fn io_kind(&self) -> Option<ErrorKind> {
             match self {
                 Self::Io(e) => Some(e.kind()),

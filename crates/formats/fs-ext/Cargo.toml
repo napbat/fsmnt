@@ -9,7 +9,7 @@ license.workspace = true
 bitflags = { workspace = true }
 crc32c = { workspace = true }
 crc32fast = { workspace = true }
-fs-common = { workspace = true, default-features = false }
+fsmnt-parser-core = { workspace = true, default-features = false }
 thiserror = { workspace = true }
 zerocopy = { workspace = true, features = ["derive"] }
 
@@ -46,7 +46,7 @@ default = ["fscrypt", "verity"]
 std = [
     "chrono?/std",
     "crc32fast/std",
-    "fs-common/std",
+    "fsmnt-parser-core/std",
     "thiserror/std",
     "time?/std",
     "zerocopy/std",

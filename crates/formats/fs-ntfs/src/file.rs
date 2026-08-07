@@ -5,7 +5,7 @@ use core::num::NonZeroU64;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 use memoffset::offset_of;
 use nt_string::u16strle::U16StrLe;
 
@@ -28,7 +28,7 @@ use crate::structured_values::{
 };
 use crate::types::NtfsPosition;
 use crate::upcase_table::UpcaseOrd;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 /// A list of standardized NTFS File Record Numbers.
 ///

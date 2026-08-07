@@ -4,7 +4,7 @@ use crate::indexes::NtfsFileNameIndex;
 use crate::ntfs::Ntfs;
 use crate::structured_values::NtfsStandardInformation;
 use core::num::NonZeroU64;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_testkit::Cursor;
 
 /// Byte position of the synthetic FILE record inside the image.

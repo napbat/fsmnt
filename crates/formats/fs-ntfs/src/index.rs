@@ -4,8 +4,8 @@ use core::marker::PhantomData;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use fs_common::error::IoError;
-use fs_common::iter::{FsTryIterator, FsTryIteratorType};
+use fsmnt_parser_core::error::IoError;
+use fsmnt_parser_core::iter::{FsTryIterator, FsTryIteratorType};
 
 use crate::attribute::{NtfsAttributeItem, NtfsAttributeType};
 use crate::data_run_map::DataRunMap;

@@ -146,7 +146,7 @@ pub(crate) fn decode(inode: u32, bytes: &[u8]) -> Result<Vec<PosixAclEntry>> {
 
 #[cfg(test)]
 mod tests {
-    use fs_common::error::FsError;
+    use fsmnt_parser_core::error::ParserError;
 
     use super::*;
 
@@ -305,7 +305,7 @@ mod tests {
     fn new_error_variants_do_not_expose_relative_offsets_as_byte_offset() {
         // The `offset` fields on these variants are buffer-relative
         // diagnostics, not absolute disk offsets. They must NOT surface
-        // through `FsError::byte_offset`, which is documented as the
+        // through `ParserError::byte_offset`, which is documented as the
         // offset within the disk image.
         let len_err = ExtError::InvalidPosixAclLength {
             inode: 1,
@@ -322,8 +322,8 @@ mod tests {
             offset: 4,
             tag: 0xABCD,
         };
-        assert_eq!(FsError::byte_offset(&len_err), None);
-        assert_eq!(FsError::byte_offset(&version_err), None);
-        assert_eq!(FsError::byte_offset(&tag_err), None);
+        assert_eq!(ParserError::byte_offset(&len_err), None);
+        assert_eq!(ParserError::byte_offset(&version_err), None);
+        assert_eq!(ParserError::byte_offset(&tag_err), None);
     }
 }

@@ -1,7 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 use crate::io::{Read, Seek, SeekFrom};
 use crate::journal::fast_commit::extents::RawExtent;

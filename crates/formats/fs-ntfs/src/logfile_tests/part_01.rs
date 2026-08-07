@@ -5,7 +5,7 @@ use crate::ntfs::Ntfs;
 fn read_logfile_data() -> Option<Vec<u8>> {
     use crate::attribute::NtfsAttributeType;
     use crate::file::KnownNtfsFileRecordNumber;
-    use fs_common::io::FsReadSeek;
+    use fsmnt_parser_core::io::FsReadSeek;
 
     let mut testfs1 = crate::helpers::tests::testfs1()?;
     let ntfs = Ntfs::new(&mut testfs1).unwrap();

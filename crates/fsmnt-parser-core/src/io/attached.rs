@@ -1,5 +1,5 @@
 #[cfg(not(feature = "std"))]
-use crate::error::FsError;
+use crate::error::ParserError;
 use crate::io::{FsReadSeek, Read, Seek, SeekFrom};
 
 /// Adapter that bundles a value reader with its device reader.
@@ -146,7 +146,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{ErrorKind, FsError, IoError};
+    use crate::error::{ErrorKind, IoError, ParserError};
     use std::vec;
 
     fn offset_position(base: u64, offset: i64) -> u64 {
@@ -170,7 +170,7 @@ mod tests {
         }
     }
 
-    impl FsError for TestError {
+    impl ParserError for TestError {
         fn io_kind(&self) -> Option<ErrorKind> {
             match self {
                 Self::Io(e) => Some(e.kind()),

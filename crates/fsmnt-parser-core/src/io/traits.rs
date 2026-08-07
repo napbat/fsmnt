@@ -1,4 +1,4 @@
-use crate::error::{ErrorKind, FsError, IoError};
+use crate::error::{ErrorKind, IoError, ParserError};
 use crate::io::{Read, Seek, SeekFrom};
 
 /// Unified reader trait for filesystem value readers.
@@ -8,7 +8,7 @@ use crate::io::{Read, Seek, SeekFrom};
 /// `where V: FsReadSeek<R>`.
 pub trait FsReadSeek<R: Read + Seek> {
     /// The error type returned by read/seek operations.
-    type Error: FsError;
+    type Error: ParserError;
 
     /// Reads bytes from this value into `buf`, using `r` as the
     /// device reader.
@@ -66,7 +66,7 @@ pub trait FsReadSeek<R: Read + Seek> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{ErrorKind, FsError, IoError};
+    use crate::error::{ErrorKind, IoError, ParserError};
     use std::vec;
 
     fn offset_position(base: u64, offset: i64) -> u64 {
@@ -90,7 +90,7 @@ mod tests {
         }
     }
 
-    impl FsError for TestError {
+    impl ParserError for TestError {
         fn io_kind(&self) -> Option<ErrorKind> {
             match self {
                 Self::Io(e) => Some(e.kind()),

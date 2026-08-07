@@ -9,9 +9,9 @@ fn field_offset(offset: usize) -> u64 {
     u64::try_from(offset).expect("boot-sector field offsets fit in u64")
 }
 
-// Re-use the boot sector structure from fs-common
-pub use fs_common::boot_sector::BOOT_SIGNATURE;
-pub(crate) type BootSector = fs_common::boot_sector::NtfsBootSector;
+// Re-use the boot sector structure from fsmnt-parser-core
+pub use fsmnt_parser_core::boot_sector::BOOT_SIGNATURE;
+pub(crate) type BootSector = fsmnt_parser_core::boot_sector::NtfsBootSector;
 
 /// Extension trait providing NTFS-specific validation and accessors for the boot sector.
 pub(crate) trait BootSectorExt {

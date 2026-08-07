@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that every no-std format parser stays free of std features."""
+"""Verify that the parser foundation and formats stay free of std features."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FORMAT_CRATES = (
-    "fs-common",
+NO_STD_CRATES = (
+    "fsmnt-parser-core",
     "fs-ntfs",
     "fs-fat",
     "fs-ext",
@@ -111,7 +111,7 @@ def main() -> None:
         run_cargo("metadata", "--no-deps", "--format-version", "1")
     )
     packages = {package["name"]: package for package in metadata["packages"]}
-    for package in FORMAT_CRATES:
+    for package in NO_STD_CRATES:
         package_metadata = packages[package]
         check_crate(
             package,

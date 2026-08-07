@@ -502,7 +502,7 @@ impl BtreeNode {
 
 /// A lending iterator over the entries of a single B-tree node.
 ///
-/// The reader argument of [`fs_common`](crate::io)'s iterator trait is unused
+/// The reader argument of [`fsmnt_parser_core`](crate::io)'s iterator trait is unused
 /// — a node's entries are already in memory — but the trait is implemented so
 /// node iteration composes with the rest of the crate.
 pub struct NodeEntries<'a> {
@@ -512,12 +512,12 @@ pub struct NodeEntries<'a> {
     index: u32,
 }
 
-impl fs_common::iter::FsTryIteratorType for NodeEntries<'_> {
+impl fsmnt_parser_core::iter::FsTryIteratorType for NodeEntries<'_> {
     type Error = ApfsError;
     type Item<'b> = Entry<'b>;
 }
 
-impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for NodeEntries<'_> {
+impl<R: Read + Seek> fsmnt_parser_core::iter::FsTryIterator<R> for NodeEntries<'_> {
     // Index-update mutation `self.index += 1` → `self.index *= 1` keeps
     // the iterator on the same entry forever; the test harness detects
     // the resulting infinite loop as a timeout. Iteration coverage is

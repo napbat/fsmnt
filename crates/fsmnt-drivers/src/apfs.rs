@@ -20,6 +20,8 @@ use fs_apfs::{
 use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 
+use crate::adapter::{found, found_and};
+
 /// The extended attribute that marks a `decmpfs`-compressed file.
 const DECMPFS_XATTR: &str = "com.apple.decmpfs";
 
@@ -261,27 +263,17 @@ impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        match self.navigate(path) {
-            Ok(_) => Ok(true),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        found(self.navigate(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
-        match self.inode_at(path) {
-            Ok(inode) => Ok(inode.is_directory()),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        found_and(self.inode_at(path), |inode| inode.is_directory())
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
-        match self.inode_at(path) {
-            Ok(inode) => Ok(inode.file_type() == FileType::Regular),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        found_and(self.inode_at(path), |inode| {
+            inode.file_type() == FileType::Regular
+        })
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {

@@ -9,7 +9,7 @@ use alloc::collections::BTreeSet;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
-use crate::error::FsError;
+use crate::error::ParserError;
 use crate::io::{Read, Seek};
 use crate::iter::{FsTryIterator, FsTryIteratorType};
 
@@ -61,7 +61,7 @@ pub struct FsId(pub u64);
 /// recovery, `FatDirEntry` in fs-fat).
 pub trait FsDirEntry<R: Read + Seek> {
     /// The error type.
-    type Error: FsError;
+    type Error: ParserError;
 
     /// The directory handle type returned by [`open_dir`](Self::open_dir).
     /// Intentionally unconstrained here; the recursive constraint is
@@ -105,7 +105,7 @@ pub trait FsDirEntry<R: Read + Seek> {
 /// than types that heap-allocate per entry.
 pub trait FsDirectory<R: Read + Seek> {
     /// The error type.
-    type Error: FsError;
+    type Error: ParserError;
 
     /// The iterator over directory entries.
     type EntryIter: FsTryIterator<R, Error = Self::Error>;
@@ -248,7 +248,7 @@ mod tests {
         }
     }
 
-    impl FsError for MockError {
+    impl ParserError for MockError {
         fn io_kind(&self) -> Option<ErrorKind> {
             None
         }

@@ -12,7 +12,6 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use fs_common::io::FsReadSeek;
 use fs_exfat::{
     ExFat, ExFatDirItem, ExFatEntrySet, ExFatError, ExFatFileAttributes, ExFatTimestamp,
 };
@@ -20,6 +19,9 @@ use fsmnt_core::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use fsmnt_parser_core::io::FsReadSeek;
+
+use crate::adapter::{found, read_up_to};
 
 /// Map an [`ExFatError`] onto the closest [`FsError`] variant.
 fn map_exfat_error(e: ExFatError, path: &str) -> FsError {
@@ -126,8 +128,6 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
         }
 
         let length = entry.data_length();
-        let size = usize::try_from(length)
-            .map_err(|_| FsError::Filesystem("file too large to read in one call".to_string()))?;
         let mut file = fs_exfat::ExFatFile::new(
             &self.exfat,
             &mut self.reader,
@@ -137,27 +137,14 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
         )
         .map_err(|e| map_exfat_error(e, path))?;
 
-        let mut buffer = vec![0u8; size];
-        let mut total = 0;
-        while total < size {
-            let n = file
-                .read(&mut self.reader, &mut buffer[total..])
-                .map_err(|e| map_exfat_error(e, path))?;
-            if n == 0 {
-                break;
-            }
-            total += n;
-        }
-        buffer.truncate(total);
-        Ok(buffer)
+        read_up_to(length, |buffer| {
+            file.read(&mut self.reader, buffer)
+                .map_err(|e| map_exfat_error(e, path))
+        })
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        match self.entry_at(path) {
-            Ok(_) => Ok(true),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        found(self.entry_at(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {

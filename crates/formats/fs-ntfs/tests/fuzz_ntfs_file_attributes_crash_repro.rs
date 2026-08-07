@@ -46,7 +46,7 @@ fn run_fuzz_ntfs_file_attributes_artifact(file_name: &str) {
                 // Try to get the attribute value
                 if let Ok(value) = attr.value(&mut cursor) {
                     // Try to read some data from the value
-                    use fs_common::io::FsReadSeek;
+                    use fsmnt_parser_core::io::FsReadSeek;
                     let mut buf = [0u8; 64];
                     let mut value = value;
                     let _ = value.read(&mut cursor, &mut buf);

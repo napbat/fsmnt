@@ -1,5 +1,5 @@
-use fs_common::iter::{FsTryIterator, FsTryIteratorType};
-use fs_common::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
+use fsmnt_parser_core::iter::{FsTryIterator, FsTryIteratorType};
+use fsmnt_parser_core::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
 
 use crate::dir_entry::{FatAttributes, FatDirEntries, FatDirEntry};
 use crate::error::{FatError, Result};
@@ -165,7 +165,7 @@ mod tests {
     use alloc::collections::BTreeSet;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use fs_common::traverse::walk_dir;
+    use fsmnt_parser_core::traverse::walk_dir;
     use fsmnt_testkit::Cursor;
     use zerocopy::FromBytes;
 
@@ -656,7 +656,10 @@ mod tests {
             msg.contains("0x2420"),
             "error message should include offset: {msg}"
         );
-        assert_eq!(fs_common::error::FsError::byte_offset(&err), Some(0x2420));
+        assert_eq!(
+            fsmnt_parser_core::error::ParserError::byte_offset(&err),
+            Some(0x2420)
+        );
     }
 
     /// Verify that corrupted entries in a cluster-chain directory

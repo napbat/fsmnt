@@ -1,4 +1,4 @@
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 use crate::error::{FatError, Result};
 use crate::fat::Fat;
@@ -50,11 +50,11 @@ impl<'n> FatFileValue<'n> {
     }
 
     /// Returns a wrapper that implements `Read + Seek` by borrowing the filesystem reader.
-    pub fn attach<T>(self, fs: &mut T) -> fs_common::io::Attached<'_, Self, T>
+    pub fn attach<T>(self, fs: &mut T) -> fsmnt_parser_core::io::Attached<'_, Self, T>
     where
         T: Read + Seek,
     {
-        fs_common::io::Attached::new(self, fs)
+        fsmnt_parser_core::io::Attached::new(self, fs)
     }
 
     /// Returns the remaining bytes available for reading.

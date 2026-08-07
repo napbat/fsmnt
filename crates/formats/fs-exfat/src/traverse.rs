@@ -3,10 +3,10 @@
 //! Provides [`ExFatDirectory`], [`ExFatDirectoryIter`], and
 //! [`ExFatTraversalEntry`] — thin wrappers around existing fs-exfat
 //! types that implement the [`FsDirectory`], [`FsTryIterator`], and
-//! [`FsDirEntry`] traits from fs-common.
+//! [`FsDirEntry`] traits from fsmnt-parser-core.
 
-use fs_common::iter::{FsTryIterator, FsTryIteratorType};
-use fs_common::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
+use fsmnt_parser_core::iter::{FsTryIterator, FsTryIteratorType};
+use fsmnt_parser_core::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
 
 use crate::entry_set::{ExFatDirItem, ExFatEntrySet};
 use crate::error::{ExFatError, Result};
@@ -321,7 +321,7 @@ mod tests {
         use crate::dir_entry::*;
         use crate::entry_set::compute_set_checksum;
         use crate::upcase::compute_name_hash;
-        use fs_common::traverse::{EntryKind, walk_dir};
+        use fsmnt_parser_core::traverse::{EntryKind, walk_dir};
 
         let mut image = make_image();
 

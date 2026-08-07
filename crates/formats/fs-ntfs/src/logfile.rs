@@ -32,7 +32,7 @@ use crate::file::KnownNtfsFileRecordNumber;
 use crate::io::{Read, Seek};
 use crate::ntfs::Ntfs;
 use crate::types::NtfsPosition;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 // ---- Page signatures ----
 mod operation;

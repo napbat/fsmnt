@@ -14,7 +14,7 @@ fsmnt-device = { workspace = true }
 
 # `FsTryIterator` / `FsReadSeek`, used by the NTFS, FAT, ext and exFAT
 # adapters to drive parser iterators and file readers.
-fs-common = { workspace = true, features = ["std"] }
+fsmnt-parser-core = { workspace = true, features = ["std"] }
 # `chrono` supplies `From<NtfsTime> for DateTime<Utc>`; `compression`
 # enables transparent decompression of WOF/LZNT1 compressed files.
 fs-ntfs = { workspace = true, features = ["std", "chrono", "compression"] }

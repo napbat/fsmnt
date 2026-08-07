@@ -22,13 +22,13 @@
 //! [`NtfsFile`]: crate::NtfsFile
 //! [`NtfsIndexEntry`]: crate::NtfsIndexEntry
 //! [`NtfsOwnedIndexEntries`]: crate::NtfsOwnedIndexEntries
-//! [`FsTryIterator::try_next`]: fs_common::iter::FsTryIterator::try_next
-//! [`FsTryIteratorType`]: fs_common::iter::FsTryIteratorType
-//! [`walk_dir`]: fs_common::traverse::walk_dir
+//! [`FsTryIterator::try_next`]: fsmnt_parser_core::iter::FsTryIterator::try_next
+//! [`FsTryIteratorType`]: fsmnt_parser_core::iter::FsTryIteratorType
+//! [`walk_dir`]: fsmnt_parser_core::traverse::walk_dir
 //! [`Ntfs`]: crate::Ntfs
 
-use fs_common::iter::{FsTryIterator, FsTryIteratorType};
-use fs_common::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
+use fsmnt_parser_core::iter::{FsTryIterator, FsTryIteratorType};
+use fsmnt_parser_core::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
 
 use crate::error::{NtfsError, Result};
 use crate::file::NtfsFile;
@@ -129,7 +129,7 @@ impl<'n, R: Read + Seek> FsDirectory<R> for NtfsDirectory<'n> {
 /// [`NtfsIndex`]: crate::NtfsIndex
 /// [`NtfsOwnedIndexEntries`]: crate::NtfsOwnedIndexEntries
 /// [`NtfsIndexEntry`]: crate::NtfsIndexEntry
-/// [`FsTryIterator::try_next`]: fs_common::iter::FsTryIterator::try_next
+/// [`FsTryIterator::try_next`]: fsmnt_parser_core::iter::FsTryIterator::try_next
 pub struct NtfsDirectoryIter<'n> {
     ntfs: &'n Ntfs,
     inner: NtfsOwnedIndexEntries<'n, NtfsFileNameIndex>,
@@ -231,7 +231,7 @@ mod tests {
     use super::*;
     use alloc::collections::BTreeSet;
     use alloc::vec::Vec;
-    use fs_common::traverse::walk_dir;
+    use fsmnt_parser_core::traverse::walk_dir;
 
     /// Verify that the trait bounds required by `walk_dir` are
     /// satisfied for our types. Compile-time check only.

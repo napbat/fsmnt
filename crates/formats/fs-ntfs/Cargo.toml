@@ -11,7 +11,7 @@ arrayvec = { workspace = true, default-features = false }
 bitflags = { workspace = true }
 chrono = { workspace = true, default-features = false, optional = true }
 derive_more = { workspace = true, default-features = false, features = ["display", "from"] }
-fs-common = { workspace = true, default-features = false }
+fsmnt-parser-core = { workspace = true, default-features = false }
 nt-compression = { workspace = true, optional = true, features = ["lznt1", "xpress", "lzx"] }
 memoffset = { workspace = true }
 nt-string = { workspace = true, default-features = false, features = ["alloc"] }
@@ -32,7 +32,7 @@ embed-resource = { workspace = true }
 
 [features]
 default = []
-std = ["arrayvec/std", "chrono?/std", "fs-common/std", "nt-string/std", "thiserror/std", "time?/std", "zerocopy/std"]
+std = ["arrayvec/std", "chrono?/std", "fsmnt-parser-core/std", "nt-string/std", "thiserror/std", "time?/std", "zerocopy/std"]
 arbitrary = ["dep:arbitrary"]
 compression = ["nt-compression"]
 

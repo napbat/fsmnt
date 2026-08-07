@@ -8,7 +8,7 @@
 
 use fsmnt_core::{FsError, FsResult, TargetFilesystem};
 
-use crate::detect::DetectedBootSector;
+use crate::DetectedBootSector;
 
 /// Combined reader bound required by filesystem drivers.
 ///

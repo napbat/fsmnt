@@ -10,8 +10,8 @@ use crate::mft::NtfsMftEntries;
 use crate::structured_values::{NtfsVolumeInformation, NtfsVolumeName};
 use crate::types::NtfsPosition;
 use crate::upcase_table::UpcaseTable;
-use fs_common::boot_sector::BOOT_SECTOR_SIZE;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::boot_sector::BOOT_SECTOR_SIZE;
+use fsmnt_parser_core::io::FsReadSeek;
 use zerocopy::FromBytes;
 
 /// Root structure describing an NTFS filesystem.
@@ -430,7 +430,7 @@ mod tests {
     /// Builds a minimal but valid 512-byte NTFS boot sector with explicit,
     /// distinct geometry so each accessor returns an unmistakable value.
     ///
-    /// Byte offsets (BPB/EBPB per fs-common::boot_sector):
+    /// Byte offsets (BPB/EBPB per fsmnt-parser-core::boot_sector):
     ///   0x00 jump, 0x03 "NTFS    " OEM ID
     ///   0x0B `bytes_per_sector` (u16), 0x0D `sectors_per_cluster` (u8)
     ///   0x28 `total_sectors` (u64), 0x30 `mft_lcn` (u64), 0x38 `mft_mirror_lcn` (u64)

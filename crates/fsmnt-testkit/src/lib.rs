@@ -60,11 +60,11 @@ where
     }
 }
 
-impl<T> fs_common::io::Read for Cursor<T>
+impl<T> fsmnt_parser_core::io::Read for Cursor<T>
 where
     T: AsRef<[u8]>,
 {
-    fn read(&mut self, buf: &mut [u8]) -> fs_common::io::Result<usize> {
+    fn read(&mut self, buf: &mut [u8]) -> fsmnt_parser_core::io::Result<usize> {
         let data = self.inner.get_ref().as_ref();
         let position = usize::try_from(self.inner.position()).unwrap_or(usize::MAX);
         if position >= data.len() {
@@ -79,24 +79,27 @@ where
     }
 }
 
-impl<T> fs_common::io::Seek for Cursor<T>
+impl<T> fsmnt_parser_core::io::Seek for Cursor<T>
 where
     T: AsRef<[u8]>,
 {
-    fn seek(&mut self, position: fs_common::io::SeekFrom) -> fs_common::io::Result<u64> {
+    fn seek(
+        &mut self,
+        position: fsmnt_parser_core::io::SeekFrom,
+    ) -> fsmnt_parser_core::io::Result<u64> {
         let new_position = match position {
-            fs_common::io::SeekFrom::Start(offset) => Some(offset),
-            fs_common::io::SeekFrom::End(offset) => {
+            fsmnt_parser_core::io::SeekFrom::Start(offset) => Some(offset),
+            fsmnt_parser_core::io::SeekFrom::End(offset) => {
                 let len = u64::try_from(self.inner.get_ref().as_ref().len())
                     .expect("buffer length fits in u64");
                 offset_position(len, offset)
             }
-            fs_common::io::SeekFrom::Current(offset) => {
+            fsmnt_parser_core::io::SeekFrom::Current(offset) => {
                 offset_position(self.inner.position(), offset)
             }
         };
         let Some(new_position) = new_position else {
-            return Err(fs_common::io::ErrorKind::InvalidInput.into());
+            return Err(fsmnt_parser_core::io::ErrorKind::InvalidInput.into());
         };
         self.inner.set_position(new_position);
         Ok(new_position)

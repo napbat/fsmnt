@@ -844,12 +844,12 @@ impl<'n> FatDirEntries<'n> {
     }
 }
 
-impl fs_common::iter::FsTryIteratorType for FatDirEntries<'_> {
+impl fsmnt_parser_core::iter::FsTryIteratorType for FatDirEntries<'_> {
     type Error = FatError;
     type Item<'a> = FatDirEntry;
 }
 
-impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for FatDirEntries<'_> {
+impl<R: Read + Seek> fsmnt_parser_core::iter::FsTryIterator<R> for FatDirEntries<'_> {
     fn try_next(&mut self, r: &mut R) -> Result<Option<FatDirEntry>> {
         self.next(r).transpose()
     }

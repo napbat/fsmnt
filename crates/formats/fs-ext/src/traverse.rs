@@ -1,13 +1,13 @@
 //! Directory traversal for ext2/ext3/ext4 filesystems.
 //!
 //! Implements [`FsDirectory`], [`FsDirEntry`], and [`FsTryIterator`] to
-//! enable recursive directory walking via [`fs_common::traverse::walk_dir`].
+//! enable recursive directory walking via [`fsmnt_parser_core::traverse::walk_dir`].
 
 use alloc::vec;
 use alloc::vec::Vec;
 
-use fs_common::iter::{FsTryIterator, FsTryIteratorType};
-use fs_common::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
+use fsmnt_parser_core::iter::{FsTryIterator, FsTryIteratorType};
+use fsmnt_parser_core::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
 
 use crate::block_map::resolve_block_map;
 use crate::directory::parse_next_entry;

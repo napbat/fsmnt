@@ -8,7 +8,7 @@ fn lookup_hello_txt_ext4() {
     let mut root = ext.root_directory();
     let entry = root.lookup(&mut fs, b"hello.txt").unwrap();
     assert_eq!(entry.inode_number, 20);
-    assert_eq!(entry.kind, fs_common::traverse::EntryKind::File);
+    assert_eq!(entry.kind, fsmnt_parser_core::traverse::EntryKind::File);
     assert_eq!(&entry.name, b"hello.txt");
 }
 
@@ -17,7 +17,10 @@ fn lookup_subdir_ext4() {
     let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let entry = root.lookup(&mut fs, b"subdir").unwrap();
-    assert_eq!(entry.kind, fs_common::traverse::EntryKind::Directory);
+    assert_eq!(
+        entry.kind,
+        fsmnt_parser_core::traverse::EntryKind::Directory
+    );
 }
 
 #[test]
@@ -37,7 +40,7 @@ fn lookup_hello_txt_ext2() {
     let mut root = ext.root_directory();
     let entry = root.lookup(&mut fs, b"hello.txt").unwrap();
     assert_eq!(entry.inode_number, 19);
-    assert_eq!(entry.kind, fs_common::traverse::EntryKind::File);
+    assert_eq!(entry.kind, fsmnt_parser_core::traverse::EntryKind::File);
 }
 
 #[test]
@@ -62,11 +65,17 @@ fn lookup_in_htree_dir_ext4() {
     let (ext, mut fs) = support::open_ext("ext4.img");
     let mut root = ext.root_directory();
     let htree_entry = root.lookup(&mut fs, b"htree_dir").unwrap();
-    assert_eq!(htree_entry.kind, fs_common::traverse::EntryKind::Directory);
+    assert_eq!(
+        htree_entry.kind,
+        fsmnt_parser_core::traverse::EntryKind::Directory
+    );
 
     let mut htree_dir = ext.directory_at(htree_entry.inode_number);
     let file_entry = htree_dir.lookup(&mut fs, b"file_250.txt").unwrap();
-    assert_eq!(file_entry.kind, fs_common::traverse::EntryKind::File);
+    assert_eq!(
+        file_entry.kind,
+        fsmnt_parser_core::traverse::EntryKind::File
+    );
 }
 
 #[test]
@@ -74,11 +83,17 @@ fn lookup_in_htree_dir_ext3() {
     let (ext, mut fs) = support::open_ext("ext3.img");
     let mut root = ext.root_directory();
     let htree_entry = root.lookup(&mut fs, b"htree_dir").unwrap();
-    assert_eq!(htree_entry.kind, fs_common::traverse::EntryKind::Directory);
+    assert_eq!(
+        htree_entry.kind,
+        fsmnt_parser_core::traverse::EntryKind::Directory
+    );
 
     let mut htree_dir = ext.directory_at(htree_entry.inode_number);
     let file_entry = htree_dir.lookup(&mut fs, b"file_250.txt").unwrap();
-    assert_eq!(file_entry.kind, fs_common::traverse::EntryKind::File);
+    assert_eq!(
+        file_entry.kind,
+        fsmnt_parser_core::traverse::EntryKind::File
+    );
 }
 
 #[test]

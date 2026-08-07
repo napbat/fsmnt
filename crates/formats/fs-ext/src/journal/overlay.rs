@@ -1,6 +1,6 @@
 //! Read/Seek adapter that routes reads through an `OverlaySource`.
 
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 
 use crate::io;
 use crate::io::{Read, Seek, SeekFrom};

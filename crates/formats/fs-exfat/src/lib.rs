@@ -50,9 +50,9 @@ pub use error::{ExFatError, Result};
 pub use exfat::ExFat;
 pub use fat::ExFatClusterIterator;
 pub use file::ExFatFile;
-pub use fs_common::FsReadSeek;
+pub use fsmnt_parser_core::FsReadSeek;
 pub use time::ExFatTimestamp;
 pub use traverse::{ExFatDirectory, ExFatDirectoryIter, ExFatTraversalEntry};
 pub use upcase::{ExFatUpcaseTable, compute_name_hash, compute_upcase_checksum};
 
-pub use fs_common::io;
+pub use fsmnt_parser_core::io;

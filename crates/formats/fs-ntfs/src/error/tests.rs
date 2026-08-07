@@ -72,13 +72,16 @@ fn test_mft_record_parse_failed_pattern_match() {
 #[test]
 fn fs_error_io_kind_maps_correctly() {
     let err = NtfsError::Io(io::ErrorKind::UnexpectedEof.into());
-    assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof),);
+    assert_eq!(
+        ParserError::io_kind(&err),
+        Some(fse::ErrorKind::UnexpectedEof),
+    );
 }
 
 #[test]
 fn fs_error_non_io_has_no_io_kind() {
     let err = NtfsError::InvalidTime;
-    assert_eq!(FsError::io_kind(&err), None);
+    assert_eq!(ParserError::io_kind(&err), None);
 }
 
 #[test]
@@ -105,7 +108,7 @@ fn fs_error_byte_offset_from_position() {
         expected: b"FILE",
         actual: [0; 4],
     };
-    assert_eq!(FsError::byte_offset(&err), Some(0x1000));
+    assert_eq!(ParserError::byte_offset(&err), Some(0x1000));
 }
 
 #[test]
@@ -116,17 +119,17 @@ fn fs_error_byte_offset_none_position() {
         actual: [0; 4],
     };
     // NtfsPosition::none() wraps None, so byte_offset is None
-    assert_eq!(FsError::byte_offset(&err), None);
+    assert_eq!(ParserError::byte_offset(&err), None);
 }
 
 #[test]
 fn fs_error_byte_offset_no_position_variant() {
     let err = NtfsError::InvalidTime;
-    assert_eq!(FsError::byte_offset(&err), None);
+    assert_eq!(ParserError::byte_offset(&err), None);
 }
 
 #[test]
-fn from_fs_common_io_error() {
+fn from_fsmnt_parser_core_io_error() {
     let io_err = fse::IoError::new(fse::ErrorKind::Interrupted);
     let ntfs_err: NtfsError = io_err.into();
     match ntfs_err {
@@ -155,5 +158,5 @@ fn test_bitlocker_encrypted_byte_offset() {
         position: NtfsPosition::new(0x03),
         oem_id: *b"-FVE-FS-",
     };
-    assert_eq!(FsError::byte_offset(&err), Some(3));
+    assert_eq!(ParserError::byte_offset(&err), Some(3));
 }

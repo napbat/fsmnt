@@ -1,6 +1,9 @@
-//! Common functionality shared between filesystem crates (fs-ntfs, fs-fat, etc.).
+//! Portable foundations shared by filesystem-format parsers.
 //!
-//! This crate provides `no_std`-compatible abstractions that work in both `std` and `no_std` environments.
+//! This crate is the canonical owner of parser I/O and error traits,
+//! traversal interfaces, boot-sector detection, and MBR/GPT byte
+//! structures. It is `no_std` by default; consumers that need
+//! `std::io` compatibility must opt into the `std` feature explicitly.
 
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -28,7 +31,7 @@ pub use boot_sector::{
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub use error::IntoStdIoError;
-pub use error::{ErrorKind, FsError, IoError};
+pub use error::{ErrorKind, IoError, ParserError};
 pub use io::{Attached, FsReadSeek};
 pub use iter::{FsTryIterator, FsTryIteratorExt, FsTryIteratorType};
 pub use simd::SimdLevel;

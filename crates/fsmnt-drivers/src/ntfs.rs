@@ -8,7 +8,6 @@ use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use fs_common::iter::FsTryIterator;
 use fs_ntfs::indexes::NtfsFileNameIndex;
 use fs_ntfs::structured_values::NtfsFileAttributeFlags;
 use fs_ntfs::{Ntfs, NtfsTime};
@@ -16,6 +15,9 @@ use fsmnt_core::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+
+use crate::adapter::found;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 /// Convert an [`NtfsTime`] to `DateTime<Utc>`, mapping the zero timestamp
 /// (NTFS's "not set" sentinel) to `None`.
@@ -139,7 +141,7 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
 
 impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-        use fs_common::io::FsReadSeek;
+        use fsmnt_parser_core::io::FsReadSeek;
 
         let record = self.navigate_to_record(path)?;
 
@@ -177,11 +179,7 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
     // has no true streaming path to override with.
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        match self.navigate_to_record(path) {
-            Ok(_) => Ok(true),
-            Err(FsError::NotFound(_)) => Ok(false),
-            Err(e) => Err(e),
-        }
+        found(self.navigate_to_record(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {

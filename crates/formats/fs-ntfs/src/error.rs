@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use core::ops::Range;
 
-use fs_common::error::{self as fse, FsError};
+use fsmnt_parser_core::error::{self as fse, ParserError};
 use thiserror::Error;
 
 use crate::attribute::NtfsAttributeType;
@@ -775,7 +775,7 @@ impl From<fse::IoError> for NtfsError {
     }
 }
 
-impl FsError for NtfsError {
+impl ParserError for NtfsError {
     fn io_kind(&self) -> Option<fse::ErrorKind> {
         let Self::Io(e) = self else {
             return None;

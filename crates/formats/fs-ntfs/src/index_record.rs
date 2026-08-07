@@ -2,8 +2,8 @@ use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
-use fs_common::error::IoError;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::error::IoError;
+use fsmnt_parser_core::io::FsReadSeek;
 use memoffset::offset_of;
 
 use crate::attribute_value::NtfsAttributeValue;
@@ -269,7 +269,7 @@ mod tests {
     use crate::indexes::NtfsFileNameIndex;
     use crate::ntfs::Ntfs;
     use crate::structured_values::{NtfsIndexAllocation, NtfsIndexRoot};
-    use fs_common::iter::FsTryIterator;
+    use fsmnt_parser_core::iter::FsTryIterator;
 
     /// Builds a synthetic single-sector (512-byte) `INDX` record with the
     /// given node-header fields, ready for [`NtfsIndexRecord::from_raw_data`].

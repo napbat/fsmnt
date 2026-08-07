@@ -5,8 +5,8 @@ edition.workspace = true
 
 [dependencies]
 fsmnt-core = { workspace = true }
+fsmnt-parser-core = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
-zerocopy = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
-fs-common = { workspace = true, default-features = false }
+fsmnt-parser-core = { workspace = true, default-features = false }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 # NFD normalization for APFS directory-entry name hashing; no_std.
@@ -19,7 +19,7 @@ time = { workspace = true, optional = true }
 
 [features]
 default = []
-std = ["fs-common/std", "sha2/std", "thiserror/std", "zerocopy/std"]
+std = ["fsmnt-parser-core/std", "sha2/std", "thiserror/std", "zerocopy/std"]
 chrono = ["dep:chrono"]
 time = ["dep:time"]
 

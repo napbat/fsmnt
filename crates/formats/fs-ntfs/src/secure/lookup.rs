@@ -12,8 +12,8 @@ use crate::indexes::{
 use crate::io::{Read, Seek, SeekFrom};
 use crate::structured_values::NtfsSecurityDescriptor;
 use crate::types::NtfsPosition;
-use fs_common::io::FsReadSeek;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 use super::entry::{SDS_HEADER_SIZE, SDS_MAX_SIZE};
 

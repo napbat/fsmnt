@@ -13,7 +13,7 @@
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use fs_common::SimdLevel;
+use fsmnt_parser_core::SimdLevel;
 
 /// Signature for match-copy implementations.
 type CopyMatchFn = unsafe fn(&mut [u8], usize, usize, usize);

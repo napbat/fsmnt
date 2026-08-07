@@ -1,6 +1,6 @@
 //! Error and result types for `fs-apfs`.
 
-use fs_common::error::{self as fse, FsError};
+use fsmnt_parser_core::error::{self as fse, ParserError};
 use thiserror::Error;
 
 use crate::io;
@@ -73,7 +73,7 @@ impl From<io::Error> for ApfsError {
 }
 
 // In no_std mode, io::Error = IoError, so From<io::Error> already covers this.
-// In std mode, the explicit conversion from fs-common's IoError is still needed.
+// In std mode, the explicit conversion from fsmnt-parser-core's IoError is still needed.
 #[cfg(feature = "std")]
 impl From<fse::IoError> for ApfsError {
     fn from(error: fse::IoError) -> Self {
@@ -81,7 +81,7 @@ impl From<fse::IoError> for ApfsError {
     }
 }
 
-impl FsError for ApfsError {
+impl ParserError for ApfsError {
     fn io_kind(&self) -> Option<fse::ErrorKind> {
         let Self::Io(error) = self else {
             return None;
@@ -138,13 +138,16 @@ mod tests {
     #[test]
     fn io_kind_is_none_for_non_io_variant() {
         let err = ApfsError::Unsupported("snapshots");
-        assert_eq!(FsError::io_kind(&err), None);
+        assert_eq!(ParserError::io_kind(&err), None);
     }
 
     #[test]
     fn io_kind_reports_underlying_kind() {
         let err = ApfsError::Io(io::ErrorKind::UnexpectedEof.into());
-        assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof));
+        assert_eq!(
+            ParserError::io_kind(&err),
+            Some(fse::ErrorKind::UnexpectedEof)
+        );
     }
 
     #[test]
@@ -152,9 +155,9 @@ mod tests {
         // ApfsError variants do not carry byte positions today; the
         // `byte_offset` trait method must report None for every variant.
         // A mutant that hard-codes `Some(0)` / `Some(1)` is caught here.
-        assert_eq!(FsError::byte_offset(&ApfsError::Unsupported("x")), None);
+        assert_eq!(ParserError::byte_offset(&ApfsError::Unsupported("x")), None);
         assert_eq!(
-            FsError::byte_offset(&ApfsError::Io(io::ErrorKind::Other.into())),
+            ParserError::byte_offset(&ApfsError::Io(io::ErrorKind::Other.into())),
             None
         );
     }

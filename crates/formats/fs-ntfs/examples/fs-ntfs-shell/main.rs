@@ -8,14 +8,14 @@ use std::io;
 use std::io::{BufReader, Read, Seek, Write};
 
 use anyhow::{Context, Result, anyhow, bail};
-use fs_common::io::FsReadSeek;
-use fs_common::iter::FsTryIterator;
 use fs_ntfs::attribute_value::NtfsAttributeValue;
 use fs_ntfs::indexes::NtfsFileNameIndex;
 use fs_ntfs::structured_values::{
     NtfsAttributeList, NtfsFileName, NtfsFileNamespace, NtfsStandardInformation,
 };
 use fs_ntfs::{Ntfs, NtfsAttribute, NtfsAttributeType, NtfsFile};
+use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::iter::FsTryIterator;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;

@@ -497,7 +497,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "chrono",
- "fs-common",
+ "fsmnt-parser-core",
  "fsmnt-testkit",
  "mutants",
  "sha2",
@@ -508,21 +508,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs-common"
-version = "0.1.0"
-dependencies = [
- "memoffset",
- "mutants",
- "zerocopy",
-]
-
-[[package]]
 name = "fs-exfat"
 version = "0.1.0"
 dependencies = [
  "bitflags",
  "chrono",
- "fs-common",
+ "fsmnt-parser-core",
  "fsmnt-testkit",
  "mutants",
  "thiserror",
@@ -540,7 +531,7 @@ dependencies = [
  "chrono",
  "crc32c",
  "crc32fast",
- "fs-common",
+ "fsmnt-parser-core",
  "fsmnt-testkit",
  "hkdf",
  "hmac",
@@ -567,7 +558,7 @@ dependencies = [
  "arbitrary",
  "bitflags",
  "chrono",
- "fs-common",
+ "fsmnt-parser-core",
  "fsmnt-testkit",
  "mutants",
  "thiserror",
@@ -586,7 +577,7 @@ dependencies = [
  "chrono",
  "derive_more",
  "embed-resource",
- "fs-common",
+ "fsmnt-parser-core",
  "fsmnt-testkit",
  "memoffset",
  "mutants",
@@ -628,8 +619,8 @@ name = "fsmnt-device"
 version = "0.1.0"
 dependencies = [
  "fsmnt-core",
+ "fsmnt-parser-core",
  "thiserror",
- "zerocopy",
 ]
 
 [[package]]
@@ -673,13 +664,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fs-apfs",
- "fs-common",
  "fs-exfat",
  "fs-ext",
  "fs-fat",
  "fs-ntfs",
  "fsmnt-core",
  "fsmnt-device",
+ "fsmnt-parser-core",
  "nt-bitlocker",
 ]
 
@@ -695,10 +686,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsmnt-parser-core"
+version = "0.1.0"
+dependencies = [
+ "memoffset",
+ "mutants",
+ "zerocopy",
+]
+
+[[package]]
 name = "fsmnt-testkit"
 version = "0.1.0"
 dependencies = [
- "fs-common",
+ "fsmnt-parser-core",
 ]
 
 [[package]]
@@ -913,7 +913,7 @@ version = "0.1.0"
 dependencies = [
  "cpufeatures 0.3.0",
  "divan",
- "fs-common",
+ "fsmnt-parser-core",
  "libloading",
  "proptest",
  "thiserror",

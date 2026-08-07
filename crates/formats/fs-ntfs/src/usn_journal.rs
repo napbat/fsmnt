@@ -15,8 +15,8 @@ use crate::io::{Read, Seek, SeekFrom};
 use crate::ntfs::Ntfs;
 use crate::time::NtfsTime;
 use crate::types::NtfsPosition;
-use fs_common::io::FsReadSeek;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 // ---------------------------------------------------------------------------
 // Common header constants (USN_RECORD_COMMON_HEADER, shared by V2 and V3)

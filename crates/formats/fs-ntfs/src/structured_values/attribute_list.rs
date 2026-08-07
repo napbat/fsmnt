@@ -14,7 +14,7 @@ use crate::io::{Read, Seek, SeekFrom};
 use crate::ntfs::Ntfs;
 use crate::structured_values::NtfsStructuredValue;
 use crate::types::{NtfsPosition, Vcn};
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 /// Size of all [`AttributeListEntryHeader`] fields.
 const ATTRIBUTE_LIST_ENTRY_HEADER_SIZE: usize = 26;
@@ -181,12 +181,14 @@ impl<'n, 'f> NtfsAttributeListEntries<'n, 'f> {
     }
 }
 
-impl fs_common::iter::FsTryIteratorType for NtfsAttributeListEntries<'_, '_> {
+impl fsmnt_parser_core::iter::FsTryIteratorType for NtfsAttributeListEntries<'_, '_> {
     type Error = NtfsError;
     type Item<'a> = NtfsAttributeListEntry;
 }
 
-impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for NtfsAttributeListEntries<'_, '_> {
+impl<R: Read + Seek> fsmnt_parser_core::iter::FsTryIterator<R>
+    for NtfsAttributeListEntries<'_, '_>
+{
     fn try_next(&mut self, r: &mut R) -> Result<Option<NtfsAttributeListEntry>> {
         self.next(r).transpose()
     }
@@ -354,7 +356,7 @@ impl NtfsAttributeListEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_common::iter::FsTryIterator;
+    use fsmnt_parser_core::iter::FsTryIterator;
     use fsmnt_testkit::Cursor;
 
     /// Build a minimal valid resident attribute list containing one entry.

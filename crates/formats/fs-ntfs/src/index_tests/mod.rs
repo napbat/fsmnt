@@ -2,7 +2,7 @@ use super::*;
 use crate::file::KnownNtfsFileRecordNumber;
 use crate::indexes::NtfsFileNameIndex;
 use crate::ntfs::Ntfs;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 #[test]
 fn test_index_find() {

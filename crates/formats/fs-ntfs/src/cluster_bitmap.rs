@@ -1,6 +1,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 
 use crate::attribute::NtfsAttributeType;
 use crate::data_run_map::DataRunMap;

@@ -1,4 +1,4 @@
-use fs_common::error::{self as fse, FsError};
+use fsmnt_parser_core::error::{self as fse, ParserError};
 use thiserror::Error;
 
 use crate::io;
@@ -150,7 +150,7 @@ impl From<fse::IoError> for FatError {
     }
 }
 
-impl FsError for FatError {
+impl ParserError for FatError {
     fn io_kind(&self) -> Option<fse::ErrorKind> {
         let Self::Io(e) = self else {
             return None;
@@ -210,25 +210,31 @@ mod tests {
     #[test]
     fn fs_error_io_kind_interrupted() {
         let err = FatError::Io(io::ErrorKind::Interrupted.into());
-        assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::Interrupted),);
+        assert_eq!(
+            ParserError::io_kind(&err),
+            Some(fse::ErrorKind::Interrupted),
+        );
     }
 
     #[test]
     fn fs_error_io_kind_unexpected_eof() {
         let err = FatError::Io(io::ErrorKind::UnexpectedEof.into());
-        assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof),);
+        assert_eq!(
+            ParserError::io_kind(&err),
+            Some(fse::ErrorKind::UnexpectedEof),
+        );
     }
 
     #[test]
     fn fs_error_non_io_has_no_io_kind() {
         let err = FatError::NotFound;
-        assert_eq!(FsError::io_kind(&err), None);
+        assert_eq!(ParserError::io_kind(&err), None);
     }
 
     #[test]
     fn fs_error_byte_offset_none_for_non_positional() {
         let err = FatError::InvalidCluster { cluster: 42 };
-        assert_eq!(FsError::byte_offset(&err), None);
+        assert_eq!(ParserError::byte_offset(&err), None);
     }
 
     #[test]
@@ -236,11 +242,11 @@ mod tests {
         let err = FatError::MalformedDirEntry {
             byte_offset: 0x2400,
         };
-        assert_eq!(FsError::byte_offset(&err), Some(0x2400));
+        assert_eq!(ParserError::byte_offset(&err), Some(0x2400));
     }
 
     #[test]
-    fn from_fs_common_io_error() {
+    fn from_fsmnt_parser_core_io_error() {
         let io_err = fse::IoError::new(fse::ErrorKind::UnexpectedEof);
         let fat_err: FatError = io_err.into();
         match fat_err {

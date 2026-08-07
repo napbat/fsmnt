@@ -3,7 +3,7 @@ use crate::indexes::NtfsFileNameIndex;
 use crate::ntfs::Ntfs;
 use crate::slack_recovery::SlackRecoveryConfig;
 use crate::structured_values::NtfsFileNamespace;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 use super::synthetic;
 

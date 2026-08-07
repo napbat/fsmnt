@@ -6,7 +6,7 @@ use crate::error::{FatError, Result};
 use crate::file::FatFile;
 use crate::io::{Read, Seek};
 
-use fs_common::boot_sector::{
+use fsmnt_parser_core::boot_sector::{
     BOOT_SECTOR_SIZE, BOOT_SIGNATURE, DosBpb, Fat16BootSector, Fat32BootSector,
 };
 use zerocopy::FromBytes;

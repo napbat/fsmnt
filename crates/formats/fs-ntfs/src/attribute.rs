@@ -724,12 +724,12 @@ impl<'n, 'f> NtfsAttributes<'n, 'f> {
     }
 }
 
-impl<'n, 'f> fs_common::iter::FsTryIteratorType for NtfsAttributes<'n, 'f> {
+impl<'n, 'f> fsmnt_parser_core::iter::FsTryIteratorType for NtfsAttributes<'n, 'f> {
     type Error = NtfsError;
     type Item<'a> = NtfsAttributeItem<'n, 'f>;
 }
 
-impl<'n, 'f, R: Read + Seek> fs_common::iter::FsTryIterator<R> for NtfsAttributes<'n, 'f> {
+impl<'n, 'f, R: Read + Seek> fsmnt_parser_core::iter::FsTryIterator<R> for NtfsAttributes<'n, 'f> {
     fn try_next(&mut self, r: &mut R) -> Result<Option<NtfsAttributeItem<'n, 'f>>> {
         self.next(r).transpose()
     }

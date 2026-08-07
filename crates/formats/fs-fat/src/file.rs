@@ -107,7 +107,7 @@ impl<'n> FatFile<'n> {
 mod tests {
     use super::*;
     use crate::fat::Fat;
-    use fs_common::boot_sector::BOOT_SIGNATURE;
+    use fsmnt_parser_core::boot_sector::BOOT_SIGNATURE;
     use fsmnt_testkit::Cursor;
 
     /// Minimal in-memory FAT16 image — just enough for `Fat::new` to succeed.

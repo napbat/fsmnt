@@ -108,7 +108,7 @@ fn classical_ext4_image_reports_no_meta_bg() {
 
 #[test]
 fn full_mixed_mode_via_first_meta_bg_patch() {
-    use fs_common::io::FsReadSeek;
+    use fsmnt_parser_core::io::FsReadSeek;
 
     if !crate::test_support::fixture_available("ext4-meta-bg.img") {
         eprintln!("skipping: ext4-meta-bg.img fixture not generated");

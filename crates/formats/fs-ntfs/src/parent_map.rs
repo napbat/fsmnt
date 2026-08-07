@@ -8,7 +8,7 @@ use crate::io::{Read, Seek};
 use crate::mft::NtfsMftEntries;
 use crate::ntfs::Ntfs;
 use crate::structured_values::{NtfsFileName, NtfsFileNamespace};
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 /// A child record in the parent map, representing one MFT entry that names
 /// a particular directory as its parent (via a `$FILE_NAME` attribute).
@@ -169,7 +169,7 @@ impl NtfsParentMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_common::iter::FsTryIterator;
+    use fsmnt_parser_core::iter::FsTryIterator;
 
     /// Builds a child entry with explicit field values for accessor tests.
     fn child(

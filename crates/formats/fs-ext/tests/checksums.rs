@@ -2,9 +2,9 @@
 
 mod support;
 
-use fs_common::io::FsReadSeek;
-use fs_common::iter::FsTryIterator;
-use fs_common::traverse::FsDirectory;
+use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::iter::FsTryIterator;
+use fsmnt_parser_core::traverse::FsDirectory;
 
 /// Look up a root-level entry and return its inode number.
 fn lookup_inode(ext: &fs_ext::Ext, fs: &mut fsmnt_testkit::Cursor<Vec<u8>>, name: &[u8]) -> u32 {

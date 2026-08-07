@@ -19,7 +19,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 
 use crate::cluster_bitmap::NtfsClusterBitmap;
 use crate::error::Result;

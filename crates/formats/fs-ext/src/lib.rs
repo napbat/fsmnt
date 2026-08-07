@@ -56,12 +56,12 @@ pub use checksum::ChecksumState;
 pub use error::{ExtError, Result};
 pub use ext::Ext;
 pub use file::ExtFile;
-pub use fs_common::io;
 #[cfg(feature = "fscrypt")]
 pub use fscrypt::{
     FSCRYPT_MAX_KEY_SIZE, FSCRYPT_MIN_KEY_SIZE, FscryptKeyDescriptor, FscryptKeyIdentifier,
     FscryptKeyUnwrapError, FscryptKeyUnwrapper, FscryptMasterKey, FscryptPolicy, FscryptPolicyKind,
 };
+pub use fsmnt_parser_core::io;
 pub use inode::{ExtDeviceId, ExtFileKind, ExtInode};
 pub use journal::JournalInvariantKind;
 pub use journal::JournalReplay;

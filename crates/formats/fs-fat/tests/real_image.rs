@@ -9,9 +9,9 @@
 use fsmnt_testkit::Cursor;
 use std::collections::BTreeSet;
 
-use fs_common::FsReadSeek;
-use fs_common::traverse::walk_dir;
 use fs_fat::{Fat, FatDirectory, FatDirectoryEntry, FatType};
+use fsmnt_parser_core::FsReadSeek;
+use fsmnt_parser_core::traverse::walk_dir;
 
 fn load_test_image() -> Option<Cursor<Vec<u8>>> {
     let path = "testdata/testfs1";
@@ -297,7 +297,7 @@ fn seek_and_read_file() {
 
     // Seek to offset 7 ("FAT32!")
     value
-        .seek(&mut cursor, fs_common::io::SeekFrom::Start(7))
+        .seek(&mut cursor, fsmnt_parser_core::io::SeekFrom::Start(7))
         .unwrap();
 
     let mut buf = [0u8; 6];
@@ -316,7 +316,7 @@ fn seek_from_end() {
 
     // "Hello, FAT32!" — last 6 bytes = "FAT32!"
     value
-        .seek(&mut cursor, fs_common::io::SeekFrom::End(-6))
+        .seek(&mut cursor, fsmnt_parser_core::io::SeekFrom::End(-6))
         .unwrap();
 
     let mut buf = [0u8; 6];
@@ -340,7 +340,7 @@ fn seek_backward_and_reread() {
 
     // Seek back to start with SeekFrom::Current
     value
-        .seek(&mut cursor, fs_common::io::SeekFrom::Current(-7))
+        .seek(&mut cursor, fsmnt_parser_core::io::SeekFrom::Current(-7))
         .unwrap();
 
     // Re-read — should get same data

@@ -2,7 +2,7 @@
 
 mod support;
 
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 #[test]
 fn corrupted_superblock_rejects_cleanly() {

@@ -25,6 +25,7 @@ fsmnt-device-windows = { path = "crates/fsmnt-device-windows" }
 fsmnt-dokan = { path = "crates/fsmnt-dokan" }
 fsmnt-drivers = { path = "crates/fsmnt-drivers" }
 fsmnt-fuse = { path = "crates/fsmnt-fuse" }
+fsmnt-parser-core = { path = "crates/fsmnt-parser-core", default-features = false }
 fsmnt-testkit = { path = "crates/fsmnt-testkit" }
 
 # Vendored filesystem-format crates (crates/formats/). Their manifests
@@ -33,7 +34,6 @@ fsmnt-testkit = { path = "crates/fsmnt-testkit" }
 # takes `default-features = false` so nothing pulls `std` in implicitly.
 # Consumers that need std (e.g. the fsmnt-drivers adapters, which bridge
 # to std::io) opt in explicitly with `features = ["std"]`.
-fs-common = { path = "crates/formats/fs-common", default-features = false }
 fs-ntfs = { path = "crates/formats/fs-ntfs", default-features = false }
 fs-fat = { path = "crates/formats/fs-fat", default-features = false }
 fs-apfs = { path = "crates/formats/fs-apfs", default-features = false }

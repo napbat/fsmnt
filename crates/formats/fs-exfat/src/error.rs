@@ -1,10 +1,10 @@
 use thiserror::Error;
 
 use crate::io;
-use fs_common::error::{self as fse, FsError};
+use fsmnt_parser_core::error::{self as fse, ParserError};
 // Only referenced by the std-gated `From<IoError>` impl below.
 #[cfg(feature = "std")]
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 
 /// Central result type of fs-exfat.
 pub type Result<T, E = ExFatError> = core::result::Result<T, E>;
@@ -190,7 +190,7 @@ impl From<IoError> for ExFatError {
     }
 }
 
-impl FsError for ExFatError {
+impl ParserError for ExFatError {
     fn io_kind(&self) -> Option<fse::ErrorKind> {
         let Self::Io(e) = self else {
             return None;
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn fs_error_impl() {
-        use fs_common::error::{ErrorKind, FsError, IoError};
+        use fsmnt_parser_core::error::{ErrorKind, IoError, ParserError};
 
         // From<IoError> conversion
         let io_err = IoError::new(ErrorKind::UnexpectedEof);

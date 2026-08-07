@@ -1,6 +1,6 @@
 use super::*;
 use crate::checksum::ChecksumState;
-use fs_common::FsTryIterator;
+use fsmnt_parser_core::FsTryIterator;
 
 /// Inode of the 500-file htree directory `/htree_dir` in ext4.img.
 const HTREE_DIR: u32 = 21;

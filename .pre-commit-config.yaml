@@ -35,5 +35,5 @@ repos:
         name: filesystem format crates stay no_std
         entry: python scripts/check_formats_no_std.py
         language: python
-        files: ^(Cargo\.toml|Cargo\.lock|crates/formats/.+\.(rs|toml)|scripts/check_formats_no_std\.py)$
+        files: ^(Cargo\.toml|Cargo\.lock|crates/(formats/.+|fsmnt-parser-core/.+)\.(rs|toml)|scripts/check_formats_no_std\.py)$
         pass_filenames: false

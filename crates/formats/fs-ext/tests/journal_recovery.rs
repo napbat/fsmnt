@@ -2,10 +2,10 @@
 
 mod support;
 
-use fs_common::iter::FsTryIterator;
-use fs_common::traverse::FsDirectory;
 use fs_ext::journal::StopReason;
 use fs_ext::{Ext, ExtError, JournalReplay, OverlayReader};
+use fsmnt_parser_core::iter::FsTryIterator;
+use fsmnt_parser_core::traverse::FsDirectory;
 
 #[test]
 fn clean_image_reports_journal_via_public_accessors() {

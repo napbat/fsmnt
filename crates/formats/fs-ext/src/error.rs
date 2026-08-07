@@ -1,4 +1,4 @@
-use fs_common::error::{self as fse, FsError};
+use fsmnt_parser_core::error::{self as fse, ParserError};
 use thiserror::Error;
 
 use crate::io;
@@ -411,7 +411,7 @@ impl From<fse::IoError> for ExtError {
     }
 }
 
-impl FsError for ExtError {
+impl ParserError for ExtError {
     fn io_kind(&self) -> Option<fse::ErrorKind> {
         let Self::Io(e) = self else {
             return None;
@@ -488,16 +488,22 @@ mod tests {
     #[test]
     fn fs_error_io_kind() {
         let err = ExtError::Io(io::ErrorKind::Interrupted.into());
-        assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::Interrupted));
+        assert_eq!(
+            ParserError::io_kind(&err),
+            Some(fse::ErrorKind::Interrupted)
+        );
 
         let err = ExtError::Io(io::ErrorKind::UnexpectedEof.into());
-        assert_eq!(FsError::io_kind(&err), Some(fse::ErrorKind::UnexpectedEof));
+        assert_eq!(
+            ParserError::io_kind(&err),
+            Some(fse::ErrorKind::UnexpectedEof)
+        );
     }
 
     #[test]
     fn fs_error_non_io_has_no_io_kind() {
         let err = ExtError::NotFound;
-        assert_eq!(FsError::io_kind(&err), None);
+        assert_eq!(ParserError::io_kind(&err), None);
     }
 
     #[test]
@@ -506,10 +512,10 @@ mod tests {
             context: "reading superblock",
             offset: 0x400,
         };
-        assert_eq!(FsError::byte_offset(&err), Some(0x400));
+        assert_eq!(ParserError::byte_offset(&err), Some(0x400));
 
         let err = ExtError::InvalidMagic { magic: 0xEF53 };
-        assert_eq!(FsError::byte_offset(&err), None);
+        assert_eq!(ParserError::byte_offset(&err), None);
     }
 
     #[test]
@@ -569,7 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn from_fs_common_io_error() {
+    fn from_fsmnt_parser_core_io_error() {
         let io_err = fse::IoError::new(fse::ErrorKind::UnexpectedEof);
         let ext_err: ExtError = io_err.into();
         match ext_err {

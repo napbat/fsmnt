@@ -5,8 +5,8 @@
 use core::iter::FusedIterator;
 use core::mem;
 
-use fs_common::error::IoError;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::error::IoError;
+use fsmnt_parser_core::io::FsReadSeek;
 
 use super::seek_contiguous;
 use crate::error::{NtfsError, Result};

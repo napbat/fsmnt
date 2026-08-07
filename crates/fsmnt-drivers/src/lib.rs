@@ -1,7 +1,9 @@
 //! Filesystem-parser adapters for the `fsmnt` mount stack.
 //!
-//! This crate bridges the vendored, `no_std`-capable format parsers under
-//! `crates/formats/` to the two traits the mount stack is built on:
+//! This crate is the std boundary between the vendored, `no_std`-capable
+//! format parsers under `crates/formats/` (and their shared
+//! `fsmnt-parser-core` foundation) and the two traits the mount stack is
+//! built on:
 //!
 //! - [`TargetFilesystem`](fsmnt_core::TargetFilesystem) — the read-only
 //!   file-tree interface the mount backends consume.
@@ -54,6 +56,7 @@
 //! need.  Drivers are consulted in registration order, so a driver added
 //! before the defaults wins for the types it claims.
 
+mod adapter;
 mod apfs;
 mod bitlocker;
 mod exfat;

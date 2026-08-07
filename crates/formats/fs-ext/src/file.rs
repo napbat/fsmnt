@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 
 use crate::block_map::{collect_block_map_blocks_into, resolve_block_map};
 use crate::error::{ExtError, Result};

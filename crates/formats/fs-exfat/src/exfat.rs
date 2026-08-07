@@ -11,7 +11,7 @@ use crate::io::{Read, Seek};
 use crate::upcase::ExFatUpcaseTable;
 use zerocopy::FromBytes;
 
-use fs_common::boot_sector::ExFatBootSector;
+use fsmnt_parser_core::boot_sector::ExFatBootSector;
 
 /// Root structure describing an exFAT filesystem.
 ///
@@ -542,7 +542,7 @@ impl ExFat {
     ///
     /// Combines [`open`](ExFat::open) (path resolution) with
     /// [`ExFatFile::new`] (data stream setup). The returned handle
-    /// supports seeking and reading via [`FsReadSeek`](fs_common::FsReadSeek).
+    /// supports seeking and reading via [`FsReadSeek`](fsmnt_parser_core::FsReadSeek).
     ///
     /// # Errors
     ///

@@ -1,7 +1,7 @@
 use super::*;
 use crate::ntfs::Ntfs;
 use crate::time::tests::NT_TIMESTAMP_2021_01_01;
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 
 const MFT_RECORD_NUMBER: u64 = 0;
 const ROOT_DIRECTORY_RECORD_NUMBER: u64 = 5;

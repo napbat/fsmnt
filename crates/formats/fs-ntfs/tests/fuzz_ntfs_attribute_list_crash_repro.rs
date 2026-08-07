@@ -1,8 +1,8 @@
 //! Regression tests for malformed attribute-list fuzz artifacts.
 
-use fs_common::iter::FsTryIterator;
 use fs_ntfs::structured_values::NtfsAttributeList;
 use fs_ntfs::types::NtfsPosition;
+use fsmnt_parser_core::iter::FsTryIterator;
 use fsmnt_testkit::read_required_fixture;
 
 /// Regression harness for libFuzzer timeouts found in `fuzz_ntfs_attribute_list`.

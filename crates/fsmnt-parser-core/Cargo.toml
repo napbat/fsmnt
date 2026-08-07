@@ -1,5 +1,5 @@
-﻿[package]
-name = "fs-common"
+[package]
+name = "fsmnt-parser-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

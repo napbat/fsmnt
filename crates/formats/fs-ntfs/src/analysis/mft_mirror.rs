@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn test_mirror_position_matches_boot_sector() {
         use crate::boot_sector::{BootSector, BootSectorExt};
-        use fs_common::boot_sector::BOOT_SECTOR_SIZE;
+        use fsmnt_parser_core::boot_sector::BOOT_SECTOR_SIZE;
         use zerocopy::FromBytes;
 
         let Some(mut testfs1) = crate::helpers::tests::testfs1() else {

@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use fs_common::error::IoError;
+use fsmnt_parser_core::error::IoError;
 
 use crate::attribute_value::NtfsDataRuns;
 use crate::error::{NtfsError, Result};

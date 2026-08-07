@@ -9,9 +9,9 @@
 use fsmnt_testkit::Cursor;
 use std::collections::BTreeSet;
 
-use fs_common::FsReadSeek;
-use fs_common::traverse::{EntryKind, walk_dir};
 use fs_exfat::{ExFat, ExFatDirectory, ExFatTraversalEntry};
+use fsmnt_parser_core::FsReadSeek;
+use fsmnt_parser_core::traverse::{EntryKind, walk_dir};
 
 fn load_test_image() -> Option<Cursor<Vec<u8>>> {
     let path = "testdata/testfs1";
@@ -278,7 +278,7 @@ fn seek_and_read_file() {
     let mut file = exfat.open_file(&mut cursor, "hello.txt").unwrap();
 
     // Seek to offset 7 ("exFAT!")
-    file.seek(&mut cursor, fs_common::io::SeekFrom::Start(7))
+    file.seek(&mut cursor, fsmnt_parser_core::io::SeekFrom::Start(7))
         .unwrap();
 
     let mut buf = [0u8; 6];

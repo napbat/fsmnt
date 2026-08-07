@@ -9,7 +9,7 @@ license.workspace = true
 arbitrary = { workspace = true, optional = true }
 bitflags = { workspace = true }
 chrono = { workspace = true, optional = true }
-fs-common = { workspace = true, default-features = false }
+fsmnt-parser-core = { workspace = true, default-features = false }
 thiserror = { workspace = true }
 time = { workspace = true, optional = true }
 zerocopy = { workspace = true, features = ["derive"] }
@@ -22,7 +22,7 @@ mutants = { workspace = true }
 [features]
 default = []
 arbitrary = ["dep:arbitrary"]
-std = ["fs-common/std", "thiserror/std", "zerocopy/std"]
+std = ["fsmnt-parser-core/std", "thiserror/std", "zerocopy/std"]
 chrono = ["dep:chrono"]
 time = ["dep:time"]
 

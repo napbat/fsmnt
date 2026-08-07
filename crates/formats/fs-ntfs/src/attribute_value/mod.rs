@@ -16,8 +16,8 @@ pub use resident::*;
 #[cfg(feature = "compression")]
 pub use wof::*;
 
-use fs_common::error::IoError;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::error::IoError;
+use fsmnt_parser_core::io::FsReadSeek;
 
 use crate::data_run_map::DataRunMap;
 use crate::error::{NtfsError, Result};
@@ -44,11 +44,11 @@ pub enum NtfsAttributeValue<'n, 'f> {
 impl NtfsAttributeValue<'_, '_> {
     /// Returns a variant of this reader that implements [`Read`] and [`Seek`]
     /// by mutably borrowing the filesystem reader.
-    pub fn attach<T>(self, fs: &mut T) -> fs_common::io::Attached<'_, Self, T>
+    pub fn attach<T>(self, fs: &mut T) -> fsmnt_parser_core::io::Attached<'_, Self, T>
     where
         T: Read + Seek,
     {
-        fs_common::io::Attached::new(self, fs)
+        fsmnt_parser_core::io::Attached::new(self, fs)
     }
 
     /// Extracts the data runs from this non-resident attribute value
@@ -191,7 +191,7 @@ pub(crate) fn seek_contiguous(
 
 #[cfg(test)]
 mod tests {
-    use fs_common::io::FsReadSeek;
+    use fsmnt_parser_core::io::FsReadSeek;
 
     use crate::attribute_value::NtfsResidentAttributeValue;
     use crate::indexes::NtfsFileNameIndex;

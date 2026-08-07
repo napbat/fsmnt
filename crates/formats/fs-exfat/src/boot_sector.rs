@@ -3,7 +3,7 @@ use bitflags::bitflags;
 use crate::error::{ExFatError, Result};
 use crate::io::{Read, Seek};
 
-use fs_common::boot_sector::{BOOT_SECTOR_SIZE, BOOT_SIGNATURE, ExFatBootSector};
+use fsmnt_parser_core::boot_sector::{BOOT_SECTOR_SIZE, BOOT_SIGNATURE, ExFatBootSector};
 use zerocopy::FromBytes;
 
 bitflags! {

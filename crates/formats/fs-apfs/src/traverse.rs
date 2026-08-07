@@ -1,16 +1,16 @@
 //! Volume traversal — path resolution, directory walking, and the
-//! `fs-common` traversal-trait integration.
+//! `fsmnt-parser-core` traversal-trait integration.
 //!
 //! A [`Volume`] ties a volume superblock to its object map and catalog,
 //! exposing absolute-path resolution and a directory tree that plugs into
-//! [`fs_common::traverse::walk_dir`].
+//! [`fsmnt_parser_core::traverse::walk_dir`].
 //!
 //! Apple File System Reference, `06-volumes.md`, `07-file-system-objects.md`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use fs_common::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
+use fsmnt_parser_core::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
 
 use crate::apfs::Apfs;
 use crate::catalog::Catalog;
@@ -296,7 +296,7 @@ impl Volume {
     }
 
     /// Returns the volume's root directory as a traversal handle, usable with
-    /// [`fs_common::traverse::walk_dir`].
+    /// [`fsmnt_parser_core::traverse::walk_dir`].
     #[must_use]
     pub fn root(&self) -> ApfsDir {
         ApfsDir {
@@ -321,7 +321,7 @@ fn entry_kind(file_type: DirEntryType) -> EntryKind {
     }
 }
 
-/// An APFS directory as a `fs-common` traversal handle.
+/// An APFS directory as a `fsmnt-parser-core` traversal handle.
 #[derive(Debug, Clone)]
 pub struct ApfsDir {
     catalog: Catalog,
@@ -329,7 +329,7 @@ pub struct ApfsDir {
     cmp: NameComparison,
 }
 
-/// One entry of an [`ApfsDir`], as a `fs-common` traversal entry.
+/// One entry of an [`ApfsDir`], as a `fsmnt-parser-core` traversal entry.
 #[derive(Debug, Clone)]
 pub struct ApfsTraversalEntry {
     catalog: Catalog,
@@ -372,12 +372,12 @@ pub struct ApfsEntryIter {
     index: usize,
 }
 
-impl fs_common::iter::FsTryIteratorType for ApfsEntryIter {
+impl fsmnt_parser_core::iter::FsTryIteratorType for ApfsEntryIter {
     type Error = ApfsError;
     type Item<'a> = ApfsTraversalEntry;
 }
 
-impl<R: Read + Seek> fs_common::iter::FsTryIterator<R> for ApfsEntryIter {
+impl<R: Read + Seek> fsmnt_parser_core::iter::FsTryIterator<R> for ApfsEntryIter {
     // Index-update mutation `self.index += 1` → `self.index *= 1` keeps
     // the iterator on the same entry forever; the test harness detects
     // the resulting infinite loop as a timeout. Iteration coverage is
@@ -423,7 +423,7 @@ mod tests {
     use crate::directory::J_DREC_LEN_MASK;
     use crate::object::OBJ_PHYSICAL;
     use crate::types::{Oid, Xid};
-    use fs_common::traverse::walk_dir;
+    use fsmnt_parser_core::traverse::walk_dir;
     use fsmnt_testkit::Cursor;
     use std::collections::BTreeSet;
 
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn traversal_entry_exposes_name_bytes_and_id() {
-        use fs_common::traverse::{FsDirEntry, FsDirectory};
+        use fsmnt_parser_core::traverse::{FsDirEntry, FsDirectory};
         let (vol, mut reader) = volume();
         let mut root = vol.root();
         // The root directory's id is the well-known root-inode number.
@@ -879,12 +879,10 @@ mod tests {
         );
         let mut iter = root.entries(&mut reader).unwrap();
         let mut found = std::collections::BTreeMap::<Vec<u8>, FsId>::new();
-        while let Some(entry) =
-            <ApfsEntryIter as fs_common::iter::FsTryIterator<Cursor<Vec<u8>>>>::try_next(
-                &mut iter,
-                &mut reader,
-            )
-            .unwrap()
+        while let Some(entry) = <ApfsEntryIter as fsmnt_parser_core::iter::FsTryIterator<
+            Cursor<Vec<u8>>,
+        >>::try_next(&mut iter, &mut reader)
+        .unwrap()
         {
             let name =
                 <ApfsTraversalEntry as FsDirEntry<Cursor<Vec<u8>>>>::name_bytes(&entry).to_vec();

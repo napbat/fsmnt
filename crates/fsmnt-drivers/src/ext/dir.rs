@@ -6,10 +6,10 @@
 
 use std::path::PathBuf;
 
-use fs_common::iter::FsTryIterator;
 use fs_ext::Ext;
 use fs_ext::io::{Read, Seek};
 use fsmnt_core::{FsEntry, FsEntryFlags, FsMetadata, FsResult};
+use fsmnt_parser_core::iter::FsTryIterator;
 
 use super::{Reader, map_ext_error, ts_to_utc};
 

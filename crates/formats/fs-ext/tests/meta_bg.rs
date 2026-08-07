@@ -1,7 +1,7 @@
 //! Integration tests for ext4 `META_BG` descriptor layouts.
 
-use fs_common::io::FsReadSeek;
 use fs_ext::ChecksumState;
+use fsmnt_parser_core::io::FsReadSeek;
 
 #[test]
 fn opens_meta_bg_image_and_reads_files() {

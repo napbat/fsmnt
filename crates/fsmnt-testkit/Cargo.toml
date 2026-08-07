@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-fs-common = { workspace = true, default-features = false }
+fsmnt-parser-core = { workspace = true, default-features = false }
 
 [lints]
 workspace = true

@@ -1,12 +1,12 @@
 pub(crate) use fsmnt_testkit::Cursor;
 
-pub(crate) use fs_common::FsTryIterator;
-pub(crate) use fs_common::io::FsReadSeek;
-pub(crate) use fs_common::traverse::{EntryKind, FsDirectory};
 pub(crate) use fs_ext::{
     Ext, ExtError, FscryptKeyDescriptor, FscryptKeyUnwrapError, FscryptKeyUnwrapper,
     FscryptMasterKey,
 };
+pub(crate) use fsmnt_parser_core::FsTryIterator;
+pub(crate) use fsmnt_parser_core::io::FsReadSeek;
+pub(crate) use fsmnt_parser_core::traverse::{EntryKind, FsDirectory};
 pub(crate) use sha2::{Digest, Sha256, Sha512};
 
 pub(crate) const IMAGE: &str = "testdata/ext4-fscrypt.img";

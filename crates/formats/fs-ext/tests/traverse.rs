@@ -4,9 +4,9 @@ mod support;
 
 use std::collections::BTreeSet;
 
-use fs_common::iter::FsTryIterator;
-use fs_common::traverse::{EntryKind, FsDirectory, FsId, walk_dir};
 use fs_ext::ExtRawDirectoryIter;
+use fsmnt_parser_core::iter::FsTryIterator;
+use fsmnt_parser_core::traverse::{EntryKind, FsDirectory, FsId, walk_dir};
 
 #[test]
 fn list_root_directory_ext4() {

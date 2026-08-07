@@ -1,6 +1,6 @@
 //! Regression tests for inputs that previously crashed FAT fuzz targets.
 
-use fs_common::iter::FsTryIterator;
+use fsmnt_parser_core::iter::FsTryIterator;
 use fsmnt_testkit::Cursor;
 
 /// Regression harnesses for libFuzzer crashes found in FAT fuzz targets.

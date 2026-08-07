@@ -16,7 +16,7 @@
 //! The list is directly taken from the NTFS index, hence it's sorted in ascending order with respect to NTFS's understanding of case-insensitive string comparison.
 //!
 //! ```no_run
-//! # use fs_common::iter::FsTryIterator;
+//! # use fsmnt_parser_core::iter::FsTryIterator;
 //! # use fs_ntfs::Ntfs;
 //! # let mut fs = fsmnt_testkit::Cursor::new(vec![]);
 //! let mut ntfs = Ntfs::new(&mut fs).unwrap();
@@ -81,8 +81,8 @@ pub mod types;
 mod upcase_table;
 mod usn_journal;
 
-/// Re-export of [`fs_common::io`] for convenience.
-pub use fs_common::io;
+/// Re-export of [`fsmnt_parser_core::io`] for convenience.
+pub use fsmnt_parser_core::io;
 
 pub use crate::attribute::{
     NtfsAttribute, NtfsAttributeFlags, NtfsAttributeItem, NtfsAttributeType, NtfsAttributes,

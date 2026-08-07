@@ -17,7 +17,7 @@
 //! The following example dumps the names of all files and folders in the root directory of a given FAT filesystem.
 //!
 //! ```no_run
-//! # use fs_common::iter::FsTryIterator;
+//! # use fsmnt_parser_core::iter::FsTryIterator;
 //! # use fs_fat::Fat;
 //! # let mut fs = fsmnt_testkit::Cursor::new(vec![0u8; 512]);
 //! let fat = Fat::new(&mut fs).unwrap();
@@ -30,7 +30,7 @@
 //!
 //! # Reading a file
 //! ```ignore
-//! use fs_common::io::FsReadSeek;
+//! use fsmnt_parser_core::io::FsReadSeek;
 //! use fs_fat::Fat;
 //!
 //! let fat = Fat::new(&mut fs)?;
@@ -66,4 +66,4 @@ pub use time::FatTime;
 pub use traverse::{FatDirectory, FatDirectoryEntry, FatDirectoryIter};
 pub use value::FatFileValue;
 
-pub use fs_common::io;
+pub use fsmnt_parser_core::io;

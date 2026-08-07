@@ -1,10 +1,10 @@
 use alloc::format;
 
-use crate::error::{ErrorKind, FsError, IoError};
+use crate::error::{ErrorKind, IoError, ParserError};
 
 /// Lossy conversion from a filesystem error to [`std::io::Error`].
 ///
-/// This is a blanket impl for all `FsError` types. The conversion maps
+/// This is a blanket impl for all `ParserError` types. The conversion maps
 /// [`ErrorKind`] variants to their [`std::io::ErrorKind`] equivalents and
 /// uses `Debug` output as the error message (lossy: structured context is lost).
 pub trait IntoStdIoError {
@@ -44,7 +44,7 @@ impl From<IoError> for std::io::Error {
     }
 }
 
-impl<E: FsError> IntoStdIoError for E {
+impl<E: ParserError> IntoStdIoError for E {
     fn into_std_io_error(self) -> std::io::Error {
         let kind = self
             .io_kind()
@@ -56,7 +56,7 @@ impl<E: FsError> IntoStdIoError for E {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{ErrorKind, FsError, IoError};
+    use crate::error::{ErrorKind, IoError, ParserError};
 
     #[derive(Debug)]
     enum TestError {
@@ -70,7 +70,7 @@ mod tests {
         }
     }
 
-    impl FsError for TestError {
+    impl ParserError for TestError {
         fn io_kind(&self) -> Option<ErrorKind> {
             match self {
                 Self::Io(e) => Some(e.kind()),

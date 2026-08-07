@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use super::non_resident::NtfsNonResidentAttributeValue;
 use super::seek_contiguous;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 use crate::error::{NtfsError, Result};
 use crate::io::{Read, Seek, SeekFrom};

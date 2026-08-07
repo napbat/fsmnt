@@ -114,7 +114,7 @@ pub use extended_field::{ExtendedFields, XField, XfFlags};
 pub use extent::{DataStream, File, FileExtent};
 pub use fext::FextTree;
 pub use forensic::{CloneSet, TimelineEvent, TimestampKind, build_clone_map, build_timeline};
-pub use fs_common::io;
+pub use fsmnt_parser_core::io;
 pub use fusion::{
     FusionAddress, FusionCache, FusionMtVal, FusionReader, FusionWbc, FusionWbcList, decode_address,
 };

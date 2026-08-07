@@ -7,7 +7,7 @@ use crate::error::{NtfsError, Result};
 use crate::io::{Read, Seek, SeekFrom};
 use crate::structured_values::NtfsSecurityDescriptor;
 use crate::types::NtfsPosition;
-use fs_common::io::FsReadSeek;
+use fsmnt_parser_core::io::FsReadSeek;
 
 /// Size of the $SDS entry header (hash + `security_id` + `file_offset`
 /// + `entry_size`).

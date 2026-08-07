@@ -79,7 +79,7 @@ pub(crate) fn assert_roundtrip_match(
 }
 
 pub use error::{Error, LenientResult, Result};
-pub use fs_common::SimdLevel;
+pub use fsmnt_parser_core::SimdLevel;
 
 /// Supported compression algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
