@@ -91,10 +91,20 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         partition: usize,
 
-        /// Bypass any operating-system-mounted volume and read the raw
-        /// partition directly.
-        #[arg(long)]
+        /// Bypass operating-system logical volumes and read physical
+        /// partition members directly.
+        #[arg(long, conflicts_with = "volume")]
         raw: bool,
+
+        /// Select an operating-system logical volume by the identifier
+        /// reported when automatic selection is ambiguous.
+        #[arg(long, value_name = "ID")]
+        volume: Option<String>,
+
+        /// Add a raw multi-device member as `DRIVE:PARTITION`. May be
+        /// repeated and requires `--raw`.
+        #[arg(long, value_name = "DRIVE:PARTITION", requires = "raw")]
+        member: Vec<String>,
 
         /// Volume label shown in the OS file manager (defaults to the
         /// drive model or ID).
@@ -147,18 +157,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mountpoint,
             partition,
             raw,
+            volume,
+            member,
             volname,
             recovery_password,
             bek_file,
-        } => handle_mount_device(
-            &drive,
+        } => handle_mount_device(MountDeviceOptions {
+            drive: &drive,
             partition,
             raw,
-            &mountpoint,
-            volname.as_deref(),
+            volume: volume.as_deref(),
+            members: &member,
+            mountpoint: &mountpoint,
+            volname: volname.as_deref(),
             recovery_password,
-            bek_file.as_deref(),
-        ),
+            bek_file: bek_file.as_deref(),
+        }),
     }
 }
 
@@ -446,47 +460,127 @@ fn handle_mount_image(
 
 /// Mount a partition from a physical drive.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-fn handle_mount_device(
-    drive: &str,
+struct MountDeviceOptions<'a> {
+    drive: &'a str,
     partition: usize,
     raw: bool,
-    mountpoint: &str,
-    volname: Option<&str>,
+    volume: Option<&'a str>,
+    members: &'a [String],
+    mountpoint: &'a str,
+    volname: Option<&'a str>,
     recovery_password: Option<String>,
-    bek_file: Option<&std::path::Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    bek_file: Option<&'a std::path::Path>,
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn handle_mount_device(options: MountDeviceOptions<'_>) -> Result<(), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
-    use fsmnt::device::{HostDriveEnumerator, HostDriveId};
-
-    let id = HostDriveId::new(drive);
-    let drivers = build_registry(recovery_password, bek_file)?;
-
-    let mode = if raw {
-        fsmnt::PartitionOpenMode::Raw
-    } else {
-        fsmnt::PartitionOpenMode::PreferMounted
+    use fsmnt::device::{
+        HostDriveEnumerator, HostDriveId, LogicalVolumeId, SourceOrigin, SourceSelection,
     };
-    let opened =
-        fsmnt::open_device_partition_with_mode::<HostDrives>(&id, partition, &drivers, mode)?;
 
-    ensure_unix_mountpoint(mountpoint)?;
+    let id = HostDriveId::new(options.drive);
+    let drivers = build_registry(options.recovery_password, options.bek_file)?;
 
-    let volname = volname.map_or_else(
+    let selection = if options.raw {
+        let additional_partitions = options
+            .members
+            .iter()
+            .map(|member| parse_partition_address(member))
+            .collect::<Result<Vec<_>, _>>()?;
+        SourceSelection::Raw {
+            additional_partitions,
+        }
+    } else if let Some(volume) = options.volume {
+        SourceSelection::Logical(LogicalVolumeId::new(volume))
+    } else {
+        SourceSelection::Auto
+    };
+    let opened = fsmnt::open_device_partition_with_selection::<HostDrives>(
+        &id,
+        options.partition,
+        &drivers,
+        selection,
+    )?;
+
+    ensure_unix_mountpoint(options.mountpoint)?;
+
+    let volname = options.volname.map_or_else(
         || {
             HostDrives::get_drive_info(&id)
                 .ok()
                 .and_then(|i| i.model)
-                .unwrap_or_else(|| drive.to_string())
+                .unwrap_or_else(|| options.drive.to_string())
         },
         ToString::to_string,
     );
 
+    match &opened.source {
+        SourceOrigin::Logical(volume) => {
+            println!("Opened logical volume {}", volume.id());
+        }
+        SourceOrigin::Raw(extents) => {
+            println!("Opened {} raw physical member(s)", extents.len());
+        }
+    }
+
     block_on_mount(
         opened.filesystem,
-        mountpoint,
+        options.mountpoint,
         fs_label(opened.detected),
         &volname,
         fs_label(opened.detected),
         opened.size_bytes,
     )
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn parse_partition_address(
+    value: &str,
+) -> Result<fsmnt::device::PartitionAddress, Box<dyn std::error::Error>> {
+    let (drive, partition) = value
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid raw member '{value}'; expected DRIVE:PARTITION"))?;
+    if drive.is_empty() {
+        return Err(format!("invalid raw member '{value}'; drive ID is empty").into());
+    }
+    let partition = partition
+        .parse::<usize>()
+        .map_err(|error| format!("invalid partition ordinal in raw member '{value}': {error}"))?;
+    Ok(fsmnt::device::PartitionAddress::new(
+        fsmnt::device::HostDriveId::new(drive),
+        partition,
+    ))
+}
+
+#[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::{Cli, Parser, parse_partition_address};
+
+    #[test]
+    fn raw_member_address_uses_last_colon() {
+        let address = parse_partition_address("device:name:3").expect("partition address");
+        assert_eq!(address.drive().as_str(), "device:name");
+        assert_eq!(address.partition(), 3);
+    }
+
+    #[test]
+    fn raw_member_requires_raw_flag() {
+        let result = Cli::try_parse_from(["fsmnt", "mount-device", "0", "Z:", "--member", "1:0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raw_and_logical_volume_are_mutually_exclusive() {
+        let result = Cli::try_parse_from([
+            "fsmnt",
+            "mount-device",
+            "0",
+            "Z:",
+            "--raw",
+            "--volume",
+            "logical-id",
+        ]);
+        assert!(result.is_err());
+    }
 }

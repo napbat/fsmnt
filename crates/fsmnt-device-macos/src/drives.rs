@@ -204,7 +204,7 @@ impl HostDriveEnumerator for MacOsHostDrives {
 /// `O_NONBLOCK` prevents the kernel from blocking on media checks or
 /// triggering automount side-effects. Access denial triggers a fallback to
 /// the default `fsmnt-proxy-server`.
-fn open_device(path: &str) -> HostDriveResult<File> {
+pub(crate) fn open_device(path: &str) -> HostDriveResult<File> {
     open_with_proxy_fallback(path, OpenMode::ReadOnly, libc::O_NONBLOCK).map_err(
         |error| match error.kind() {
             std::io::ErrorKind::PermissionDenied => HostDriveError::AccessDenied,

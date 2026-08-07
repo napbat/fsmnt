@@ -6,7 +6,13 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+fsmnt-device = { workspace = true, optional = true }
 fsmnt-parser-core = { workspace = true, default-features = false }
+nostdio = { workspace = true, features = ["std"], optional = true }
+
+[features]
+default = []
+device = ["dep:fsmnt-device", "dep:nostdio"]
 
 [lints]
 workspace = true

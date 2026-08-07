@@ -7,15 +7,16 @@
 //! [`DriverRegistry`].
 
 use fsmnt_core::{FsError, FsResult, TargetFilesystem};
+use nostdio::{Read, Seek};
 
-use crate::DetectedBootSector;
+use crate::{DetectedBootSector, DeviceSet};
 
 /// Combined reader bound required by filesystem drivers.
 ///
 /// Blanket-implemented for every `Read + Seek + Send` type.
-pub trait DeviceReader: std::io::Read + std::io::Seek + Send {}
+pub trait DeviceReader: Read + Seek + Send {}
 
-impl<T: std::io::Read + std::io::Seek + Send + ?Sized> DeviceReader for T {}
+impl<T: Read + Seek + Send + ?Sized> DeviceReader for T {}
 
 /// Opens a [`TargetFilesystem`] over a raw partition reader.
 ///
@@ -41,6 +42,27 @@ pub trait FilesystemDriver: Send + Sync {
         reader: Box<dyn DeviceReader>,
         detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>>;
+
+    /// Open a filesystem from one or more raw device members.
+    ///
+    /// The default implementation accepts one member and delegates to
+    /// [`open`](Self::open). Filesystem drivers with native multi-device
+    /// layouts override this method and consume the complete set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when several members are supplied to a driver that
+    /// only implements single-device opening, or when opening fails.
+    fn open_devices(
+        &self,
+        devices: DeviceSet,
+        detected: DetectedBootSector,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        let reader = devices
+            .into_single_reader()
+            .map_err(|error| FsError::Filesystem(error.to_string()))?;
+        self.open(reader, detected)
+    }
 }
 
 /// An ordered collection of [`FilesystemDriver`]s.
@@ -108,6 +130,30 @@ impl DriverRegistry {
             )));
         };
         driver.open(reader, detected)
+    }
+
+    /// Open a filesystem over one or more raw device members.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no registered driver supports `detected`, if the
+    /// selected driver rejects the supplied device set, or if parsing fails.
+    pub fn open_devices(
+        &self,
+        devices: DeviceSet,
+        detected: DetectedBootSector,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        let Some(driver) = self.find(detected) else {
+            let available = if self.drivers.is_empty() {
+                "none registered".to_string()
+            } else {
+                self.names().join(", ")
+            };
+            return Err(FsError::Filesystem(format!(
+                "no filesystem driver for {detected:?} (available drivers: {available})"
+            )));
+        };
+        driver.open_devices(devices, detected)
     }
 }
 

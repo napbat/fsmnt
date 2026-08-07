@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use fsmnt_device::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,
-    HostDriveResult,
+    HostDriveResult, HostVolumeResolver, LogicalVolume, LogicalVolumeId, PhysicalExtent,
 };
 use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
 use windows::Win32::Foundation::HANDLE;
@@ -112,20 +112,41 @@ impl HostDriveEnumerator for WindowsHostDrives {
         let path = physical_drive_path(id)?;
         Ok(BufReader::new(open_device(&path)?))
     }
+}
 
-    fn open_volume_at(
-        drive_id: &HostDriveId,
-        offset: u64,
-    ) -> HostDriveResult<Option<Self::Reader>> {
-        let disk_number: u32 = drive_id
-            .as_str()
-            .parse()
-            .map_err(|_| HostDriveError::NotFound(drive_id.to_string()))?;
-        let Some(vol) = volumes::find_volume_for_extent(disk_number, offset) else {
-            return Ok(None);
-        };
-        let path = vol.volume_guid_path.trim_end_matches('\\');
-        Ok(Some(BufReader::new(open_device(path)?)))
+impl HostVolumeResolver for WindowsHostDrives {
+    type VolumeReader = BufReader<File>;
+
+    fn logical_volumes(extent: &PhysicalExtent) -> HostDriveResult<Vec<LogicalVolume>> {
+        Ok(volumes::find_volumes_for_extent(extent)
+            .into_iter()
+            .map(|volume| {
+                let length = volume.length;
+                let sector_size = volume.sector_size;
+                let device_path = volume.volume_guid_path.trim_end_matches('\\');
+                let mut logical = LogicalVolume::new(
+                    LogicalVolumeId::new(&volume.volume_guid_path),
+                    PathBuf::from(device_path),
+                    volume.extents,
+                )
+                .with_mount_points(volume.mount_points.into_iter().map(PathBuf::from).collect());
+                if let Some(length) = length {
+                    logical = logical.with_length(length);
+                }
+                if let Some(sector_size) = sector_size {
+                    logical = logical.with_sector_size(sector_size);
+                }
+                logical
+            })
+            .collect())
+    }
+
+    fn open_logical_volume(volume: &LogicalVolume) -> HostDriveResult<Self::VolumeReader> {
+        let path = volume
+            .device_path()
+            .to_str()
+            .ok_or_else(|| HostDriveError::Parse("volume path is not valid UTF-8".to_string()))?;
+        Ok(BufReader::new(open_device(path)?))
     }
 }
 
@@ -196,7 +217,7 @@ fn query_drive_info(id: &HostDriveId) -> HostDriveResult<HostDriveInfo> {
 }
 
 /// Get the size of a disk in bytes using `IOCTL_DISK_GET_LENGTH_INFO`.
-fn get_disk_size(file: &File) -> Option<u64> {
+pub(crate) fn get_disk_size(file: &File) -> Option<u64> {
     let mut length_info = GET_LENGTH_INFORMATION::default();
     let mut bytes_returned: u32 = 0;
 
@@ -228,7 +249,7 @@ fn get_disk_size(file: &File) -> Option<u64> {
 
 /// Get the logical sector size of a disk using
 /// `IOCTL_DISK_GET_DRIVE_GEOMETRY`.
-fn get_disk_sector_size(file: &File) -> Option<u32> {
+pub(crate) fn get_disk_sector_size(file: &File) -> Option<u32> {
     let mut geometry = DISK_GEOMETRY::default();
     let mut bytes_returned: u32 = 0;
 

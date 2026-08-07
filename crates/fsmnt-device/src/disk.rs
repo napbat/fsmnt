@@ -11,8 +11,9 @@
 //! / [`MbrPartitionEntry`] types.  Filesystem detection is left to the
 //! caller (see [`Disk::detect_boot_sector_at`]).
 
-use std::io::{Read, Seek, SeekFrom};
 use std::mem::size_of;
+
+use nostdio::{Read, Seek, SeekFrom};
 
 use crate::partition_reader::PartitionReader;
 use crate::{
@@ -115,7 +116,9 @@ impl<R: Read + Seek> Disk<R> {
     #[must_use]
     pub fn partition_count(&self) -> usize {
         match &self.layout {
-            DiskLayout::Gpt { header } => header.num_partition_entries.get() as usize,
+            DiskLayout::Gpt { header } => {
+                usize::try_from(header.num_partition_entries.get()).unwrap_or(usize::MAX)
+            }
             DiskLayout::Mbr { mbr } => mbr.valid_partitions().count(),
             _ => 0,
         }
@@ -130,10 +133,6 @@ impl<R: Read + Seek> Disk<R> {
     /// Returns an error if the disk is not GPT, the index is out of range,
     /// or the entry cannot be read.
     ///
-    /// # Panics
-    ///
-    /// Panics if an offset within a sector does not fit in `usize` (not
-    /// possible on supported platforms).
     pub fn gpt_partition(&mut self, index: usize) -> std::io::Result<GptPartitionEntry> {
         let DiskLayout::Gpt { header } = &self.layout else {
             return Err(std::io::Error::new(
@@ -142,7 +141,8 @@ impl<R: Read + Seek> Disk<R> {
             ));
         };
 
-        if index >= header.num_partition_entries.get() as usize {
+        let entry_count = usize::try_from(header.num_partition_entries.get()).unwrap_or(usize::MAX);
+        if index >= entry_count {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Partition index {index} out of range"),
@@ -154,7 +154,13 @@ impl<R: Read + Seek> Disk<R> {
         let entry_lba = header.partition_entry_lba.get();
 
         let gpt_entry_bytes = size_of::<GptPartitionEntry>();
-        if entry_size < gpt_entry_bytes as u64 {
+        let gpt_entry_bytes_u64 = u64::try_from(gpt_entry_bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "GPT entry type size exceeds u64",
+            )
+        })?;
+        if entry_size < gpt_entry_bytes_u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("GPT entry size {entry_size} is smaller than minimum {gpt_entry_bytes}"),
@@ -162,28 +168,60 @@ impl<R: Read + Seek> Disk<R> {
         }
 
         // Calculate the absolute byte offset of the entry.
-        let entry_offset = entry_lba * sector_size + index as u64 * entry_size;
+        let index = u64::try_from(index).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "GPT partition index exceeds u64",
+            )
+        })?;
+        let entry_offset = entry_lba
+            .checked_mul(sector_size)
+            .and_then(|array_offset| {
+                index
+                    .checked_mul(entry_size)
+                    .and_then(|offset| array_offset.checked_add(offset))
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "GPT partition entry offset overflow",
+                )
+            })?;
 
         // Raw disk I/O on Windows requires sector-aligned reads: find the
         // sector containing this entry and read whole sectors.
         let sector_offset = (entry_offset / sector_size) * sector_size;
-        let offset_within_sector =
-            usize::try_from(entry_offset % sector_size).expect("sector size fits in usize");
+        let offset_within_sector = usize::try_from(entry_offset % sector_size).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "offset within logical sector exceeds usize",
+            )
+        })?;
+        let sector_size_usize = usize::try_from(self.sector_size).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "logical sector size exceeds usize",
+            )
+        })?;
 
         self.reader.seek(SeekFrom::Start(sector_offset))?;
-        let mut sector_buf = vec![0u8; self.sector_size as usize];
+        let mut sector_buf = vec![0u8; sector_size_usize];
         self.reader.read_exact(&mut sector_buf)?;
 
         // Extract the entry from within the sector, using the header's
         // entry size for stride but reading only GptPartitionEntry bytes.
-        let entry_end = offset_within_sector + gpt_entry_bytes;
-        if entry_end > self.sector_size as usize {
+        let entry_end = offset_within_sector
+            .checked_add(gpt_entry_bytes)
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "GPT entry end overflow")
+            })?;
+        if entry_end > sector_size_usize {
             // Entry spans a sector boundary — read the next sector too.
             let mut buf = vec![0u8; gpt_entry_bytes];
-            let first_part = self.sector_size as usize - offset_within_sector;
+            let first_part = sector_size_usize - offset_within_sector;
             buf[..first_part].copy_from_slice(&sector_buf[offset_within_sector..]);
 
-            let mut sector_buf2 = vec![0u8; self.sector_size as usize];
+            let mut sector_buf2 = vec![0u8; sector_size_usize];
             self.reader.read_exact(&mut sector_buf2)?;
             buf[first_part..].copy_from_slice(&sector_buf2[..(gpt_entry_bytes - first_part)]);
 

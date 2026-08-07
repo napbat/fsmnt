@@ -19,16 +19,22 @@ kept as a thin wrapper over it. Member crates under `crates/`:
   device-facing parsing API.
 - `fsmnt-device` — block-device abstraction: `HostDriveEnumerator` trait,
   disk-layout handling (`Disk`), `PartitionReader`, the stable façade for
-  parser-core boot-sector/partition types, and the
-  `FilesystemDriver`/`DriverRegistry` plug-in point. The device crate ships
-  no filesystem drivers; consumers register them.
+  parser-core boot-sector/partition types, physical/logical source graph,
+  multi-member device sets and raw-volume mappings, and the
+  `FilesystemDriver`/`DriverRegistry` plug-in point. Its block-I/O boundary
+  uses the locally referenced `nostdio` crate with `std` enabled. The device
+  crate ships no filesystem drivers; consumers register them.
 - `fsmnt-device-windows` / `-linux` / `-macos` — per-OS drive enumeration
-  and raw opening.
+  and raw opening, plus resolution from physical partition extents to the
+  operating system's logical block views.
 - `fsmnt-proxy` — privileged read helper. Platform drive crates try direct
   access first, then obtain a read-only OS handle from its elevated
   `fsmnt-proxy-server` when access is denied.
 - `fsmnt-fuse` / `fsmnt-dokan` — the mount backends (Unix FUSE / Windows
   Dokan).
+- `fsmnt-testkit` — cross-crate integration-test readers, fixture helpers,
+  and synthetic block-device builders. Unit-only helpers stay with their
+  owning crate.
 - `crates/formats/` — parent directory (not a crate) for filesystem-format
   parser crates (`fs-ntfs`, `fs-fat`, `fs-ext`, `fs-apfs`, `fs-btrfs`,
   `fs-exfat`, `nt-compression`, and `nt-bitlocker`); members via the `crates/formats/*`

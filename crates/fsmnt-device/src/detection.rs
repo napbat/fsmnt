@@ -1,6 +1,6 @@
 //! Staged filesystem detection over a seekable byte source.
 
-use std::io::{Read, Seek, SeekFrom};
+use nostdio::{Read, Seek, SeekFrom};
 
 use crate::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,

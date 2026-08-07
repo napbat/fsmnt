@@ -28,6 +28,7 @@ fsmnt-fuse = { path = "crates/fsmnt-fuse" }
 fsmnt-parser-core = { path = "crates/fsmnt-parser-core", default-features = false }
 fsmnt-proxy = { path = "crates/fsmnt-proxy" }
 fsmnt-testkit = { path = "crates/fsmnt-testkit" }
+nostdio = { path = "../../coconutbird/nostdio", default-features = false }
 
 # Vendored filesystem-format crates (crates/formats/). Their manifests
 # reference these entries with `<name> = { workspace = true }`.
@@ -144,6 +145,9 @@ fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
 fsmnt-drivers = { workspace = true }
 fsmnt-proxy = { workspace = true }
+
+[dev-dependencies]
+fsmnt-testkit = { workspace = true, features = ["device"] }
 
 [target.'cfg(unix)'.dependencies]
 fsmnt-fuse = { workspace = true }

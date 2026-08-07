@@ -5,11 +5,9 @@
 //! byte offset each volume lives on, and
 //! `GetVolumePathNamesForVolumeNameW` to resolve assigned mount points.
 //!
-//! This mapping is what lets
-//! [`open_volume_at`](fsmnt_device::HostDriveEnumerator::open_volume_at)
-//! read the operating system's volume view (including decrypted data from an
-//! unlocked `BitLocker` partition) through its volume GUID instead of the raw
-//! physical drive.
+//! This mapping lets the platform volume resolver return the operating
+//! system's block view, including decrypted data from an unlocked
+//! `BitLocker` volume, without assuming one volume has only one extent.
 
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
@@ -22,7 +20,11 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::core::PCWSTR;
 
-use crate::drives::{ioctl_len, open_device, read_i64_le, read_u32_le};
+use fsmnt_device::{HostDriveId, PhysicalExtent};
+
+use crate::drives::{
+    get_disk_sector_size, get_disk_size, ioctl_len, open_device, read_i64_le, read_u32_le,
+};
 
 /// Byte offset of `NumberOfDiskExtents` within `VOLUME_DISK_EXTENTS`.
 const VDE_NUMBER_OF_EXTENTS: usize = 0;
@@ -36,21 +38,24 @@ const DE_DISK_NUMBER: usize = 0;
 const DE_STARTING_OFFSET: usize = 8;
 /// Byte offset of `ExtentLength` within a `DISK_EXTENT`.
 const DE_EXTENT_LENGTH: usize = 16;
+/// Serialized size of one `DISK_EXTENT` on 64-bit Windows.
+const DE_SIZE: usize = 24;
+/// Buffer large enough for thousands of physical volume extents.
+const VOLUME_EXTENT_BUFFER_SIZE: usize = 64 * 1024;
 
-/// A mounted Windows volume with its physical location and drive
-/// letter(s).
-#[derive(Debug, Clone)]
+/// A Windows volume with every physical extent and assigned mount point.
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VolumeInfo {
     /// Volume GUID path (e.g. `\\?\Volume{GUID}\`).
     pub volume_guid_path: String,
-    /// Physical disk number (e.g. `1` for `\\.\PhysicalDrive1`).
-    pub disk_number: u32,
-    /// Byte offset on the physical disk where this volume starts.
-    pub starting_offset: u64,
-    /// Length of the volume extent in bytes.
-    pub extent_length: u64,
+    /// Every physical disk extent contributing to the volume.
+    pub extents: Vec<PhysicalExtent>,
     /// Mount points assigned to this volume (e.g. `["F:\\"]`).
     pub mount_points: Vec<String>,
+    /// Readable logical length reported by the volume device.
+    pub length: Option<u64>,
+    /// Logical sector size reported by the volume device.
+    pub sector_size: Option<u32>,
 }
 
 impl VolumeInfo {
@@ -77,7 +82,7 @@ impl VolumeInfo {
     }
 }
 
-/// Enumerate all mounted volumes and their physical disk extents.
+/// Enumerate all volumes and their physical disk extents.
 ///
 /// Returns volumes that have at least one disk extent (skips volumes that
 /// cannot be opened or whose extents cannot be queried).
@@ -113,16 +118,21 @@ pub fn enumerate_volumes() -> Vec<VolumeInfo> {
     results
 }
 
-/// Find the mounted volume for a specific physical disk + byte offset.
+/// Find all Windows volumes backed by a physical extent.
 ///
-/// This is the primary lookup used when opening partitions: given that a
-/// partition lives on `PhysicalDrive{disk_number}` at `offset`, find the
-/// Windows volume (if any) that corresponds to it.
+/// More than one logical volume can be backed by the same partition, so this
+/// lookup deliberately returns every candidate.
 #[must_use]
-pub fn find_volume_for_extent(disk_number: u32, offset: u64) -> Option<VolumeInfo> {
+pub fn find_volumes_for_extent(extent: &PhysicalExtent) -> Vec<VolumeInfo> {
     enumerate_volumes()
         .into_iter()
-        .find(|v| v.disk_number == disk_number && v.starting_offset == offset)
+        .filter(|volume| {
+            volume
+                .extents
+                .iter()
+                .any(|candidate| candidate.has_same_start(extent))
+        })
+        .collect()
 }
 
 /// Query one volume's disk extent and mount points.
@@ -134,7 +144,7 @@ fn query_volume(vol_path: &str) -> Option<VolumeInfo> {
     let device_path = vol_path.trim_end_matches('\\');
     let file = open_device(device_path).ok()?;
 
-    let mut buffer = [0u8; 256];
+    let mut buffer = vec![0_u8; VOLUME_EXTENT_BUFFER_SIZE];
     let mut bytes_returned: u32 = 0;
 
     let handle = HANDLE(file.as_raw_handle());
@@ -156,28 +166,44 @@ fn query_volume(vol_path: &str) -> Option<VolumeInfo> {
     };
     result.ok()?;
 
-    // Parse `VOLUME_DISK_EXTENTS` straight from the byte buffer: the
-    // structure is variable-length and the buffer is only byte-aligned, so
-    // reading through a `#[repr(C)]` struct pointer would be an unaligned
-    // (undefined-behavior) read.
-    if read_u32_le(&buffer, VDE_NUMBER_OF_EXTENTS)? == 0 {
+    let returned = usize::try_from(bytes_returned).ok()?.min(buffer.len());
+    let extents = parse_extents(&buffer[..returned])?;
+    if extents.is_empty() {
         return None;
     }
 
-    // Use the first extent (multi-extent/spanned volumes are rare).
-    let disk_number = read_u32_le(&buffer, VDE_FIRST_EXTENT + DE_DISK_NUMBER)?;
-    let starting_offset =
-        u64::try_from(read_i64_le(&buffer, VDE_FIRST_EXTENT + DE_STARTING_OFFSET)?).ok()?;
-    let extent_length =
-        u64::try_from(read_i64_le(&buffer, VDE_FIRST_EXTENT + DE_EXTENT_LENGTH)?).ok()?;
-
     Some(VolumeInfo {
         volume_guid_path: vol_path.to_string(),
-        disk_number,
-        starting_offset,
-        extent_length,
+        extents,
         mount_points: get_volume_mount_points(vol_path),
+        length: get_disk_size(&file),
+        sector_size: get_disk_sector_size(&file),
     })
+}
+
+/// Parse every `DISK_EXTENT` from a `VOLUME_DISK_EXTENTS` buffer.
+fn parse_extents(buffer: &[u8]) -> Option<Vec<PhysicalExtent>> {
+    let count = usize::try_from(read_u32_le(buffer, VDE_NUMBER_OF_EXTENTS)?).ok()?;
+    let extent_bytes = count.checked_mul(DE_SIZE)?;
+    let required = VDE_FIRST_EXTENT.checked_add(extent_bytes)?;
+    if required > buffer.len() {
+        return None;
+    }
+
+    let mut extents = Vec::with_capacity(count);
+    for index in 0..count {
+        let base = VDE_FIRST_EXTENT.checked_add(index.checked_mul(DE_SIZE)?)?;
+        let disk_number = read_u32_le(buffer, base + DE_DISK_NUMBER)?;
+        let starting_offset =
+            u64::try_from(read_i64_le(buffer, base + DE_STARTING_OFFSET)?).ok()?;
+        let extent_length = u64::try_from(read_i64_le(buffer, base + DE_EXTENT_LENGTH)?).ok()?;
+        extents.push(PhysicalExtent::new(
+            HostDriveId::new(disk_number.to_string()),
+            starting_offset,
+            extent_length,
+        ));
+    }
+    Some(extents)
 }
 
 /// Get all mount points (drive letters and mounted folders) for a volume
@@ -234,15 +260,17 @@ fn wchar_to_string(buf: &[u16]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{VolumeInfo, wchar_to_string};
+    use fsmnt_device::{HostDriveId, PhysicalExtent};
+
+    use super::{VolumeInfo, parse_extents, wchar_to_string};
 
     fn volume_with_mount_points(mount_points: Vec<String>) -> VolumeInfo {
         VolumeInfo {
             volume_guid_path: "\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\".to_string(),
-            disk_number: 0,
-            starting_offset: 0,
-            extent_length: 0,
+            extents: vec![PhysicalExtent::new(HostDriveId::new("0"), 0, 4096)],
             mount_points,
+            length: Some(4096),
+            sector_size: Some(512),
         }
     }
 
@@ -274,5 +302,26 @@ mod tests {
     fn wchar_to_string_without_nul() {
         let buf: Vec<u16> = "C:".encode_utf16().collect();
         assert_eq!(wchar_to_string(&buf), "C:");
+    }
+
+    #[test]
+    fn parses_every_physical_extent() {
+        let mut buffer = vec![0_u8; 8 + 2 * 24];
+        buffer[..4].copy_from_slice(&2_u32.to_le_bytes());
+        buffer[8..12].copy_from_slice(&0_u32.to_le_bytes());
+        buffer[16..24].copy_from_slice(&4096_i64.to_le_bytes());
+        buffer[24..32].copy_from_slice(&8192_i64.to_le_bytes());
+        buffer[32..36].copy_from_slice(&1_u32.to_le_bytes());
+        buffer[40..48].copy_from_slice(&16_384_i64.to_le_bytes());
+        buffer[48..56].copy_from_slice(&32_768_i64.to_le_bytes());
+
+        let extents = parse_extents(&buffer).expect("extents");
+        assert_eq!(
+            extents,
+            [
+                PhysicalExtent::new(HostDriveId::new("0"), 4096, 8192),
+                PhysicalExtent::new(HostDriveId::new("1"), 16_384, 32_768),
+            ]
+        );
     }
 }

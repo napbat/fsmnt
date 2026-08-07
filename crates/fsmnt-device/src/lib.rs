@@ -10,6 +10,11 @@
 //! - [`Disk`] / [`DiskLayout`] — partition-table detection (GPT/MBR) and
 //!   on-demand partition entry access over any `Read + Seek` source.
 //! - [`PartitionReader`] — a reader windowed to one partition's extent.
+//! - [`HostVolumeResolver`] / [`LogicalVolume`] — the graph edge from a
+//!   physical partition extent to one or more operating-system logical block
+//!   views, including stacked and multi-disk storage.
+//! - [`DeviceSet`] / [`assemble_raw_volume`] — native multi-device
+//!   filesystem input and reusable linear, striped, or mirrored raw mappings.
 //! - [`DetectedBootSector`] — filesystem/partition-table classification
 //!   from raw boot-sector bytes. The portable parsing types and functions
 //!   are re-exported from `fsmnt-parser-core` so this crate does not carry a
@@ -19,12 +24,17 @@
 //!   reader into a mountable
 //!   [`TargetFilesystem`](fsmnt_core::TargetFilesystem).  `fsmnt` ships no
 //!   parsers of its own.
+//!
+//! Device-facing I/O traits come from `nostdio` with its `std` feature at
+//! this boundary. Filesystem-format crates remain independently
+//! `no_std`-capable.
 
 mod detection;
 mod disk;
 mod drive;
 mod driver;
 mod partition_reader;
+mod source;
 
 pub use detection::detect_boot_sector_at;
 pub use disk::{Disk, DiskLayout};
@@ -44,3 +54,9 @@ pub use fsmnt_parser_core::partition::{
     GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry, read_gpt_header,
 };
 pub use partition_reader::PartitionReader;
+pub use source::{
+    AssembledVolume, DeviceMember, DeviceSet, DeviceSetError, HostVolumeResolver, LogicalVolume,
+    LogicalVolumeId, PartitionAddress, PhysicalExtent, RawAssemblyError, RawVolumeLayout,
+    SourceMemberId, SourceOrigin, SourceSelection, VolumeSelectionError, assemble_raw_volume,
+    select_logical_volume,
+};

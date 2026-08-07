@@ -5,9 +5,9 @@
 //! [`HostDriveEnumerator`]; consumers use it to discover what drives are
 //! available for mounting.
 
-use std::io::{Read, Seek};
 use std::path::PathBuf;
 
+use nostdio::{Read, Seek};
 use thiserror::Error;
 
 /// Error type for host drive operations.
@@ -279,25 +279,6 @@ pub trait HostDriveEnumerator {
     /// Returns an error if the drive does not exist or cannot be opened
     /// (e.g. insufficient privileges).
     fn open_drive(id: &HostDriveId) -> HostDriveResult<Self::Reader>;
-
-    /// Try to open the operating system's volume for a partition.
-    ///
-    /// On Windows, this maps a physical drive and byte offset to the matching
-    /// volume GUID. If that volume is encrypted and already unlocked, reads
-    /// use the operating system's decrypted view.
-    ///
-    /// Returns `Ok(None)` on platforms that don't support this, or when no
-    /// mounted volume matches the given extent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a matching volume is found but cannot be opened.
-    fn open_volume_at(
-        _drive_id: &HostDriveId,
-        _offset: u64,
-    ) -> HostDriveResult<Option<Self::Reader>> {
-        Ok(None)
-    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,8 @@ fn valid_superblock() -> [u8; SUPERBLOCK_SIZE] {
     data[0x88..0x90].copy_from_slice(&1u64.to_le_bytes());
     data[0x90..0x94].copy_from_slice(&4096u32.to_le_bytes());
     data[0x94..0x98].copy_from_slice(&16_384u32.to_le_bytes());
+    data[0xc9..0xd1].copy_from_slice(&7_u64.to_le_bytes());
+    data[0x10b..0x11b].fill(0xcd);
     data[0x12b..0x137].copy_from_slice(b"fedora-test\0");
     data
 }
@@ -39,6 +41,8 @@ fn parses_primary_superblock_metadata() {
     assert_eq!(superblock.num_devices(), 1);
     assert_eq!(superblock.sector_size(), 4096);
     assert_eq!(superblock.node_size(), 16_384);
+    assert_eq!(superblock.device_id(), 7);
+    assert_eq!(superblock.device_uuid(), &[0xcd; 16]);
     assert_eq!(superblock.label_bytes(), b"fedora-test");
     assert_eq!(superblock.label(), Some("fedora-test"));
 }

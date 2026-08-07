@@ -139,7 +139,7 @@ impl HostDriveEnumerator for LinuxHostDrives {
 ///
 /// Tries direct access first and then the default `fsmnt-proxy-server` when
 /// access is denied.
-fn open_device(path: &str) -> HostDriveResult<File> {
+pub(crate) fn open_device(path: &str) -> HostDriveResult<File> {
     open_with_proxy_fallback(path, OpenMode::ReadOnly, libc::O_NONBLOCK)
         .map_err(|error| map_io_error(error, path))
 }

@@ -612,6 +612,7 @@ dependencies = [
  "fsmnt-drivers",
  "fsmnt-fuse",
  "fsmnt-proxy",
+ "fsmnt-testkit",
 ]
 
 [[package]]
@@ -630,6 +631,7 @@ version = "0.1.0"
 dependencies = [
  "fsmnt-core",
  "fsmnt-parser-core",
+ "nostdio",
  "thiserror",
 ]
 
@@ -721,7 +723,9 @@ dependencies = [
 name = "fsmnt-testkit"
 version = "0.1.0"
 dependencies = [
+ "fsmnt-device",
  "fsmnt-parser-core",
+ "nostdio",
 ]
 
 [[package]]
@@ -914,6 +918,10 @@ dependencies = [
  "cfg_aliases",
  "libc",
 ]
+
+[[package]]
+name = "nostdio"
+version = "0.1.0"
 
 [[package]]
 name = "nt-bitlocker"

@@ -1,6 +1,8 @@
 //! Offset-adjusted reader for accessing partitions within a disk.
 
-use std::io::{Read, Result, Seek, SeekFrom};
+use std::io::Result;
+
+use nostdio::{Read, Seek, SeekFrom};
 
 /// A reader that provides access to a partition within a larger disk.
 ///
@@ -68,7 +70,8 @@ impl<S: Read + Seek> Read for PartitionReader<S> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         // Limit the read to the partition bounds.
         let remaining = self.size.saturating_sub(self.position);
-        let max_read = usize::try_from(remaining.min(buf.len() as u64)).unwrap_or(buf.len());
+        let buffer_length = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        let max_read = usize::try_from(remaining.min(buffer_length)).unwrap_or(buf.len());
 
         if max_read == 0 {
             return Ok(0);
@@ -76,14 +79,35 @@ impl<S: Read + Seek> Read for PartitionReader<S> {
 
         // Only seek the inner reader when necessary (skip for sequential
         // reads).
-        let abs_pos = self.base_offset + self.position;
+        let abs_pos = self.base_offset.checked_add(self.position).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "absolute partition position overflow",
+            )
+        })?;
         if self.inner_position != Some(abs_pos) {
             self.inner.seek(SeekFrom::Start(abs_pos))?;
         }
 
         let bytes_read = self.inner.read(&mut buf[..max_read])?;
-        self.position += bytes_read as u64;
-        self.inner_position = Some(abs_pos + bytes_read as u64);
+        let bytes_read = u64::try_from(bytes_read).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "read length exceeds u64")
+        })?;
+        self.position = self.position.checked_add(bytes_read).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "partition position overflow",
+            )
+        })?;
+        self.inner_position = Some(abs_pos.checked_add(bytes_read).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "inner reader position overflow",
+            )
+        })?);
+        let bytes_read = usize::try_from(bytes_read).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "read length exceeds usize")
+        })?;
         Ok(bytes_read)
     }
 }
@@ -125,7 +149,12 @@ impl<S: Read + Seek> Seek for PartitionReader<S> {
             ));
         }
 
-        self.position = new_pos.unsigned_abs();
+        self.position = u64::try_from(new_pos).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek position does not fit u64",
+            )
+        })?;
         Ok(self.position)
     }
 }

@@ -11,7 +11,7 @@
 use std::ffi::{c_char, c_void};
 use std::ptr;
 
-use fsmnt_device::HostDriveBusType;
+use fsmnt_device::{HostDriveBusType, PhysicalExtent};
 
 // ---------------------------------------------------------------------------
 // CoreFoundation / IOKit FFI types and constants
@@ -22,6 +22,7 @@ type CFDictionaryRef = *const c_void;
 type CFMutableDictionaryRef = *mut c_void;
 type CFAllocatorRef = *const c_void;
 type CFIndex = isize;
+type CFNumberType = i32;
 
 type IOReturn = i32;
 type MachPort = u32;
@@ -36,6 +37,8 @@ const IO_OBJECT_NULL: IOObject = 0;
 
 /// `CFString` encoding: UTF-8.
 const K_CFSTRING_ENCODING_UTF8: u32 = 0x0800_0100;
+/// Signed 64-bit integer representation accepted by `CFNumberGetValue`.
+const K_CFNUMBER_SINT64_TYPE: CFNumberType = 4;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -62,6 +65,8 @@ unsafe extern "C" {
     fn CFStringGetTypeID() -> u64;
     fn CFBooleanGetValue(boolean: CFTypeRef) -> bool;
     fn CFBooleanGetTypeID() -> u64;
+    fn CFNumberGetValue(number: CFTypeRef, number_type: CFNumberType, value: *mut c_void) -> bool;
+    fn CFNumberGetTypeID() -> u64;
     fn CFRelease(cf: CFTypeRef);
 }
 
@@ -85,6 +90,11 @@ unsafe extern "C" {
         plane: *const c_char,
         parent: *mut IOObject,
     ) -> IOReturn;
+    fn IORegistryEntryGetChildIterator(
+        entry: IOObject,
+        plane: *const c_char,
+        iterator: *mut IOIterator,
+    ) -> IOReturn;
     fn IOObjectConformsTo(object: IOObject, class_name: *const c_char) -> bool;
     fn IOObjectRelease(object: IOObject) -> IOReturn;
 }
@@ -107,6 +117,18 @@ pub(crate) struct DiskProperties {
     /// hardware (`NVMe`, SATA, USB, etc.) rather than a synthesized APFS
     /// volume, disk image, or other virtual device.
     pub is_physical: bool,
+}
+
+/// A leaf logical `IOMedia` node above a physical partition.
+pub(crate) struct LogicalMedia {
+    /// Stable UUID when `IOKit` reports one, otherwise the BSD device name.
+    pub id: String,
+    /// BSD device name, such as `disk3s1`.
+    pub bsd_name: String,
+    /// Logical media length in bytes.
+    pub length: u64,
+    /// Logical block size reported by `IOMedia`.
+    pub sector_size: Option<u32>,
 }
 
 /// Query `IOKit` for hardware properties of the given BSD disk name.
@@ -139,6 +161,57 @@ pub(crate) fn disk_properties(bsd_name: &str) -> Option<DiskProperties> {
     // SAFETY: `iterator` is a live iterator handle owned by this function.
     unsafe { IOObjectRelease(iterator) };
     result
+}
+
+/// Resolve a physical extent to leaf logical media in the `IOKit` service
+/// graph.
+///
+/// A normal partition resolves to its own slice. Stacked storage such as an
+/// APFS container resolves to the synthesized leaf `IOMedia` nodes beneath
+/// that slice, preserving ambiguity rather than choosing a volume silently.
+pub(crate) fn logical_media_for_extent(extent: &PhysicalExtent) -> Vec<LogicalMedia> {
+    let class_name = c"IOMedia".as_ptr();
+    // SAFETY: `class_name` is a valid NUL-terminated C string. The matching
+    // dictionary is consumed by `IOServiceGetMatchingServices`.
+    let matching = unsafe { IOServiceMatching(class_name) };
+    if matching.is_null() {
+        return Vec::new();
+    }
+
+    let mut iterator: IOIterator = 0;
+    // SAFETY: `matching` is a valid matching dictionary and `iterator` is a
+    // valid out-pointer.
+    if unsafe { IOServiceGetMatchingServices(0, matching, &raw mut iterator) } != KERN_SUCCESS {
+        return Vec::new();
+    }
+
+    let mut media = Vec::new();
+    loop {
+        // SAFETY: `iterator` is a live iterator handle.
+        let entry = unsafe { IOIteratorNext(iterator) };
+        if entry == IO_OBJECT_NULL {
+            break;
+        }
+
+        if media_matches_extent(entry, extent) {
+            collect_leaf_media(entry, &mut media);
+            // SAFETY: `entry` and `iterator` are live objects owned here.
+            unsafe {
+                IOObjectRelease(entry);
+                IOObjectRelease(iterator);
+            }
+            media.sort_by(|left, right| left.id.cmp(&right.id));
+            media.dedup_by(|left, right| left.id == right.id);
+            return media;
+        }
+
+        // SAFETY: `entry` is owned by this loop iteration.
+        unsafe { IOObjectRelease(entry) };
+    }
+
+    // SAFETY: `iterator` is a live iterator owned by this function.
+    unsafe { IOObjectRelease(iterator) };
+    media
 }
 
 /// Map a macOS "Physical Interconnect" string to [`HostDriveBusType`].
@@ -193,6 +266,103 @@ fn find_media_entry(iterator: IOIterator, bsd_name: &str) -> Option<DiskProperti
         }
     }
     None
+}
+
+fn media_matches_extent(entry: IOObject, extent: &PhysicalExtent) -> bool {
+    let Some(properties) = read_media_properties(entry) else {
+        return false;
+    };
+    let expected_slice_prefix = format!("{}s", extent.drive().as_str());
+    let correct_device = properties.bsd_name == extent.drive().as_str()
+        || properties.bsd_name.starts_with(&expected_slice_prefix);
+    let correct_length = extent.length() == u64::MAX || properties.length <= extent.length();
+    correct_device && properties.base == extent.offset() && correct_length
+}
+
+fn collect_leaf_media(entry: IOObject, media: &mut Vec<LogicalMedia>) -> bool {
+    let current = read_media_properties(entry);
+    let plane = c"IOService".as_ptr();
+    let mut iterator: IOIterator = IO_OBJECT_NULL;
+    // SAFETY: `entry` is a live registry entry, `plane` is a valid C string,
+    // and `iterator` is a valid out-pointer.
+    let has_iterator =
+        unsafe { IORegistryEntryGetChildIterator(entry, plane, &raw mut iterator) } == KERN_SUCCESS;
+    let mut descendant_has_media = false;
+
+    if has_iterator {
+        loop {
+            // SAFETY: `iterator` is a live child iterator.
+            let child = unsafe { IOIteratorNext(iterator) };
+            if child == IO_OBJECT_NULL {
+                break;
+            }
+            descendant_has_media |= collect_leaf_media(child, media);
+            // SAFETY: `child` is owned by this loop iteration.
+            unsafe { IOObjectRelease(child) };
+        }
+        // SAFETY: `iterator` is owned by this function after a successful
+        // `IORegistryEntryGetChildIterator` call.
+        unsafe { IOObjectRelease(iterator) };
+    }
+
+    if let Some(properties) = current {
+        if !descendant_has_media {
+            media.push(LogicalMedia {
+                id: properties.id,
+                bsd_name: properties.bsd_name,
+                length: properties.length,
+                sector_size: properties.sector_size,
+            });
+        }
+        true
+    } else {
+        descendant_has_media
+    }
+}
+
+struct MediaProperties {
+    id: String,
+    bsd_name: String,
+    base: u64,
+    length: u64,
+    sector_size: Option<u32>,
+}
+
+fn read_media_properties(entry: IOObject) -> Option<MediaProperties> {
+    // SAFETY: `entry` is a live object. This check does not retain it.
+    if !unsafe { IOObjectConformsTo(entry, c"IOMedia".as_ptr()) } {
+        return None;
+    }
+
+    let mut properties: CFMutableDictionaryRef = ptr::null_mut();
+    // SAFETY: `entry` is live and `properties` is a valid out-pointer. On
+    // success this function owns the returned dictionary.
+    let result = unsafe {
+        IORegistryEntryCreateCFProperties(entry, &raw mut properties, kCFAllocatorDefault, 0)
+    };
+    if result != KERN_SUCCESS || properties.is_null() {
+        return None;
+    }
+
+    let dictionary = properties.cast_const();
+    let bsd_name = cf_dict_get_string(dictionary, "BSD Name");
+    let base = cf_dict_get_u64(dictionary, "Base");
+    let length = cf_dict_get_u64(dictionary, "Size");
+    let sector_size = cf_dict_get_u64(dictionary, "Preferred Block Size")
+        .and_then(|size| u32::try_from(size).ok());
+    let id = cf_dict_get_string(dictionary, "UUID");
+
+    // SAFETY: `properties` is a live dictionary owned by this function.
+    unsafe { CFRelease(properties.cast_const()) };
+
+    let bsd_name = bsd_name?;
+    Some(MediaProperties {
+        id: id.unwrap_or_else(|| bsd_name.clone()),
+        bsd_name,
+        base: base.unwrap_or(0),
+        length: length?,
+        sector_size,
+    })
 }
 
 /// Read properties from a single `IOMedia` entry if its BSD Name matches.
@@ -464,6 +634,38 @@ fn cf_dict_get_bool(dict: CFDictionaryRef, key: &str) -> Option<bool> {
     }
     // SAFETY: `value` is a live `CFBoolean` (type checked above).
     Some(unsafe { CFBooleanGetValue(value) })
+}
+
+/// Look up a non-negative integer value in a `CFDictionary`.
+fn cf_dict_get_u64(dict: CFDictionaryRef, key: &str) -> Option<u64> {
+    let cf_key = cf_string(key);
+    if cf_key.is_null() {
+        return None;
+    }
+    // SAFETY: `dict` and `cf_key` are live CoreFoundation objects. The
+    // returned value follows the get rule and is borrowed.
+    let value = unsafe { CFDictionaryGetValue(dict, cf_key) };
+    // SAFETY: this function owns `cf_key`.
+    unsafe { CFRelease(cf_key) };
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: `value` is a live non-null CoreFoundation object.
+    if unsafe { CFGetTypeID(value) != CFNumberGetTypeID() } {
+        return None;
+    }
+
+    let mut number = 0_i64;
+    // SAFETY: `value` is a type-checked `CFNumber`; `number` is a live
+    // correctly sized output location for the requested representation.
+    let converted = unsafe {
+        CFNumberGetValue(
+            value,
+            K_CFNUMBER_SINT64_TYPE,
+            std::ptr::from_mut(&mut number).cast::<c_void>(),
+        )
+    };
+    converted.then(|| u64::try_from(number).ok()).flatten()
 }
 
 /// Look up a string inside a nested `CFDictionary`.

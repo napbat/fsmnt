@@ -2,7 +2,10 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use fsmnt_core::{FsEntry, FsMetadata};
-use fsmnt_device::{DeviceReader, FilesystemDriver, HostDriveInfo, HostDriveResult};
+use fsmnt_device::{
+    DeviceReader, FilesystemDriver, HostDriveInfo, HostDriveResult, HostVolumeResolver,
+    LogicalVolume, LogicalVolumeId, PhysicalExtent, SourceOrigin, SourceSelection,
+};
 
 use super::*;
 
@@ -82,12 +85,58 @@ impl HostDriveEnumerator for MountedVolumeEnumerator {
     fn open_drive(_id: &HostDriveId) -> HostDriveResult<Self::Reader> {
         Ok(Cursor::new(bitlocker_disk()))
     }
+}
 
-    fn open_volume_at(
-        _drive_id: &HostDriveId,
-        offset: u64,
-    ) -> HostDriveResult<Option<Self::Reader>> {
-        Ok((offset == partition_offset()).then(|| Cursor::new(ntfs_volume())))
+impl HostVolumeResolver for MountedVolumeEnumerator {
+    type VolumeReader = Cursor<Vec<u8>>;
+
+    fn logical_volumes(extent: &PhysicalExtent) -> HostDriveResult<Vec<LogicalVolume>> {
+        Ok((extent.offset() == partition_offset())
+            .then(|| {
+                LogicalVolume::new(
+                    LogicalVolumeId::new("mock-unlocked"),
+                    PathBuf::from("mock-volume"),
+                    vec![extent.clone()],
+                )
+                .with_mount_points(vec![PathBuf::from("M:\\")])
+                .with_length(partition_size())
+            })
+            .into_iter()
+            .collect())
+    }
+
+    fn open_logical_volume(_volume: &LogicalVolume) -> HostDriveResult<Self::VolumeReader> {
+        Ok(Cursor::new(ntfs_volume()))
+    }
+}
+
+struct NoVolumeEnumerator;
+
+impl HostDriveEnumerator for NoVolumeEnumerator {
+    type Reader = Cursor<Vec<u8>>;
+
+    fn enumerate_drives() -> HostDriveResult<Vec<HostDriveInfo>> {
+        Ok(vec![drive_info()])
+    }
+
+    fn get_drive_info(_id: &HostDriveId) -> HostDriveResult<HostDriveInfo> {
+        Ok(drive_info())
+    }
+
+    fn open_drive(_id: &HostDriveId) -> HostDriveResult<Self::Reader> {
+        Ok(Cursor::new(bitlocker_disk()))
+    }
+}
+
+impl HostVolumeResolver for NoVolumeEnumerator {
+    type VolumeReader = Cursor<Vec<u8>>;
+
+    fn logical_volumes(_extent: &PhysicalExtent) -> HostDriveResult<Vec<LogicalVolume>> {
+        Ok(Vec::new())
+    }
+
+    fn open_logical_volume(_volume: &LogicalVolume) -> HostDriveResult<Self::VolumeReader> {
+        unreachable!("no logical volume descriptor can be selected")
     }
 }
 
@@ -144,6 +193,11 @@ fn default_mode_prefers_mounted_filesystem_over_raw_filesystem() {
 
     assert_eq!(opened.detected, DetectedBootSector::Ntfs);
     assert_eq!(opened.size_bytes, partition_size());
+    let SourceOrigin::Logical(volume) = opened.source else {
+        panic!("automatic selection must report logical provenance");
+    };
+    assert_eq!(volume.id(), &LogicalVolumeId::new("mock-unlocked"));
+    assert_eq!(volume.backing_extents().len(), 1);
 }
 
 #[test]
@@ -151,14 +205,40 @@ fn raw_mode_bypasses_available_mounted_filesystem() {
     let mut drivers = DriverRegistry::new();
     drivers.register(Box::new(StubDriver(DetectedBootSector::BitLocker)));
 
-    let opened = open_device_partition_with_mode::<MountedVolumeEnumerator>(
+    let opened = open_device_partition_with_selection::<MountedVolumeEnumerator>(
         &HostDriveId::new("0"),
         0,
         &drivers,
-        PartitionOpenMode::Raw,
+        SourceSelection::Raw {
+            additional_partitions: Vec::new(),
+        },
     )
     .expect("open raw BitLocker partition");
 
     assert_eq!(opened.detected, DetectedBootSector::BitLocker);
     assert_eq!(opened.size_bytes, partition_size());
+    assert_eq!(
+        opened.source,
+        SourceOrigin::Raw(vec![PhysicalExtent::new(
+            HostDriveId::new("0"),
+            partition_offset(),
+            partition_size()
+        )])
+    );
+}
+
+#[test]
+fn automatic_selection_never_falls_back_to_raw_partition() {
+    let mut drivers = DriverRegistry::new();
+    drivers.register(Box::new(StubDriver(DetectedBootSector::BitLocker)));
+
+    let result = open_device_partition::<NoVolumeEnumerator>(&HostDriveId::new("0"), 0, &drivers);
+    let error = result.err().expect("missing logical volume must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("no operating-system logical volume"),
+        "{error}"
+    );
 }

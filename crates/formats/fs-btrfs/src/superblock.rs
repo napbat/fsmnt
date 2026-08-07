@@ -20,6 +20,9 @@ const ROOT_DIR_OBJECT_ID_OFFSET: usize = 0x80;
 const NUM_DEVICES_OFFSET: usize = 0x88;
 const SECTOR_SIZE_OFFSET: usize = 0x90;
 const NODE_SIZE_OFFSET: usize = 0x94;
+const DEVICE_ITEM_OFFSET: usize = 0xc9;
+const DEVICE_ID_OFFSET: usize = DEVICE_ITEM_OFFSET;
+const DEVICE_UUID_OFFSET: usize = DEVICE_ITEM_OFFSET + 0x42;
 const LABEL_OFFSET: usize = 0x12b;
 const LABEL_SIZE: usize = 0x100;
 const MAX_BLOCK_SIZE: u32 = 65_536;
@@ -40,6 +43,8 @@ pub struct BtrfsSuperblock {
     num_devices: u64,
     sector_size: u32,
     node_size: u32,
+    device_id: u64,
+    device_uuid: [u8; 16],
     label: [u8; LABEL_SIZE],
 }
 
@@ -110,6 +115,8 @@ impl BtrfsSuperblock {
 
         let mut fsid = [0_u8; FSID_SIZE];
         fsid.copy_from_slice(&data[FSID_OFFSET..FSID_OFFSET + FSID_SIZE]);
+        let mut device_uuid = [0_u8; FSID_SIZE];
+        device_uuid.copy_from_slice(&data[DEVICE_UUID_OFFSET..DEVICE_UUID_OFFSET + FSID_SIZE]);
         let mut label = [0_u8; LABEL_SIZE];
         label.copy_from_slice(&data[LABEL_OFFSET..LABEL_OFFSET + LABEL_SIZE]);
 
@@ -123,6 +130,8 @@ impl BtrfsSuperblock {
             num_devices,
             sector_size,
             node_size,
+            device_id: read_u64(data, DEVICE_ID_OFFSET),
+            device_uuid,
             label,
         })
     }
@@ -179,6 +188,18 @@ impl BtrfsSuperblock {
     #[must_use]
     pub const fn node_size(&self) -> u32 {
         self.node_size
+    }
+
+    /// Filesystem-local identifier of the device carrying this superblock.
+    #[must_use]
+    pub const fn device_id(&self) -> u64 {
+        self.device_id
+    }
+
+    /// UUID of the device carrying this superblock.
+    #[must_use]
+    pub const fn device_uuid(&self) -> &[u8; 16] {
+        &self.device_uuid
     }
 
     /// Volume label bytes, truncated at the first null byte.
