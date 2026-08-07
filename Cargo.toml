@@ -26,6 +26,7 @@ fsmnt-dokan = { path = "crates/fsmnt-dokan" }
 fsmnt-drivers = { path = "crates/fsmnt-drivers" }
 fsmnt-fuse = { path = "crates/fsmnt-fuse" }
 fsmnt-parser-core = { path = "crates/fsmnt-parser-core", default-features = false }
+fsmnt-proxy = { path = "crates/fsmnt-proxy" }
 fsmnt-testkit = { path = "crates/fsmnt-testkit" }
 
 # Vendored filesystem-format crates (crates/formats/). Their manifests
@@ -141,6 +142,7 @@ clap = { workspace = true }
 fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
 fsmnt-drivers = { workspace = true }
+fsmnt-proxy = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 fsmnt-fuse = { workspace = true }

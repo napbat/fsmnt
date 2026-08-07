@@ -30,7 +30,8 @@
 //! The [`device`] layer provides cross-platform block-device access:
 //! enumeration and raw opening of physical drives ([`HostDrives`] on
 //! Windows/Linux/macOS), GPT/MBR partition-table parsing, partition-scoped
-//! readers, and boot-sector filesystem detection.
+//! readers, and boot-sector filesystem detection. Platform openers use the
+//! [`proxy`] helper automatically when direct raw-device access is denied.
 //!
 //! The [`drivers`] layer supplies the parser adapters: NTFS, FAT12/16/32,
 //! `exFAT`, ext2/3/4, APFS, and `BitLocker` (which unlocks to NTFS).
@@ -61,6 +62,7 @@ pub use fsmnt_core::{
 
 pub use fsmnt_device as device;
 pub use fsmnt_drivers as drivers;
+pub use fsmnt_proxy as proxy;
 
 #[cfg(target_os = "linux")]
 pub use fsmnt_device_linux::LinuxHostDrives as HostDrives;

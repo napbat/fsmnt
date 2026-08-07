@@ -602,6 +602,7 @@ dependencies = [
  "fsmnt-dokan",
  "fsmnt-drivers",
  "fsmnt-fuse",
+ "fsmnt-proxy",
 ]
 
 [[package]]
@@ -628,6 +629,7 @@ name = "fsmnt-device-linux"
 version = "0.1.0"
 dependencies = [
  "fsmnt-device",
+ "fsmnt-proxy",
  "libc",
 ]
 
@@ -636,6 +638,7 @@ name = "fsmnt-device-macos"
 version = "0.1.0"
 dependencies = [
  "fsmnt-device",
+ "fsmnt-proxy",
  "libc",
 ]
 
@@ -644,6 +647,7 @@ name = "fsmnt-device-windows"
 version = "0.1.0"
 dependencies = [
  "fsmnt-device",
+ "fsmnt-proxy",
  "windows",
 ]
 
@@ -692,6 +696,15 @@ dependencies = [
  "memoffset",
  "mutants",
  "zerocopy",
+]
+
+[[package]]
+name = "fsmnt-proxy"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows",
 ]
 
 [[package]]

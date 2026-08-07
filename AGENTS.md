@@ -24,6 +24,9 @@ kept as a thin wrapper over it. Member crates under `crates/`:
   no filesystem drivers; consumers register them.
 - `fsmnt-device-windows` / `-linux` / `-macos` — per-OS drive enumeration
   and raw opening.
+- `fsmnt-proxy` — privileged read helper. Platform drive crates try direct
+  access first, then obtain a read-only OS handle from its elevated
+  `fsmnt-proxy-server` when access is denied.
 - `fsmnt-fuse` / `fsmnt-dokan` — the mount backends (Unix FUSE / Windows
   Dokan).
 - `crates/formats/` — parent directory (not a crate) for filesystem-format

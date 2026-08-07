@@ -12,13 +12,12 @@
 //! (model, serial number, bus type, removable flag) are obtained via the
 //! `IOKit` framework (see [`crate::iokit`]).
 //!
-//! All opens are direct: on permission failure the drive is reported as
-//! inaccessible (or [`HostDriveError::AccessDenied`] is returned) — there
-//! is no privileged-proxy fallback.
+//! Opens are attempted directly first. On permission failure they fall back
+//! to the default `fsmnt-proxy-server`, which passes back a read-only file
+//! descriptor.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::BufReader;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +25,7 @@ use fsmnt_device::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,
     HostDriveResult,
 };
+use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
 
 use crate::iokit;
 
@@ -53,7 +53,8 @@ impl MacOsHostDrives {
     /// (e.g., `"/dev/disk0"`).
     ///
     /// Uses `O_RDONLY | O_NONBLOCK` to prevent the kernel from triggering
-    /// automount or media checks — forensically safe.
+    /// automount or media checks — forensically safe. If a direct open is
+    /// denied, it tries the default `fsmnt-proxy-server`.
     ///
     /// # Errors
     ///
@@ -159,7 +160,7 @@ impl HostDriveEnumerator for MacOsHostDrives {
                 }
             }
             Err(HostDriveError::AccessDenied) => {
-                info = info.with_error("Access denied (requires elevated privileges)");
+                info = info.with_error("Access denied (start fsmnt-proxy-server as root)");
             }
             Err(e) => {
                 info = info.with_error(&format!("I/O error: {e}"));
@@ -201,18 +202,16 @@ impl HostDriveEnumerator for MacOsHostDrives {
 /// Open a device node for **read-only** access with `O_NONBLOCK`.
 ///
 /// `O_NONBLOCK` prevents the kernel from blocking on media checks or
-/// triggering automount side-effects.  Direct open only — there is no
-/// privileged-proxy fallback.
+/// triggering automount side-effects. Access denial triggers a fallback to
+/// the default `fsmnt-proxy-server`.
 fn open_device(path: &str) -> HostDriveResult<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| match e.kind() {
+    open_with_proxy_fallback(path, OpenMode::ReadOnly, libc::O_NONBLOCK).map_err(
+        |error| match error.kind() {
             std::io::ErrorKind::PermissionDenied => HostDriveError::AccessDenied,
             std::io::ErrorKind::NotFound => HostDriveError::NotFound(path.to_string()),
-            _ => HostDriveError::Io(e),
-        })
+            _ => HostDriveError::Io(error),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------

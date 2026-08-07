@@ -10,9 +10,8 @@
 //! Windows.
 
 use std::ffi::c_void;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufReader, ErrorKind};
-use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 
@@ -20,8 +19,8 @@ use fsmnt_device::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,
     HostDriveResult,
 };
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE};
-use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
     DISK_GEOMETRY, GET_LENGTH_INFORMATION, IOCTL_DISK_GET_DRIVE_GEOMETRY,
@@ -69,7 +68,7 @@ impl WindowsHostDrives {
     ///
     /// Returns an error if `letter` is not a single ASCII drive letter,
     /// the volume does not exist, or it cannot be opened (e.g.
-    /// insufficient privileges).
+    /// insufficient privileges and no privileged proxy is available).
     pub fn open_raw_volume(letter: &str) -> HostDriveResult<BufReader<File>> {
         let letter = letter
             .trim_end_matches([':', '\\', '/'])
@@ -134,22 +133,19 @@ fn physical_drive_path(id: &HostDriveId) -> HostDriveResult<String> {
 
 /// Open a device path for read-only access.
 ///
-/// Always uses `FILE_SHARE_READ` so other processes can still read the
-/// device concurrently.
+/// Tries a direct open first and, on access denial, asks the
+/// `fsmnt-proxy-server` at its default endpoint for a duplicated read-only
+/// handle.
 fn open_device(path: &str) -> HostDriveResult<File> {
-    OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ.0)
-        .open(path)
-        .map_err(|e| {
-            if e.raw_os_error() == i32::try_from(ERROR_ACCESS_DENIED.0).ok() {
-                HostDriveError::AccessDenied
-            } else if e.kind() == ErrorKind::NotFound {
-                HostDriveError::NotFound(path.to_string())
-            } else {
-                HostDriveError::Io(e)
-            }
-        })
+    open_with_proxy_fallback(path, OpenMode::ReadOnly, 0).map_err(|error| {
+        if error.kind() == ErrorKind::PermissionDenied {
+            HostDriveError::AccessDenied
+        } else if error.kind() == ErrorKind::NotFound {
+            HostDriveError::NotFound(path.to_string())
+        } else {
+            HostDriveError::Io(error)
+        }
+    })
 }
 
 /// Query drive info for one physical drive, reporting inaccessible drives
@@ -183,7 +179,7 @@ fn query_drive_info(id: &HostDriveId) -> HostDriveResult<HostDriveInfo> {
             Ok(info)
         }
         Err(HostDriveError::AccessDenied) => Ok(HostDriveInfo::new(id.clone(), path)
-            .with_error("Access denied (requires administrator privileges)")),
+            .with_error("Access denied (start fsmnt-proxy-server as Administrator)")),
         Err(HostDriveError::Io(ref e)) if e.kind() != ErrorKind::NotFound => {
             Ok(HostDriveInfo::new(id.clone(), path).with_error(&format!("I/O error: {e}")))
         }

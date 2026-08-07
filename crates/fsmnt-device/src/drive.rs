@@ -22,7 +22,7 @@ pub enum HostDriveError {
     Io(#[from] std::io::Error),
 
     /// Access denied.
-    #[error("Access denied (requires elevated privileges)")]
+    #[error("Access denied (start fsmnt-proxy-server with elevated privileges)")]
     AccessDenied,
 
     /// Parse error.

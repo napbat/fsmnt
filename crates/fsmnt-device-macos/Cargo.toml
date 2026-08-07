@@ -7,6 +7,7 @@ edition.workspace = true
 # an empty library so workspace-wide builds work everywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
 fsmnt-device = { workspace = true }
+fsmnt-proxy = { workspace = true }
 libc = { workspace = true }
 
 [lints]

@@ -333,6 +333,15 @@ impl GptPartitionEntry {
         0xAC,
     ];
 
+    /// Generic Linux filesystem-data GUID.
+    ///
+    /// Its canonical UUID is `0FC63DAF-8483-4772-8E79-3D69D8477DE4`;
+    /// the bytes below use GPT's mixed-endian on-disk representation.
+    pub const LINUX_FILESYSTEM_GUID: [u8; 16] = [
+        0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D,
+        0xE4,
+    ];
+
     /// Get human-readable name for common GPT partition types
     #[must_use]
     pub fn type_name(&self) -> Option<&'static str> {
@@ -341,6 +350,7 @@ impl GptPartitionEntry {
             Self::MICROSOFT_BASIC_DATA_GUID => Some("Basic Data (NTFS/FAT)"),
             Self::MICROSOFT_RESERVED_GUID => Some("Microsoft Reserved"),
             Self::WINDOWS_RECOVERY_GUID => Some("Windows Recovery"),
+            Self::LINUX_FILESYSTEM_GUID => Some("Linux filesystem"),
             _ => None,
         }
     }
@@ -813,6 +823,7 @@ mod tests {
                 "Microsoft Reserved",
             ),
             (GptPartitionEntry::WINDOWS_RECOVERY_GUID, "Windows Recovery"),
+            (GptPartitionEntry::LINUX_FILESYSTEM_GUID, "Linux filesystem"),
         ];
         for &(guid, label) in pairs {
             let entry = build_gpt_partition_entry(guid, 0, 0, &[]);
@@ -828,6 +839,16 @@ mod tests {
         let entry = build_gpt_partition_entry(unknown, 0, 0, &[]);
         let parsed = GptPartitionEntry::from_bytes(&entry).unwrap();
         assert_eq!(parsed.type_name(), None);
+    }
+
+    #[test]
+    fn linux_filesystem_guid_uses_gpt_mixed_endian_storage() {
+        let entry = build_gpt_partition_entry(GptPartitionEntry::LINUX_FILESYSTEM_GUID, 0, 0, &[]);
+        let parsed = GptPartitionEntry::from_bytes(&entry).unwrap();
+        assert_eq!(
+            parsed.type_guid_string(),
+            "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+        );
     }
 
     // ------------------------------------------------------------------

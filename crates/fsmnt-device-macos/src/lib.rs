@@ -3,7 +3,8 @@
 //! Enumerates whole disks (`/dev/disk0`, `/dev/disk1`, …), reads geometry
 //! via `ioctl` and hardware metadata via `IOKit`, and opens drives for raw
 //! read-only access, implementing
-//! [`HostDriveEnumerator`](fsmnt_device::HostDriveEnumerator).
+//! [`HostDriveEnumerator`](fsmnt_device::HostDriveEnumerator). Raw opens
+//! fall back to `fsmnt-proxy-server` when direct access is denied.
 //!
 //! On non-macOS targets this crate compiles to an empty library so that
 //! workspace-wide builds work everywhere.

@@ -5,7 +5,8 @@
 //! [`HostDriveEnumerator`](fsmnt_device::HostDriveEnumerator).  Also maps
 //! physical-disk extents to mounted volumes (`\\.\C:`) so OS-decrypted
 //! data (e.g. unlocked `BitLocker` partitions) can be read through the
-//! volume instead of the raw drive.
+//! volume instead of the raw drive. Raw opens fall back to
+//! `fsmnt-proxy-server` when direct access is denied.
 //!
 //! On non-Windows targets this crate compiles to an empty library so that
 //! workspace-wide builds work everywhere.

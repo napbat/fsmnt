@@ -7,6 +7,7 @@ edition.workspace = true
 # to an empty library so workspace-wide builds work everywhere.
 [target.'cfg(windows)'.dependencies]
 fsmnt-device = { workspace = true }
+fsmnt-proxy = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

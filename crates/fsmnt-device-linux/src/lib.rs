@@ -2,7 +2,8 @@
 //!
 //! Enumerates physical drives via sysfs (`/sys/block`) and opens them for
 //! raw read-only access, implementing
-//! [`HostDriveEnumerator`](fsmnt_device::HostDriveEnumerator).
+//! [`HostDriveEnumerator`](fsmnt_device::HostDriveEnumerator). Raw opens
+//! fall back to `fsmnt-proxy-server` when direct access is denied.
 //!
 //! On non-Linux targets this crate compiles to an empty library so that
 //! workspace-wide builds work everywhere.

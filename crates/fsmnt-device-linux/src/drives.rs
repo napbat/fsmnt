@@ -10,15 +10,15 @@
 //! opened are reported by enumeration with `accessible = false` rather
 //! than being omitted.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{BufReader, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use fsmnt_device::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,
     HostDriveResult,
 };
+use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
 
 /// Linux host drive enumerator.
 ///
@@ -30,7 +30,8 @@ impl LinuxHostDrives {
     /// Open a physical drive for **read-only** raw access by path
     /// (e.g., `"/dev/sda"`).
     ///
-    /// Uses `O_RDONLY | O_NONBLOCK` to prevent kernel side-effects.
+    /// Uses `O_RDONLY | O_NONBLOCK` to prevent kernel side-effects. If a
+    /// direct open is denied, it tries the default `fsmnt-proxy-server`.
     ///
     /// # Errors
     ///
@@ -119,7 +120,7 @@ impl HostDriveEnumerator for LinuxHostDrives {
                 }
             }
             Err(HostDriveError::AccessDenied) => {
-                info = info.with_error("Access denied (requires root privileges)");
+                info = info.with_error("Access denied (start fsmnt-proxy-server as root)");
             }
             Err(e) => {
                 info = info.with_error(&e.to_string());
@@ -136,14 +137,11 @@ impl HostDriveEnumerator for LinuxHostDrives {
 
 /// Open a device node **read-only** with `O_NONBLOCK`.
 ///
-/// Direct open only: on permission denied this returns
-/// [`HostDriveError::AccessDenied`] (no privileged-helper fallback).
+/// Tries direct access first and then the default `fsmnt-proxy-server` when
+/// access is denied.
 fn open_device(path: &str) -> HostDriveResult<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|e| map_io_error(e, path))
+    open_with_proxy_fallback(path, OpenMode::ReadOnly, libc::O_NONBLOCK)
+        .map_err(|error| map_io_error(error, path))
 }
 
 /// Map an I/O error to a [`HostDriveError`].
