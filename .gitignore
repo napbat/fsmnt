@@ -5,6 +5,10 @@
 **/testdata/*.img
 **/testdata/testfs*
 
+# Local libFuzzer state.
+crates/fsmnt-fuzz/artifacts/
+crates/fsmnt-fuzz/corpus/
+
 # Canonical upstream fixtures required by integration tests.
 !crates/formats/fs-exfat/testdata/testfs1
 !crates/formats/fs-ext/testdata/ext4-fscrypt.img

@@ -15,12 +15,15 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }
 zstd = { workspace = true, optional = true }
+zerocopy = { workspace = true }
 
 [dev-dependencies]
+divan = { workspace = true }
 fsmnt-testkit = { workspace = true }
 
 [features]
 default = []
+fuzzing = []
 std = [
     "dep:flate2",
     "dep:lzokay",
@@ -28,6 +31,11 @@ std = [
     "fsmnt-parser-core/std",
     "thiserror/std",
 ]
+
+[[bench]]
+name = "parser"
+harness = false
+required-features = ["fuzzing"]
 
 [lints]
 workspace = true

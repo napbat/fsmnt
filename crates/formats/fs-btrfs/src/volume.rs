@@ -7,7 +7,7 @@ use crate::item::{
     BtrfsFileType, BtrfsInode, CHECKSUM_TREE_OBJECT_ID, DIR_INDEX_KEY, DIR_ITEM_KEY,
     EXTENT_CHECKSUM_KEY, EXTENT_CHECKSUM_OBJECT_ID, FIRST_FREE_OBJECT_ID, FS_TREE_OBJECT_ID,
     INODE_ITEM_KEY, ROOT_ITEM_KEY, ROOT_TREE_DIR_OBJECT_ID, ROOT_TREE_OBJECT_ID, RawDirectoryEntry,
-    RootItem, parse_directory_entries,
+    RootItem, parse_directory_entries, valid_filesystem_tree_id,
 };
 use crate::tree::{TreeBlock, TreeItem, TreeRoot};
 use crate::{BtrfsError, BtrfsSuperblock, DiskKey, Result};
@@ -173,22 +173,28 @@ impl<R: Read + Seek> Btrfs<R> {
             return Ok(());
         }
 
-        self.chunks = parse_system_chunks(self.superblock().system_chunk_array())?;
+        self.chunks = parse_system_chunks(
+            self.superblock().system_chunk_array(),
+            self.superblock().sector_size(),
+            self.superblock().incompat_flags(),
+        )?;
         let chunk_root = TreeRoot {
             tree_id: crate::item::CHUNK_TREE_OBJECT_ID,
             logical: self.superblock().chunk_root(),
             level: self.superblock().chunk_root_level(),
+            expected_generation: Some(self.superblock().chunk_root_generation()),
         };
         let chunk_items = self.collect_items(
             chunk_root,
             DiskKey::range_start(256, CHUNK_ITEM_KEY),
             DiskKey::range_end(256, CHUNK_ITEM_KEY),
         )?;
+        let sector_size = self.superblock().sector_size();
+        let incompat_flags = self.superblock().incompat_flags();
         for item in chunk_items {
-            merge_chunk(
-                &mut self.chunks,
-                ChunkMapping::parse(item.key.offset, &item.data)?,
-            )?;
+            let mapping =
+                ChunkMapping::parse(item.key.offset, &item.data, sector_size, incompat_flags)?;
+            merge_chunk(&mut self.chunks, mapping)?;
         }
         self.validate_chunk_devices()?;
 
@@ -196,6 +202,7 @@ impl<R: Read + Seek> Btrfs<R> {
             tree_id: ROOT_TREE_OBJECT_ID,
             logical: self.superblock().root(),
             level: self.superblock().root_level(),
+            expected_generation: Some(self.superblock().generation()),
         };
         self.root_tree = Some(root_tree);
         self.cached_roots.clear();
@@ -342,7 +349,14 @@ impl<R: Read + Seek> Btrfs<R> {
             start,
             end,
         };
-        self.collect_block(root.logical, root.level, range, None, &mut items)?;
+        self.collect_block(
+            root.logical,
+            root.level,
+            range,
+            root.expected_generation,
+            None,
+            &mut items,
+        )?;
         Ok(items)
     }
 
@@ -388,6 +402,11 @@ impl<R: Read + Seek> Btrfs<R> {
         {
             checksum_items.insert(0, predecessor);
         }
+        validate_checksum_items(
+            &checksum_items,
+            self.superblock().sector_size(),
+            checksum_size,
+        )?;
 
         for (sector_index, sector) in data.chunks_exact(sector_size).enumerate() {
             let sector_delta = sector_index
@@ -440,9 +459,16 @@ impl<R: Read + Seek> Btrfs<R> {
         level: u8,
         range: TreeRange,
         expected_generation: Option<u64>,
+        expected_first_key: Option<DiskKey>,
         output: &mut Vec<TreeItem>,
     ) -> Result<()> {
-        let block = self.read_tree_block(logical, level, range.owner, expected_generation)?;
+        let block = self.read_tree_block(
+            logical,
+            level,
+            range.owner,
+            expected_generation,
+            expected_first_key,
+        )?;
         match block {
             TreeBlock::Leaf { items, .. } => {
                 output.extend(
@@ -462,6 +488,7 @@ impl<R: Read + Seek> Btrfs<R> {
                             level - 1,
                             range,
                             Some(pointer.generation),
+                            Some(pointer.key),
                             output,
                         )?;
                     }
@@ -472,7 +499,14 @@ impl<R: Read + Seek> Btrfs<R> {
     }
 
     fn find_predecessor(&mut self, root: TreeRoot, target: DiskKey) -> Result<Option<TreeItem>> {
-        self.find_predecessor_block(root.tree_id, root.logical, root.level, target, None)
+        self.find_predecessor_block(
+            root.tree_id,
+            root.logical,
+            root.level,
+            target,
+            root.expected_generation,
+            None,
+        )
     }
 
     fn find_predecessor_block(
@@ -482,8 +516,15 @@ impl<R: Read + Seek> Btrfs<R> {
         level: u8,
         target: DiskKey,
         expected_generation: Option<u64>,
+        expected_first_key: Option<DiskKey>,
     ) -> Result<Option<TreeItem>> {
-        let block = self.read_tree_block(logical, level, expected_owner, expected_generation)?;
+        let block = self.read_tree_block(
+            logical,
+            level,
+            expected_owner,
+            expected_generation,
+            expected_first_key,
+        )?;
         match block {
             TreeBlock::Leaf { items, .. } => Ok(items
                 .into_iter()
@@ -498,6 +539,7 @@ impl<R: Read + Seek> Btrfs<R> {
                         level - 1,
                         target,
                         Some(pointer.generation),
+                        Some(pointer.key),
                     ),
                     None => Ok(None),
                 }
@@ -511,6 +553,7 @@ impl<R: Read + Seek> Btrfs<R> {
         level: u8,
         expected_owner: u64,
         expected_generation: Option<u64>,
+        expected_first_key: Option<DiskKey>,
     ) -> Result<TreeBlock> {
         let node_size = usize::try_from(self.superblock().node_size())
             .map_err(|_| BtrfsError::IntegerOverflow)?;
@@ -525,6 +568,7 @@ impl<R: Read + Seek> Btrfs<R> {
                 level,
                 self.superblock().tree_uuid(),
                 self.superblock().checksum_type(),
+                self.superblock().sector_size(),
             ) {
                 Ok(block) => {
                     let (generation, owner) = match &block {
@@ -538,8 +582,10 @@ impl<R: Read + Seek> Btrfs<R> {
                     match validate_tree_identity(
                         expected_owner,
                         expected_generation,
+                        expected_first_key,
                         owner,
                         generation,
+                        block.first_key(),
                         logical,
                     ) {
                         Ok(()) => return Ok(block),
@@ -683,12 +729,11 @@ impl<R: Read + Seek> Btrfs<R> {
             DiskKey::range_end(tree_id, ROOT_ITEM_KEY),
         )?;
         let mut newest = None;
+        let sector_size = self.superblock().sector_size();
+        let super_generation = self.superblock().generation();
         for item in items {
-            let candidate = RootItem::parse(item.key, &item.data)?;
-            if newest
-                .as_ref()
-                .is_none_or(|root: &RootItem| candidate.generation > root.generation)
-            {
+            let candidate = RootItem::parse(item.key, &item.data, sector_size, super_generation)?;
+            if should_replace_root(newest.as_ref(), &candidate) {
                 newest = Some(candidate);
             }
         }
@@ -697,6 +742,7 @@ impl<R: Read + Seek> Btrfs<R> {
             tree_id,
             logical: root_item.logical,
             level: root_item.level,
+            expected_generation: Some(root_item.generation),
         };
         self.cached_roots.push(root);
         Ok(root)
@@ -713,7 +759,7 @@ impl<R: Read + Seek> Btrfs<R> {
             .into_iter()
             .next()
             .ok_or(BtrfsError::NotFound)?;
-        BtrfsInode::parse(item.key, &item.data)
+        BtrfsInode::parse(item.key, &item.data, self.superblock().generation())
     }
 
     fn find_default_tree_id(&mut self) -> Result<Option<u64>> {
@@ -770,6 +816,10 @@ impl<R: Read + Seek> Btrfs<R> {
     }
 }
 
+fn should_replace_root(current: Option<&RootItem>, candidate: &RootItem) -> bool {
+    current.is_none_or(|root| candidate.key_offset > root.key_offset)
+}
+
 fn validate_devices<R>(primary: &Device<R>, additional: &[Device<R>]) -> Result<()> {
     let actual = additional.len().saturating_add(1);
     let actual_u64 = u64::try_from(actual).map_err(|_| BtrfsError::IntegerOverflow)?;
@@ -812,13 +862,72 @@ fn validate_devices<R>(primary: &Device<R>, additional: &[Device<R>]) -> Result<
 fn validate_tree_identity(
     expected_owner: u64,
     expected_generation: Option<u64>,
+    expected_first_key: Option<DiskKey>,
     owner: u64,
     generation: u64,
+    first_key: Option<DiskKey>,
     logical: u64,
 ) -> Result<()> {
-    if owner != expected_owner || expected_generation.is_some_and(|expected| expected != generation)
+    let owner_matches = if expected_first_key.is_none() {
+        owner == expected_owner
+    } else if valid_filesystem_tree_id(expected_owner) {
+        valid_filesystem_tree_id(owner)
+    } else {
+        owner == expected_owner
+    };
+    if !owner_matches
+        || expected_generation.is_some_and(|expected| expected != generation)
+        || expected_first_key.is_some_and(|expected| Some(expected) != first_key)
     {
         return Err(BtrfsError::MalformedTreeBlock { logical });
     }
     Ok(())
 }
+
+fn validate_checksum_items(
+    items: &[TreeItem],
+    sector_size: u32,
+    checksum_size: usize,
+) -> Result<()> {
+    if sector_size == 0 || checksum_size == 0 {
+        return Err(BtrfsError::InvalidFileExtentRange);
+    }
+    let mut previous_end = None;
+    for item in items {
+        if item.key.object_id != EXTENT_CHECKSUM_OBJECT_ID
+            || item.key.item_type != EXTENT_CHECKSUM_KEY
+            || !item.key.offset.is_multiple_of(u64::from(sector_size))
+            || item.data.is_empty()
+            || !item.data.len().is_multiple_of(checksum_size)
+        {
+            return Err(malformed_item(item.key));
+        }
+        let checksum_count = item.data.len() / checksum_size;
+        let covered_bytes = u64::try_from(checksum_count)
+            .map_err(|_| BtrfsError::IntegerOverflow)?
+            .checked_mul(u64::from(sector_size))
+            .ok_or(BtrfsError::IntegerOverflow)?;
+        let item_end = item
+            .key
+            .offset
+            .checked_add(covered_bytes)
+            .ok_or_else(|| malformed_item(item.key))?;
+        if previous_end.is_some_and(|end| end > item.key.offset) {
+            return Err(malformed_item(item.key));
+        }
+        previous_end = Some(item_end);
+    }
+    Ok(())
+}
+
+const fn malformed_item(key: DiskKey) -> BtrfsError {
+    BtrfsError::MalformedItem {
+        object_id: key.object_id,
+        item_type: key.item_type,
+        offset: key.offset,
+    }
+}
+
+#[cfg(test)]
+#[path = "volume/tests.rs"]
+mod tests;

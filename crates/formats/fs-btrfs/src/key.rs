@@ -1,10 +1,17 @@
 //! Ordered keys used by every Btrfs tree.
 
-use crate::bytes::u64_at;
-use crate::{BtrfsError, Result};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian as LE, U64, Unaligned};
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+pub(crate) struct RawDiskKey {
+    pub(crate) object_id: U64<LE>,
+    pub(crate) item_type: u8,
+    pub(crate) offset: U64<LE>,
+}
 
 /// Serialized size of a Btrfs disk key.
-pub const DISK_KEY_SIZE: usize = 17;
+pub const DISK_KEY_SIZE: usize = core::mem::size_of::<RawDiskKey>();
 
 /// Key ordering one item within a Btrfs tree.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -37,18 +44,24 @@ impl DiskKey {
             offset: u64::MAX,
         }
     }
+}
 
-    pub(crate) fn parse(data: &[u8]) -> Result<Self> {
-        if data.len() < DISK_KEY_SIZE {
-            return Err(BtrfsError::BufferTooSmall {
-                expected: DISK_KEY_SIZE,
-                actual: data.len(),
-            });
+impl RawDiskKey {
+    pub(crate) const fn to_disk_key(self) -> DiskKey {
+        DiskKey {
+            object_id: self.object_id.get(),
+            item_type: self.item_type,
+            offset: self.offset.get(),
         }
-        Ok(Self {
-            object_id: u64_at(data, 0)?,
-            item_type: data[8],
-            offset: u64_at(data, 9)?,
-        })
+    }
+}
+
+impl From<DiskKey> for RawDiskKey {
+    fn from(key: DiskKey) -> Self {
+        Self {
+            object_id: U64::new(key.object_id),
+            item_type: key.item_type,
+            offset: U64::new(key.offset),
+        }
     }
 }

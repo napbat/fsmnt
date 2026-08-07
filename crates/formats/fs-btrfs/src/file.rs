@@ -24,7 +24,7 @@ impl<R: Read + Seek> Btrfs<R> {
         }
         let file_size = usize::try_from(inode.size())
             .map_err(|_| BtrfsError::FileTooLarge { size: inode.size() })?;
-        let mut output = alloc::vec![0_u8; file_size];
+        let mut output = zeroed_buffer(file_size, inode.size())?;
         if output.is_empty() {
             return Ok(output);
         }
@@ -36,8 +36,14 @@ impl<R: Read + Seek> Btrfs<R> {
             DiskKey::range_end(entry.object_id(), EXTENT_DATA_KEY),
         )?;
         let verify_checksums = inode.has_data_checksums();
+        let sector_size = self.superblock().sector_size();
+        let mut previous_end = None;
         for item in items {
-            let extent = FileExtent::parse(item.key, &item.data)?;
+            let extent = FileExtent::parse(item.key, &item.data, sector_size)?;
+            if previous_end.is_some_and(|end| end > extent.file_offset) {
+                return Err(BtrfsError::InvalidFileExtentRange);
+            }
+            previous_end = Some(extent.file_range_end(sector_size)?);
             self.apply_extent(&extent, &mut output, verify_checksums)?;
         }
         Ok(output)
@@ -78,11 +84,12 @@ impl<R: Read + Seek> Btrfs<R> {
             ExtentKind::Preallocated => return Ok(()),
         };
 
-        let source_offset = if extent.kind == ExtentKind::Regular {
-            usize::try_from(extent.extent_offset).map_err(|_| BtrfsError::IntegerOverflow)?
-        } else {
-            0
-        };
+        let source_offset =
+            if extent.kind == ExtentKind::Regular && extent.compression != Compression::None {
+                usize::try_from(extent.extent_offset).map_err(|_| BtrfsError::IntegerOverflow)?
+            } else {
+                0
+            };
         copy_extent(
             output,
             extent.file_offset,
@@ -99,11 +106,14 @@ impl<R: Read + Seek> Btrfs<R> {
         verify_checksums: bool,
     ) -> Result<Vec<u8>> {
         if extent.compression == Compression::None {
-            let length =
-                usize::try_from(extent.disk_bytes).map_err(|_| BtrfsError::IntegerOverflow)?;
-            return self.read_extent_bytes(extent.disk_logical, length, verify_checksums);
+            let (logical, length) =
+                uncompressed_read_window(extent, copy_length, self.superblock().sector_size())?;
+            return self.read_extent_bytes(logical, length, verify_checksums);
         }
 
+        if extent.disk_bytes > self.superblock().total_bytes() {
+            return Err(BtrfsError::InvalidFileExtentRange);
+        }
         let disk_length =
             usize::try_from(extent.disk_bytes).map_err(|_| BtrfsError::IntegerOverflow)?;
         let encoded = self.read_extent_bytes(extent.disk_logical, disk_length, verify_checksums)?;
@@ -134,7 +144,9 @@ impl<R: Read + Seek> Btrfs<R> {
         } else {
             1
         };
-        let mut data = alloc::vec![0_u8; length];
+        let reported_size =
+            u64::try_from(length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
+        let mut data = zeroed_buffer(length, reported_size)?;
         let mut checksum_error = None;
         for replica in 0..replica_count {
             self.read_logical_exact_from_replica(logical, &mut data, replica)?;
@@ -151,6 +163,35 @@ impl<R: Read + Seek> Btrfs<R> {
         }
         Err(checksum_error.unwrap_or(BtrfsError::LogicalAddressUnmapped { logical }))
     }
+}
+
+fn uncompressed_read_window(
+    extent: &FileExtent,
+    copy_length: u64,
+    sector_size: u32,
+) -> Result<(u64, usize)> {
+    if sector_size == 0 {
+        return Err(BtrfsError::InvalidFileExtentRange);
+    }
+    let sector_size = u64::from(sector_size);
+    let read_length = copy_length
+        .checked_add(sector_size - 1)
+        .ok_or(BtrfsError::IntegerOverflow)?
+        / sector_size
+        * sector_size;
+    let disk_end = extent
+        .extent_offset
+        .checked_add(read_length)
+        .ok_or(BtrfsError::IntegerOverflow)?;
+    if disk_end > extent.disk_bytes {
+        return Err(BtrfsError::InvalidFileExtentRange);
+    }
+    let logical = extent
+        .disk_logical
+        .checked_add(extent.extent_offset)
+        .ok_or(BtrfsError::IntegerOverflow)?;
+    let length = usize::try_from(read_length).map_err(|_| BtrfsError::IntegerOverflow)?;
+    Ok((logical, length))
 }
 
 fn extent_copy_length(output: &[u8], file_offset: u64, declared_length: u64) -> Result<u64> {
@@ -186,14 +227,14 @@ fn copy_extent(
     Ok(())
 }
 
-fn decompress(
+pub(crate) fn decompress(
     data: &[u8],
     compression: Compression,
     output_length: u64,
     sector_size: u32,
 ) -> Result<Vec<u8>> {
     if compression == Compression::None {
-        return Ok(data.to_vec());
+        return copy_buffer(data);
     }
 
     #[cfg(feature = "std")]
@@ -218,7 +259,7 @@ fn decompress_with_std(
 ) -> Result<Vec<u8>> {
     let output_length = usize::try_from(output_length).map_err(|_| BtrfsError::IntegerOverflow)?;
     match compression {
-        Compression::None => Ok(data.to_vec()),
+        Compression::None => copy_buffer(data),
         Compression::Zlib => {
             let mut decoder = flate2::read::ZlibDecoder::new(data);
             read_decoded_exact(&mut decoder, output_length, compression)
@@ -259,7 +300,12 @@ fn read_decoded_exact(
 ) -> Result<Vec<u8>> {
     use std::io::Read as _;
 
-    let mut output = Vec::with_capacity(output_length);
+    let output_size =
+        u64::try_from(output_length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_length)
+        .map_err(|_| BtrfsError::FileTooLarge { size: output_size })?;
     let limit = u64::try_from(output_length).map_err(|_| BtrfsError::IntegerOverflow)?;
     decoder
         .take(limit)
@@ -295,7 +341,12 @@ fn decompress_lzo(data: &[u8], output_length: usize, sector_size: usize) -> Resu
         ));
     }
 
-    let mut output = Vec::with_capacity(output_length);
+    let output_size =
+        u64::try_from(output_length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_length)
+        .map_err(|_| BtrfsError::FileTooLarge { size: output_size })?;
     let mut position = 4_usize;
     while position < total_length && output.len() < output_length {
         let sector_remaining = sector_size - (position % sector_size);
@@ -327,7 +378,9 @@ fn decompress_lzo(data: &[u8], output_length: usize, sector_size: usize) -> Resu
         if segment_end > total_length {
             return Err(decode_error(Compression::Lzo, "truncated LZO segment"));
         }
-        let mut decoded = alloc::vec![0_u8; sector_size];
+        let decoded_size =
+            u64::try_from(sector_size).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
+        let mut decoded = zeroed_buffer(sector_size, decoded_size)?;
         let decoded_length =
             lzokay::decompress::decompress(&data[position..segment_end], &mut decoded)
                 .map_err(|error| decode_error(Compression::Lzo, alloc::format!("{error:?}")))?;
@@ -341,6 +394,30 @@ fn decompress_lzo(data: &[u8], output_length: usize, sector_size: usize) -> Resu
             "decoded LZO length differs from ram_bytes",
         ));
     }
+    Ok(output)
+}
+
+fn zeroed_buffer(length: usize, reported_size: u64) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(length)
+        .map_err(|_| BtrfsError::FileTooLarge {
+            size: reported_size,
+        })?;
+    output.resize(length, 0);
+    Ok(output)
+}
+
+fn copy_buffer(data: &[u8]) -> Result<Vec<u8>> {
+    let reported_size =
+        u64::try_from(data.len()).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(data.len())
+        .map_err(|_| BtrfsError::FileTooLarge {
+            size: reported_size,
+        })?;
+    output.extend_from_slice(data);
     Ok(output)
 }
 
@@ -417,6 +494,54 @@ mod tests {
             extent_copy_length(&output, 1_441_792, 110_592).expect("tail length"),
             109_312
         );
+    }
+
+    #[test]
+    fn impossible_buffer_capacity_is_reported_without_allocating() {
+        assert!(matches!(
+            zeroed_buffer(usize::MAX, u64::MAX),
+            Err(BtrfsError::FileTooLarge { size: u64::MAX })
+        ));
+    }
+
+    #[test]
+    fn uncompressed_extent_reads_only_the_selected_sector_window() {
+        let extent = FileExtent {
+            file_offset: 0,
+            ram_bytes: 16_384,
+            compression: Compression::None,
+            kind: ExtentKind::Regular,
+            inline_data: Vec::new(),
+            disk_logical: 0x10_0000,
+            disk_bytes: 16_384,
+            extent_offset: 4096,
+            logical_bytes: 4096,
+        };
+
+        assert_eq!(
+            uncompressed_read_window(&extent, 1, 4096).expect("one sector"),
+            (0x10_1000, 4096)
+        );
+    }
+
+    #[test]
+    fn uncompressed_extent_rejects_a_window_beyond_disk_bytes() {
+        let extent = FileExtent {
+            file_offset: 0,
+            ram_bytes: 8192,
+            compression: Compression::None,
+            kind: ExtentKind::Regular,
+            inline_data: Vec::new(),
+            disk_logical: 0x10_0000,
+            disk_bytes: 4096,
+            extent_offset: 4096,
+            logical_bytes: 4096,
+        };
+
+        assert!(matches!(
+            uncompressed_read_window(&extent, 1, 4096),
+            Err(BtrfsError::InvalidFileExtentRange)
+        ));
     }
 
     #[cfg(feature = "std")]

@@ -1,0 +1,25 @@
+[package]
+name = "fsmnt-fuzz"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+fs-btrfs = { workspace = true, features = ["fuzzing", "std"] }
+libfuzzer-sys = { workspace = true }
+zerocopy = { workspace = true }
+
+[[bin]]
+name = "btrfs_parser"
+path = "src/bin/btrfs_parser.rs"
+test = false
+doc = false
+bench = false
+
+[lints]
+workspace = true

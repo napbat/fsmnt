@@ -2,20 +2,63 @@
 
 use alloc::vec::Vec;
 
-use crate::bytes::{array, slice, u32_at, u64_at};
+use crate::bytes::slice;
 use crate::checksum::ChecksumType;
-use crate::key::{DISK_KEY_SIZE, DiskKey};
+use crate::item::{CHUNK_TREE_OBJECT_ID, FS_TREE_OBJECT_ID, ROOT_TREE_OBJECT_ID};
+use crate::key::{DiskKey, RawDiskKey};
 use crate::{BtrfsError, Result};
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian as LE, U32, U64, Unaligned,
+};
 
-const HEADER_SIZE: usize = 101;
-const LEAF_ITEM_SIZE: usize = 25;
-const NODE_POINTER_SIZE: usize = 33;
+const HEADER_FLAG_WRITTEN: u64 = 1;
+const MAX_TREE_LEVEL: u8 = 8;
+const EXTENT_TREE_OBJECT_ID: u64 = 2;
+const DEVICE_TREE_OBJECT_ID: u64 = 4;
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+struct RawTreeHeader {
+    checksum: [u8; 32],
+    fsid: [u8; 16],
+    logical: U64<LE>,
+    flags: U64<LE>,
+    _chunk_tree_uuid: [u8; 16],
+    generation: U64<LE>,
+    owner: U64<LE>,
+    item_count: U32<LE>,
+    level: u8,
+}
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+struct RawLeafItem {
+    key: RawDiskKey,
+    data_offset: U32<LE>,
+    data_size: U32<LE>,
+}
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+struct RawNodePointer {
+    key: RawDiskKey,
+    logical: U64<LE>,
+    generation: U64<LE>,
+}
+
+const HEADER_SIZE: usize = core::mem::size_of::<RawTreeHeader>();
+const LEAF_ITEM_SIZE: usize = core::mem::size_of::<RawLeafItem>();
+const NODE_POINTER_SIZE: usize = core::mem::size_of::<RawNodePointer>();
+const _: [(); 101] = [(); HEADER_SIZE];
+const _: [(); 25] = [(); LEAF_ITEM_SIZE];
+const _: [(); 33] = [(); NODE_POINTER_SIZE];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TreeRoot {
     pub(crate) tree_id: u64,
     pub(crate) logical: u64,
     pub(crate) level: u8,
+    pub(crate) expected_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,6 +98,7 @@ impl TreeBlock {
         expected_level: u8,
         tree_uuid: &[u8; 16],
         checksum_type: ChecksumType,
+        sector_size: u32,
     ) -> Result<Self> {
         if data.len() < HEADER_SIZE {
             return Err(BtrfsError::MalformedTreeBlock { logical });
@@ -65,21 +109,37 @@ impl TreeBlock {
                 logical,
             });
         }
-        if &array::<16>(data, 32)? != tree_uuid
-            || u64_at(data, 48)? != logical
-            || data[100] != expected_level
+        let header = RawTreeHeader::ref_from_bytes(&data[..HEADER_SIZE])
+            .map_err(|_| BtrfsError::MalformedTreeBlock { logical })?;
+        if header.fsid != *tree_uuid
+            || header.logical.get() != logical
+            || header.level != expected_level
+            || expected_level >= MAX_TREE_LEVEL
+            || header.flags.get() & HEADER_FLAG_WRITTEN == 0
+            || header.owner.get() == 0
         {
             return Err(BtrfsError::MalformedTreeBlock { logical });
         }
 
-        let generation = u64_at(data, 80)?;
-        let owner = u64_at(data, 88)?;
+        let generation = header.generation.get();
+        let owner = header.owner.get();
         let item_count =
-            usize::try_from(u32_at(data, 96)?).map_err(|_| BtrfsError::IntegerOverflow)?;
+            usize::try_from(header.item_count.get()).map_err(|_| BtrfsError::IntegerOverflow)?;
         if expected_level == 0 {
+            if item_count == 0 && requires_nonempty_leaf(owner) {
+                return Err(BtrfsError::MalformedTreeBlock { logical });
+            }
             Self::parse_leaf(data, logical, generation, owner, item_count)
         } else {
-            Self::parse_node(data, logical, generation, owner, expected_level, item_count)
+            Self::parse_node(
+                data,
+                logical,
+                generation,
+                owner,
+                expected_level,
+                item_count,
+                sector_size,
+            )
         }
     }
 
@@ -98,23 +158,33 @@ impl TreeBlock {
             return Err(BtrfsError::MalformedTreeBlock { logical });
         }
 
+        let mut expected_data_end = data.len() - HEADER_SIZE;
         let mut items = Vec::with_capacity(item_count);
         for index in 0..item_count {
             let position = item_position(index, LEAF_ITEM_SIZE)?;
-            let key = DiskKey::parse(slice(data, position, DISK_KEY_SIZE)?)?;
-            let relative_data_offset = usize::try_from(u32_at(data, position + 17)?)
-                .map_err(|_| BtrfsError::IntegerOverflow)?;
+            let raw = RawLeafItem::ref_from_bytes(slice(data, position, LEAF_ITEM_SIZE)?)
+                .map_err(|_| BtrfsError::MalformedTreeBlock { logical })?;
+            let key = raw.key.to_disk_key();
+            let relative_data_offset =
+                usize::try_from(raw.data_offset.get()).map_err(|_| BtrfsError::IntegerOverflow)?;
             let data_offset = HEADER_SIZE
                 .checked_add(relative_data_offset)
                 .ok_or(BtrfsError::IntegerOverflow)?;
-            let data_size = usize::try_from(u32_at(data, position + 21)?)
-                .map_err(|_| BtrfsError::IntegerOverflow)?;
+            let data_size =
+                usize::try_from(raw.data_size.get()).map_err(|_| BtrfsError::IntegerOverflow)?;
+            let relative_item_end = relative_data_offset
+                .checked_add(data_size)
+                .ok_or(BtrfsError::IntegerOverflow)?;
             let item_end = data_offset
                 .checked_add(data_size)
                 .ok_or(BtrfsError::IntegerOverflow)?;
-            if data_offset < table_size || item_end > data.len() {
+            if relative_item_end != expected_data_end
+                || data_offset < table_size
+                || item_end > data.len()
+            {
                 return Err(BtrfsError::MalformedTreeBlock { logical });
             }
+            expected_data_end = relative_data_offset;
             items.push(TreeItem {
                 key,
                 data: slice(data, data_offset, data_size)?.to_vec(),
@@ -137,6 +207,7 @@ impl TreeBlock {
         owner: u64,
         level: u8,
         item_count: usize,
+        sector_size: u32,
     ) -> Result<Self> {
         let table_end = item_count
             .checked_mul(NODE_POINTER_SIZE)
@@ -149,12 +220,14 @@ impl TreeBlock {
         let mut pointers = Vec::with_capacity(item_count);
         for index in 0..item_count {
             let position = item_position(index, NODE_POINTER_SIZE)?;
+            let raw = RawNodePointer::ref_from_bytes(slice(data, position, NODE_POINTER_SIZE)?)
+                .map_err(|_| BtrfsError::MalformedTreeBlock { logical })?;
             let pointer = NodePointer {
-                key: DiskKey::parse(slice(data, position, DISK_KEY_SIZE)?)?,
-                logical: u64_at(data, position + 17)?,
-                generation: u64_at(data, position + 25)?,
+                key: raw.key.to_disk_key(),
+                logical: raw.logical.get(),
+                generation: raw.generation.get(),
             };
-            if pointer.logical == 0 {
+            if pointer.logical == 0 || !pointer.logical.is_multiple_of(u64::from(sector_size)) {
                 return Err(BtrfsError::MalformedTreeBlock { logical });
             }
             pointers.push(pointer);
@@ -169,6 +242,24 @@ impl TreeBlock {
             pointers,
         })
     }
+
+    pub(crate) fn first_key(&self) -> Option<DiskKey> {
+        match self {
+            Self::Leaf { items, .. } => items.first().map(|item| item.key),
+            Self::Node { pointers, .. } => pointers.first().map(|pointer| pointer.key),
+        }
+    }
+}
+
+const fn requires_nonempty_leaf(owner: u64) -> bool {
+    matches!(
+        owner,
+        ROOT_TREE_OBJECT_ID
+            | EXTENT_TREE_OBJECT_ID
+            | CHUNK_TREE_OBJECT_ID
+            | DEVICE_TREE_OBJECT_ID
+            | FS_TREE_OBJECT_ID
+    )
 }
 
 fn item_position(index: usize, item_size: usize) -> Result<usize> {
@@ -189,6 +280,77 @@ fn validate_sorted_keys(keys: impl IntoIterator<Item = DiskKey>, logical: u64) -
     Ok(())
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn parse_self_describing(
+    data: &[u8],
+    checksum_type: ChecksumType,
+    sector_size: u32,
+) -> Result<TreeBlock> {
+    let header = RawTreeHeader::ref_from_bytes(
+        data.get(..HEADER_SIZE)
+            .ok_or(BtrfsError::MalformedTreeBlock { logical: 0 })?,
+    )
+    .map_err(|_| BtrfsError::MalformedTreeBlock { logical: 0 })?;
+    TreeBlock::parse(
+        data,
+        header.logical.get(),
+        header.level,
+        &header.fsid,
+        checksum_type,
+        sector_size,
+    )
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn recompute_checksum(data: &mut [u8], checksum_type: ChecksumType) -> bool {
+    if data.len() < HEADER_SIZE {
+        return false;
+    }
+    let checksum = checksum_type.compute(&data[32..]);
+    let Ok(header) = RawTreeHeader::mut_from_bytes(&mut data[..HEADER_SIZE]) else {
+        return false;
+    };
+    header.checksum = checksum;
+    true
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn canonical_leaf(checksum_type: ChecksumType) -> Vec<u8> {
+    const NODE_SIZE: usize = 4096;
+    const PAYLOAD: &[u8] = b"data";
+    let logical = 0x10_0000;
+    let mut data = alloc::vec![0_u8; NODE_SIZE];
+    let header = RawTreeHeader {
+        checksum: [0; 32],
+        fsid: [0x5a; 16],
+        logical: U64::new(logical),
+        flags: U64::new(HEADER_FLAG_WRITTEN),
+        _chunk_tree_uuid: [0; 16],
+        generation: U64::new(1),
+        owner: U64::new(FS_TREE_OBJECT_ID),
+        item_count: U32::new(1),
+        level: 0,
+    };
+    data[..HEADER_SIZE].copy_from_slice(header.as_bytes());
+
+    let relative_offset = NODE_SIZE - HEADER_SIZE - PAYLOAD.len();
+    let item = RawLeafItem {
+        key: DiskKey {
+            object_id: 256,
+            item_type: 250,
+            offset: 0,
+        }
+        .into(),
+        data_offset: U32::new(u32::try_from(relative_offset).expect("canonical node fits u32")),
+        data_size: U32::new(u32::try_from(PAYLOAD.len()).expect("canonical payload fits u32")),
+    };
+    data[HEADER_SIZE..HEADER_SIZE + LEAF_ITEM_SIZE].copy_from_slice(item.as_bytes());
+    data[NODE_SIZE - PAYLOAD.len()..].copy_from_slice(PAYLOAD);
+    let recomputed = recompute_checksum(&mut data, checksum_type);
+    debug_assert!(recomputed);
+    data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,21 +358,39 @@ mod tests {
     const NODE_SIZE: usize = 4096;
     const UUID: [u8; 16] = [0x5a; 16];
 
-    fn key_bytes(key: DiskKey) -> [u8; DISK_KEY_SIZE] {
-        let mut bytes = [0_u8; DISK_KEY_SIZE];
-        bytes[..8].copy_from_slice(&key.object_id.to_le_bytes());
-        bytes[8] = key.item_type;
-        bytes[9..].copy_from_slice(&key.offset.to_le_bytes());
-        bytes
+    fn header(data: &mut [u8], logical: u64, items: u32, level: u8) {
+        let header = RawTreeHeader {
+            checksum: [0; 32],
+            fsid: UUID,
+            logical: U64::new(logical),
+            flags: U64::new(HEADER_FLAG_WRITTEN),
+            _chunk_tree_uuid: [0; 16],
+            generation: U64::new(7),
+            owner: U64::new(5),
+            item_count: U32::new(items),
+            level,
+        };
+        data[..HEADER_SIZE].copy_from_slice(header.as_bytes());
     }
 
-    fn header(data: &mut [u8], logical: u64, items: u32, level: u8) {
-        data[32..48].copy_from_slice(&UUID);
-        data[48..56].copy_from_slice(&logical.to_le_bytes());
-        data[80..88].copy_from_slice(&7_u64.to_le_bytes());
-        data[88..96].copy_from_slice(&5_u64.to_le_bytes());
-        data[96..100].copy_from_slice(&items.to_le_bytes());
-        data[100] = level;
+    fn leaf_item(data: &mut [u8], index: usize, key: DiskKey, offset: u32, size: u32) {
+        let item = RawLeafItem {
+            key: key.into(),
+            data_offset: U32::new(offset),
+            data_size: U32::new(size),
+        };
+        let position = item_position(index, LEAF_ITEM_SIZE).expect("item position");
+        data[position..position + LEAF_ITEM_SIZE].copy_from_slice(item.as_bytes());
+    }
+
+    fn node_pointer(data: &mut [u8], index: usize, key: DiskKey, logical: u64, generation: u64) {
+        let pointer = RawNodePointer {
+            key: key.into(),
+            logical: U64::new(logical),
+            generation: U64::new(generation),
+        };
+        let position = item_position(index, NODE_POINTER_SIZE).expect("pointer position");
+        data[position..position + NODE_POINTER_SIZE].copy_from_slice(pointer.as_bytes());
     }
 
     fn checksum(data: &mut [u8]) {
@@ -233,18 +413,14 @@ mod tests {
             item_type: 108,
             offset: 0,
         };
-        data[101..118].copy_from_slice(&key_bytes(first));
-        data[118..122].copy_from_slice(&3991_u32.to_le_bytes());
-        data[122..126].copy_from_slice(&4_u32.to_le_bytes());
-        data[126..143].copy_from_slice(&key_bytes(second));
-        data[143..147].copy_from_slice(&3988_u32.to_le_bytes());
-        data[147..151].copy_from_slice(&3_u32.to_le_bytes());
+        leaf_item(&mut data, 0, first, 3991, 4);
+        leaf_item(&mut data, 1, second, 3988, 3);
         data[4092..4096].copy_from_slice(b"meta");
         data[4089..4092].copy_from_slice(b"abc");
         checksum(&mut data);
 
-        let block =
-            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c).expect("valid leaf");
+        let block = TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c, 4096)
+            .expect("valid leaf");
         let TreeBlock::Leaf { items, .. } = block else {
             panic!("leaf expected");
         };
@@ -269,16 +445,12 @@ mod tests {
             item_type: 1,
             offset: 0,
         };
-        data[101..118].copy_from_slice(&key_bytes(later));
-        data[118..122].copy_from_slice(&3994_u32.to_le_bytes());
-        data[122..126].copy_from_slice(&1_u32.to_le_bytes());
-        data[126..143].copy_from_slice(&key_bytes(earlier));
-        data[143..147].copy_from_slice(&3993_u32.to_le_bytes());
-        data[147..151].copy_from_slice(&1_u32.to_le_bytes());
+        leaf_item(&mut data, 0, later, 3994, 1);
+        leaf_item(&mut data, 1, earlier, 3993, 1);
         checksum(&mut data);
 
         assert!(matches!(
-            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c),
+            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c, 4096),
             Err(BtrfsError::MalformedTreeBlock { .. })
         ));
     }
@@ -292,8 +464,54 @@ mod tests {
         data[NODE_SIZE - 1] ^= 1;
 
         assert!(matches!(
-            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c),
+            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c, 4096),
             Err(BtrfsError::InvalidChecksum { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_leaf_payload_holes_and_unwritten_blocks() {
+        let logical = 0x20_0000;
+        let mut data = alloc::vec![0_u8; NODE_SIZE];
+        header(&mut data, logical, 1, 0);
+        let key = DiskKey {
+            object_id: 256,
+            item_type: 1,
+            offset: 0,
+        };
+        leaf_item(&mut data, 0, key, 3990, 4);
+        checksum(&mut data);
+        assert!(matches!(
+            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c, 4096),
+            Err(BtrfsError::MalformedTreeBlock { .. })
+        ));
+
+        header(&mut data, logical, 0, 0);
+        let header = RawTreeHeader::mut_from_bytes(&mut data[..HEADER_SIZE]).expect("tree header");
+        header.flags = U64::new(0);
+        checksum(&mut data);
+        assert!(matches!(
+            TreeBlock::parse(&data, logical, 0, &UUID, ChecksumType::Crc32c, 4096),
+            Err(BtrfsError::MalformedTreeBlock { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_unaligned_node_pointers() {
+        let logical = 0x20_0000;
+        let mut data = alloc::vec![0_u8; NODE_SIZE];
+        header(&mut data, logical, 1, 1);
+        let key = DiskKey {
+            object_id: 256,
+            item_type: 1,
+            offset: 0,
+        };
+        node_pointer(&mut data, 0, key, 0x30_0001, 7);
+        checksum(&mut data);
+
+        assert!(matches!(
+            TreeBlock::parse(&data, logical, 1, &UUID, ChecksumType::Crc32c, 4096),
+            Err(BtrfsError::MalformedTreeBlock { .. })
         ));
     }
 }

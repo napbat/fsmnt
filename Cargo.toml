@@ -74,6 +74,7 @@ divan = "0.1"
 embed-resource = "3.0"
 enumn = "0.1"
 libloading = "0.9"
+libfuzzer-sys = "0.4"
 memoffset = "0.9"
 mutants = "0.0.4"
 nt-string = { version = "0.1", default-features = false }

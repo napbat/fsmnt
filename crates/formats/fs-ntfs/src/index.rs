@@ -14,7 +14,7 @@ use crate::file_reference::NtfsFileReference;
 use crate::index_entry::{
     IndexEntryRange, IndexNodeEntryRanges, NtfsDirEntry, NtfsIndexEntry, NtfsIndexEntryFlags,
 };
-use crate::index_record::NtfsIndexRecord;
+use crate::index_record::{NtfsIndexRecord, validate_index_record_size};
 use crate::indexes::{NtfsIndexEntryKey, NtfsIndexEntryType};
 use crate::io::{Read, Seek};
 use crate::ntfs::Ntfs;
@@ -91,6 +91,8 @@ where
         let index_root_attribute = index_root_item.to_attribute()?;
         index_root_attribute.ensure_ty(NtfsAttributeType::IndexRoot)?;
         let index_root = index_root_attribute.resident_structured_value::<NtfsIndexRoot>()?;
+        let index_record_size = index_root.index_record_size();
+        validate_index_record_size(index_record_size, index_root.position())?;
 
         let index_allocation = if let Some(item) = index_allocation_item {
             let attribute = item.to_attribute()?;
@@ -114,7 +116,6 @@ where
             None
         };
 
-        let index_record_size = index_root.index_record_size();
         let index_root_entry_ranges = index_root.entry_ranges();
         let index_root_position = index_root.position();
 

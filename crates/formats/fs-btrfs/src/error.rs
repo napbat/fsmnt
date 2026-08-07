@@ -34,6 +34,23 @@ pub enum BtrfsError {
         /// Physical address stored in the superblock.
         actual: u64,
     },
+    /// The superblock sets state bits that this reader cannot interpret.
+    #[error("unsupported Btrfs superblock flags {flags:#x}")]
+    UnsupportedSuperblockFlags {
+        /// Unsupported bits from the superblock flags field.
+        flags: u64,
+    },
+    /// A fixed superblock field violates an on-disk geometry invariant.
+    #[error("invalid Btrfs superblock field {field}: {value}")]
+    InvalidSuperblockField {
+        /// Name of the invalid field.
+        field: &'static str,
+        /// Decoded field value.
+        value: u64,
+    },
+    /// The embedded device item identifies a different filesystem.
+    #[error("Btrfs superblock and embedded device item UUIDs do not match")]
+    SuperblockUuidMismatch,
     /// The declared volume size cannot contain the primary superblock.
     #[error("invalid Btrfs volume size: {actual} bytes")]
     InvalidTotalBytes {

@@ -1,8 +1,11 @@
 //! Primary-superblock parsing and validation.
 
-use crate::bytes::{array, slice, u16_at, u32_at, u64_at};
 use crate::checksum::ChecksumType;
+use crate::chunk::{MIN_SYSTEM_CHUNK_ARRAY_SIZE, parse_system_chunks};
 use crate::error::{BtrfsError, Result};
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian as LE, U16, U32, U64, Unaligned,
+};
 
 pub use fsmnt_parser_core::boot_sector::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET as PRIMARY_SUPERBLOCK_OFFSET,
@@ -16,38 +19,81 @@ pub const SUPERBLOCK_SIZE: usize = 0x1000;
 pub const SYSTEM_CHUNK_ARRAY_CAPACITY: usize = 2048;
 
 const MIN_VOLUME_BYTES: u64 = PRIMARY_SUPERBLOCK_OFFSET + 0x1000;
-const FSID_OFFSET: usize = 0x20;
-const PHYSICAL_ADDRESS_OFFSET: usize = 0x30;
-const MAGIC_OFFSET: usize = 0x40;
-const GENERATION_OFFSET: usize = 0x48;
-const ROOT_OFFSET: usize = 0x50;
-const CHUNK_ROOT_OFFSET: usize = 0x58;
-const TOTAL_BYTES_OFFSET: usize = 0x70;
-const BYTES_USED_OFFSET: usize = 0x78;
-const ROOT_DIR_OBJECT_ID_OFFSET: usize = 0x80;
-const NUM_DEVICES_OFFSET: usize = 0x88;
-const SECTOR_SIZE_OFFSET: usize = 0x90;
-const NODE_SIZE_OFFSET: usize = 0x94;
-const SYSTEM_CHUNK_ARRAY_SIZE_OFFSET: usize = 0xa0;
-const COMPAT_FLAGS_OFFSET: usize = 0xac;
-const COMPAT_RO_FLAGS_OFFSET: usize = 0xb4;
-const INCOMPAT_FLAGS_OFFSET: usize = 0xbc;
-const CHECKSUM_TYPE_OFFSET: usize = 0xc4;
-const ROOT_LEVEL_OFFSET: usize = 0xc6;
-const CHUNK_ROOT_LEVEL_OFFSET: usize = 0xc7;
-const DEVICE_ITEM_OFFSET: usize = 0xc9;
-const DEVICE_ID_OFFSET: usize = DEVICE_ITEM_OFFSET;
-const DEVICE_UUID_OFFSET: usize = DEVICE_ITEM_OFFSET + 0x42;
-const LABEL_OFFSET: usize = 0x12b;
 const LABEL_SIZE: usize = 0x100;
-const METADATA_UUID_OFFSET: usize = 0x23b;
-const SYSTEM_CHUNK_ARRAY_OFFSET: usize = 0x32b;
+const SUPERBLOCK_TRAILING_SIZE: usize = 1237;
 const MAX_BLOCK_SIZE: u32 = 65_536;
 const MIN_SECTOR_SIZE: u32 = 4096;
 const MAX_TREE_LEVELS: u8 = 8;
 const METADATA_UUID_INCOMPAT: u64 = 1_u64 << 10;
 const SIMPLE_QUOTA_INCOMPAT: u64 = 1_u64 << 16;
 const SUPPORTED_INCOMPAT_FLAGS: u64 = 0x1fff | SIMPLE_QUOTA_INCOMPAT;
+const SUPPORTED_SUPERBLOCK_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 1) | (1_u64 << 2) | (7_u64 << 32);
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+pub(crate) struct RawDeviceItem {
+    pub(crate) device_id: U64<LE>,
+    pub(crate) total_bytes: U64<LE>,
+    pub(crate) bytes_used: U64<LE>,
+    _io_align: U32<LE>,
+    _io_width: U32<LE>,
+    pub(crate) sector_size: U32<LE>,
+    _device_type: U64<LE>,
+    _generation: U64<LE>,
+    _start_offset: U64<LE>,
+    _device_group: U32<LE>,
+    _seek_speed: u8,
+    _bandwidth: u8,
+    pub(crate) uuid: [u8; 16],
+    pub(crate) fsid: [u8; 16],
+}
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+pub(crate) struct RawSuperblock {
+    pub(crate) checksum: [u8; 32],
+    pub(crate) fsid: [u8; 16],
+    pub(crate) physical_address: U64<LE>,
+    pub(crate) flags: U64<LE>,
+    pub(crate) magic: [u8; 8],
+    pub(crate) generation: U64<LE>,
+    pub(crate) root: U64<LE>,
+    pub(crate) chunk_root: U64<LE>,
+    pub(crate) log_root: U64<LE>,
+    _unused_log_root_transid: U64<LE>,
+    pub(crate) total_bytes: U64<LE>,
+    pub(crate) bytes_used: U64<LE>,
+    pub(crate) root_dir_object_id: U64<LE>,
+    pub(crate) num_devices: U64<LE>,
+    pub(crate) sector_size: U32<LE>,
+    pub(crate) node_size: U32<LE>,
+    pub(crate) leaf_size: U32<LE>,
+    pub(crate) stripe_size: U32<LE>,
+    pub(crate) system_chunk_array_size: U32<LE>,
+    pub(crate) chunk_root_generation: U64<LE>,
+    pub(crate) compat_flags: U64<LE>,
+    pub(crate) compat_ro_flags: U64<LE>,
+    pub(crate) incompat_flags: U64<LE>,
+    pub(crate) checksum_type: U16<LE>,
+    pub(crate) root_level: u8,
+    pub(crate) chunk_root_level: u8,
+    pub(crate) log_root_level: u8,
+    pub(crate) device: RawDeviceItem,
+    pub(crate) label: [u8; LABEL_SIZE],
+    _cache_generation: U64<LE>,
+    _uuid_tree_generation: U64<LE>,
+    pub(crate) metadata_uuid: [u8; 16],
+    _global_root_count: U64<LE>,
+    _remap_root: U64<LE>,
+    _remap_root_generation: U64<LE>,
+    _remap_root_level: u8,
+    _reserved: [u8; 199],
+    pub(crate) system_chunk_array: [u8; SYSTEM_CHUNK_ARRAY_CAPACITY],
+    _trailing: [u8; SUPERBLOCK_TRAILING_SIZE],
+}
+
+const _: [(); 98] = [(); core::mem::size_of::<RawDeviceItem>()];
+const _: [(); SUPERBLOCK_SIZE] = [(); core::mem::size_of::<RawSuperblock>()];
 
 /// Validated metadata from a primary Btrfs superblock.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +104,7 @@ pub struct BtrfsSuperblock {
     generation: u64,
     root: u64,
     chunk_root: u64,
+    chunk_root_generation: u64,
     total_bytes: u64,
     bytes_used: u64,
     root_dir_object_id: u64,
@@ -110,34 +157,45 @@ impl BtrfsSuperblock {
             });
         }
         let data = &data[..SUPERBLOCK_SIZE];
-        let (physical_address, checksum_type) = validate_primary_header(data)?;
-        let incompat_flags = validate_incompat_features(data)?;
-        let geometry = parse_volume_geometry(data)?;
-        let roots = parse_tree_roots(data, geometry.sector_size)?;
-        let (system_chunk_array, system_chunk_array_size) = parse_system_chunk_array(data)?;
+        let raw = RawSuperblock::ref_from_bytes(data).map_err(|_| BtrfsError::BufferTooSmall {
+            expected: SUPERBLOCK_SIZE,
+            actual: data.len(),
+        })?;
+        let (physical_address, checksum_type) = validate_primary_header(data, raw)?;
+        let incompat_flags = validate_incompat_features(raw)?;
+        let geometry = parse_volume_geometry(raw)?;
+        let roots = parse_tree_roots(raw, geometry.sector_size)?;
+        validate_device_item(raw, incompat_flags, geometry.sector_size)?;
+        let (system_chunk_array, system_chunk_array_size) = parse_system_chunk_array(raw)?;
+        parse_system_chunks(
+            &system_chunk_array[..system_chunk_array_size],
+            geometry.sector_size,
+            incompat_flags,
+        )?;
 
         Ok(Self {
-            fsid: array(data, FSID_OFFSET)?,
-            metadata_uuid: array(data, METADATA_UUID_OFFSET)?,
+            fsid: raw.fsid,
+            metadata_uuid: raw.metadata_uuid,
             physical_address,
-            generation: u64_at(data, GENERATION_OFFSET)?,
+            generation: raw.generation.get(),
             root: roots.root,
             chunk_root: roots.chunk_root,
+            chunk_root_generation: raw.chunk_root_generation.get(),
             total_bytes: geometry.total_bytes,
             bytes_used: geometry.bytes_used,
-            root_dir_object_id: u64_at(data, ROOT_DIR_OBJECT_ID_OFFSET)?,
+            root_dir_object_id: raw.root_dir_object_id.get(),
             num_devices: geometry.num_devices,
             sector_size: geometry.sector_size,
             node_size: geometry.node_size,
-            compat_flags: u64_at(data, COMPAT_FLAGS_OFFSET)?,
-            compat_ro_flags: u64_at(data, COMPAT_RO_FLAGS_OFFSET)?,
+            compat_flags: raw.compat_flags.get(),
+            compat_ro_flags: raw.compat_ro_flags.get(),
             incompat_flags,
             checksum_type,
             root_level: roots.root_level,
             chunk_root_level: roots.chunk_root_level,
-            device_id: u64_at(data, DEVICE_ID_OFFSET)?,
-            device_uuid: array(data, DEVICE_UUID_OFFSET)?,
-            label: array(data, LABEL_OFFSET)?,
+            device_id: raw.device.device_id.get(),
+            device_uuid: raw.device.uuid,
+            label: raw.label,
             system_chunk_array,
             system_chunk_array_size,
         })
@@ -190,6 +248,12 @@ impl BtrfsSuperblock {
     #[must_use]
     pub const fn chunk_root(&self) -> u64 {
         self.chunk_root
+    }
+
+    /// Transaction generation expected in the chunk-tree root block.
+    #[must_use]
+    pub const fn chunk_root_generation(&self) -> u64 {
+        self.chunk_root_generation
     }
 
     /// Level of the chunk-tree root block.
@@ -294,23 +358,29 @@ impl BtrfsSuperblock {
     }
 }
 
-fn validate_primary_header(data: &[u8]) -> Result<(u64, ChecksumType)> {
-    let actual_magic = array(data, MAGIC_OFFSET)?;
+fn validate_primary_header(data: &[u8], raw: &RawSuperblock) -> Result<(u64, ChecksumType)> {
+    let actual_magic = raw.magic;
     if actual_magic != SUPERBLOCK_MAGIC {
         return Err(BtrfsError::InvalidMagic {
             actual: actual_magic,
         });
     }
 
-    let physical_address = u64_at(data, PHYSICAL_ADDRESS_OFFSET)?;
+    let physical_address = raw.physical_address.get();
     if physical_address != PRIMARY_SUPERBLOCK_OFFSET {
         return Err(BtrfsError::InvalidPhysicalAddress {
             actual: physical_address,
         });
     }
+    let unsupported_flags = raw.flags.get() & !SUPPORTED_SUPERBLOCK_FLAGS;
+    if unsupported_flags != 0 {
+        return Err(BtrfsError::UnsupportedSuperblockFlags {
+            flags: unsupported_flags,
+        });
+    }
 
-    let checksum_type = ChecksumType::from_raw(u16_at(data, CHECKSUM_TYPE_OFFSET)?)?;
-    if !checksum_type.verify(&data[..32], &data[32..]) {
+    let checksum_type = ChecksumType::from_raw(raw.checksum_type.get())?;
+    if !checksum_type.verify(&raw.checksum, &data[32..]) {
         return Err(BtrfsError::InvalidChecksum {
             structure: "primary superblock",
             logical: physical_address,
@@ -319,8 +389,8 @@ fn validate_primary_header(data: &[u8]) -> Result<(u64, ChecksumType)> {
     Ok((physical_address, checksum_type))
 }
 
-fn validate_incompat_features(data: &[u8]) -> Result<u64> {
-    let flags = u64_at(data, INCOMPAT_FLAGS_OFFSET)?;
+fn validate_incompat_features(raw: &RawSuperblock) -> Result<u64> {
+    let flags = raw.incompat_flags.get();
     let unsupported = flags & !SUPPORTED_INCOMPAT_FLAGS;
     if unsupported != 0 {
         return Err(BtrfsError::UnsupportedIncompatFeatures { flags: unsupported });
@@ -328,14 +398,14 @@ fn validate_incompat_features(data: &[u8]) -> Result<u64> {
     Ok(flags)
 }
 
-fn parse_volume_geometry(data: &[u8]) -> Result<VolumeGeometry> {
-    let total_bytes = u64_at(data, TOTAL_BYTES_OFFSET)?;
+fn parse_volume_geometry(raw: &RawSuperblock) -> Result<VolumeGeometry> {
+    let total_bytes = raw.total_bytes.get();
     if total_bytes < MIN_VOLUME_BYTES {
         return Err(BtrfsError::InvalidTotalBytes {
             actual: total_bytes,
         });
     }
-    let bytes_used = u64_at(data, BYTES_USED_OFFSET)?;
+    let bytes_used = raw.bytes_used.get();
     if bytes_used > total_bytes {
         return Err(BtrfsError::InvalidBytesUsed {
             bytes_used,
@@ -343,23 +413,44 @@ fn parse_volume_geometry(data: &[u8]) -> Result<VolumeGeometry> {
         });
     }
 
-    let num_devices = u64_at(data, NUM_DEVICES_OFFSET)?;
+    let num_devices = raw.num_devices.get();
     if num_devices == 0 {
         return Err(BtrfsError::InvalidDeviceCount);
     }
 
-    let sector_size = u32_at(data, SECTOR_SIZE_OFFSET)?;
+    let sector_size = raw.sector_size.get();
     if !sector_size.is_power_of_two() || !(MIN_SECTOR_SIZE..=MAX_BLOCK_SIZE).contains(&sector_size)
     {
         return Err(BtrfsError::InvalidSectorSize {
             actual: sector_size,
         });
     }
-    let node_size = u32_at(data, NODE_SIZE_OFFSET)?;
+    let node_size = raw.node_size.get();
     if !node_size.is_power_of_two() || !(sector_size..=MAX_BLOCK_SIZE).contains(&node_size) {
         return Err(BtrfsError::InvalidNodeSize {
             actual: node_size,
             sector_size,
+        });
+    }
+    if raw.leaf_size.get() != node_size {
+        return Err(BtrfsError::InvalidSuperblockField {
+            field: "leaf_size",
+            value: u64::from(raw.leaf_size.get()),
+        });
+    }
+    if !raw.stripe_size.get().is_power_of_two() {
+        return Err(BtrfsError::InvalidSuperblockField {
+            field: "stripe_size",
+            value: u64::from(raw.stripe_size.get()),
+        });
+    }
+    let minimum_bytes_used = u64::from(node_size)
+        .checked_mul(6)
+        .ok_or(BtrfsError::IntegerOverflow)?;
+    if bytes_used < minimum_bytes_used {
+        return Err(BtrfsError::InvalidSuperblockField {
+            field: "bytes_used",
+            value: bytes_used,
         });
     }
 
@@ -372,13 +463,22 @@ fn parse_volume_geometry(data: &[u8]) -> Result<VolumeGeometry> {
     })
 }
 
-fn parse_tree_roots(data: &[u8], sector_size: u32) -> Result<TreeRoots> {
-    let root = u64_at(data, ROOT_OFFSET)?;
-    let root_level = data[ROOT_LEVEL_OFFSET];
+fn parse_tree_roots(raw: &RawSuperblock, sector_size: u32) -> Result<TreeRoots> {
+    let root = raw.root.get();
+    let root_level = raw.root_level;
     validate_tree_root("root", root, root_level, sector_size)?;
-    let chunk_root = u64_at(data, CHUNK_ROOT_OFFSET)?;
-    let chunk_root_level = data[CHUNK_ROOT_LEVEL_OFFSET];
+    let chunk_root = raw.chunk_root.get();
+    let chunk_root_level = raw.chunk_root_level;
     validate_tree_root("chunk", chunk_root, chunk_root_level, sector_size)?;
+    let log_root = raw.log_root.get();
+    let log_root_level = raw.log_root_level;
+    if log_root_level >= MAX_TREE_LEVELS || !log_root.is_multiple_of(u64::from(sector_size)) {
+        return Err(BtrfsError::InvalidTreeRoot {
+            tree: "log",
+            logical: log_root,
+            level: log_root_level,
+        });
+    }
     Ok(TreeRoots {
         root,
         root_level,
@@ -387,14 +487,46 @@ fn parse_tree_roots(data: &[u8], sector_size: u32) -> Result<TreeRoots> {
     })
 }
 
-fn parse_system_chunk_array(data: &[u8]) -> Result<([u8; SYSTEM_CHUNK_ARRAY_CAPACITY], usize)> {
-    let size_raw = u32_at(data, SYSTEM_CHUNK_ARRAY_SIZE_OFFSET)?;
+fn validate_device_item(raw: &RawSuperblock, incompat_flags: u64, sector_size: u32) -> Result<()> {
+    if raw.device.device_id.get() == 0 {
+        return Err(BtrfsError::InvalidSuperblockField {
+            field: "device_id",
+            value: 0,
+        });
+    }
+    if raw.device.sector_size.get() != sector_size {
+        return Err(BtrfsError::InvalidSuperblockField {
+            field: "device_sector_size",
+            value: u64::from(raw.device.sector_size.get()),
+        });
+    }
+    if raw.device.bytes_used.get() > raw.device.total_bytes.get() {
+        return Err(BtrfsError::InvalidSuperblockField {
+            field: "device_bytes_used",
+            value: raw.device.bytes_used.get(),
+        });
+    }
+    let tree_uuid = if incompat_flags & METADATA_UUID_INCOMPAT != 0 {
+        raw.metadata_uuid
+    } else {
+        raw.fsid
+    };
+    if raw.device.fsid != tree_uuid {
+        return Err(BtrfsError::SuperblockUuidMismatch);
+    }
+    Ok(())
+}
+
+fn parse_system_chunk_array(
+    raw: &RawSuperblock,
+) -> Result<([u8; SYSTEM_CHUNK_ARRAY_CAPACITY], usize)> {
+    let size_raw = raw.system_chunk_array_size.get();
     let size = usize::try_from(size_raw).map_err(|_| BtrfsError::IntegerOverflow)?;
-    if size > SYSTEM_CHUNK_ARRAY_CAPACITY {
+    if !(MIN_SYSTEM_CHUNK_ARRAY_SIZE..=SYSTEM_CHUNK_ARRAY_CAPACITY).contains(&size) {
         return Err(BtrfsError::InvalidSystemChunkArraySize { actual: size_raw });
     }
     let mut chunks = [0_u8; SYSTEM_CHUNK_ARRAY_CAPACITY];
-    chunks[..size].copy_from_slice(slice(data, SYSTEM_CHUNK_ARRAY_OFFSET, size)?);
+    chunks[..size].copy_from_slice(&raw.system_chunk_array[..size]);
     Ok((chunks, size))
 }
 
@@ -407,4 +539,96 @@ fn validate_tree_root(tree: &'static str, logical: u64, level: u8, sector_size: 
         });
     }
     Ok(())
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn normalize_for_fuzzing(
+    data: &mut [u8],
+    checksum_type: ChecksumType,
+    requested_sector_size: u32,
+) -> bool {
+    if data.len() != SUPERBLOCK_SIZE {
+        return false;
+    }
+    {
+        let Ok(raw) = RawSuperblock::mut_from_bytes(data) else {
+            return false;
+        };
+        let sector_size = if requested_sector_size.is_power_of_two()
+            && (MIN_SECTOR_SIZE..=MAX_BLOCK_SIZE).contains(&requested_sector_size)
+        {
+            requested_sector_size
+        } else {
+            MIN_SECTOR_SIZE
+        };
+        let minimum_bytes_used = u64::from(sector_size) * 6;
+        let total_bytes = raw
+            .total_bytes
+            .get()
+            .max(MIN_VOLUME_BYTES)
+            .max(minimum_bytes_used);
+        let incompat_flags = raw.incompat_flags.get() & SUPPORTED_INCOMPAT_FLAGS;
+
+        raw.checksum.fill(0);
+        raw.physical_address = U64::new(PRIMARY_SUPERBLOCK_OFFSET);
+        raw.flags = U64::new(raw.flags.get() & SUPPORTED_SUPERBLOCK_FLAGS);
+        raw.magic = SUPERBLOCK_MAGIC;
+        raw.root = U64::new(aligned_nonzero(raw.root.get(), sector_size));
+        raw.chunk_root = U64::new(aligned_nonzero(raw.chunk_root.get(), sector_size));
+        raw.log_root = U64::new(aligned(raw.log_root.get(), sector_size));
+        raw.total_bytes = U64::new(total_bytes);
+        raw.bytes_used = U64::new(raw.bytes_used.get().clamp(minimum_bytes_used, total_bytes));
+        raw.root_dir_object_id = U64::new(6);
+        raw.num_devices = U64::new(raw.num_devices.get().clamp(1, 32));
+        raw.sector_size = U32::new(sector_size);
+        raw.node_size = U32::new(sector_size);
+        raw.leaf_size = U32::new(sector_size);
+        raw.stripe_size = U32::new(sector_size);
+        raw.incompat_flags = U64::new(incompat_flags);
+        raw.checksum_type = U16::new(checksum_type.raw());
+        raw.root_level %= MAX_TREE_LEVELS;
+        raw.chunk_root_level %= MAX_TREE_LEVELS;
+        raw.log_root_level %= MAX_TREE_LEVELS;
+        raw.device.device_id = U64::new(raw.device.device_id.get().max(1));
+        raw.device.total_bytes = U64::new(total_bytes);
+        raw.device.bytes_used = raw.bytes_used;
+        raw.device.sector_size = U32::new(sector_size);
+        raw.device.fsid = if incompat_flags & METADATA_UUID_INCOMPAT != 0 {
+            raw.metadata_uuid
+        } else {
+            raw.fsid
+        };
+        let system_chunk = crate::chunk::canonical_system_chunk(
+            0x10_0000,
+            sector_size,
+            raw.device.device_id.get(),
+            raw.device.uuid,
+        );
+        raw.system_chunk_array.fill(0);
+        raw.system_chunk_array[..system_chunk.len()].copy_from_slice(&system_chunk);
+        raw.system_chunk_array_size =
+            U32::new(u32::try_from(system_chunk.len()).expect("system chunk capacity fits u32"));
+    }
+    let checksum = checksum_type.compute(&data[32..]);
+    let Ok(raw) = RawSuperblock::mut_from_bytes(data) else {
+        return false;
+    };
+    raw.checksum = checksum;
+    true
+}
+
+#[cfg(feature = "fuzzing")]
+fn aligned(value: u64, sector_size: u32) -> u64 {
+    let sector_size = u64::from(sector_size);
+    value / sector_size * sector_size
+}
+
+#[cfg(feature = "fuzzing")]
+fn aligned_nonzero(value: u64, sector_size: u32) -> u64 {
+    let aligned = aligned(value, sector_size);
+    if aligned == 0 {
+        u64::from(sector_size)
+    } else {
+        aligned
+    }
 }

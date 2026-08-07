@@ -1,27 +1,42 @@
 use fsmnt_testkit::Cursor;
+use zerocopy::{FromBytes, U16, U32, U64};
 
 use super::*;
+use crate::key::{DISK_KEY_SIZE, RawDiskKey};
+use crate::superblock::RawSuperblock;
 
 fn valid_superblock() -> [u8; SUPERBLOCK_SIZE] {
     let mut data = [0_u8; SUPERBLOCK_SIZE];
-    data[0x20..0x30].fill(0xab);
-    data[0x30..0x38].copy_from_slice(&PRIMARY_SUPERBLOCK_OFFSET.to_le_bytes());
-    data[0x40..0x48].copy_from_slice(&SUPERBLOCK_MAGIC);
-    data[0x48..0x50].copy_from_slice(&42u64.to_le_bytes());
-    data[0x50..0x58].copy_from_slice(&0x10_0000_u64.to_le_bytes());
-    data[0x58..0x60].copy_from_slice(&0x20_0000_u64.to_le_bytes());
-    data[0x70..0x78].copy_from_slice(&1_073_741_824u64.to_le_bytes());
-    data[0x78..0x80].copy_from_slice(&16_777_216u64.to_le_bytes());
-    data[0x80..0x88].copy_from_slice(&6u64.to_le_bytes());
-    data[0x88..0x90].copy_from_slice(&1u64.to_le_bytes());
-    data[0x90..0x94].copy_from_slice(&4096u32.to_le_bytes());
-    data[0x94..0x98].copy_from_slice(&16_384u32.to_le_bytes());
-    data[0xac..0xb4].copy_from_slice(&0x1122_3344_5566_7788_u64.to_le_bytes());
-    data[0xb4..0xbc].copy_from_slice(&0x8877_6655_4433_2211_u64.to_le_bytes());
-    data[0xbc..0xc4].copy_from_slice(&(1_u64 << 9).to_le_bytes());
-    data[0xc9..0xd1].copy_from_slice(&7_u64.to_le_bytes());
-    data[0x10b..0x11b].fill(0xcd);
-    data[0x12b..0x137].copy_from_slice(b"fedora-test\0");
+    let device_uuid = [0xcd; 16];
+    let system_chunk = crate::chunk::canonical_system_chunk(0x10_0000, 4096, 7, device_uuid);
+    let raw = RawSuperblock::mut_from_bytes(&mut data).expect("superblock layout");
+    raw.fsid.fill(0xab);
+    raw.physical_address = U64::new(PRIMARY_SUPERBLOCK_OFFSET);
+    raw.magic = SUPERBLOCK_MAGIC;
+    raw.generation = U64::new(42);
+    raw.root = U64::new(0x10_0000);
+    raw.chunk_root = U64::new(0x20_0000);
+    raw.total_bytes = U64::new(1_073_741_824);
+    raw.bytes_used = U64::new(16_777_216);
+    raw.root_dir_object_id = U64::new(6);
+    raw.num_devices = U64::new(1);
+    raw.sector_size = U32::new(4096);
+    raw.node_size = U32::new(16_384);
+    raw.leaf_size = raw.node_size;
+    raw.stripe_size = raw.sector_size;
+    raw.compat_flags = U64::new(0x1122_3344_5566_7788);
+    raw.compat_ro_flags = U64::new(0x8877_6655_4433_2211);
+    raw.incompat_flags = U64::new(1_u64 << 9);
+    raw.device.device_id = U64::new(7);
+    raw.device.total_bytes = raw.total_bytes;
+    raw.device.bytes_used = raw.bytes_used;
+    raw.device.sector_size = raw.sector_size;
+    raw.device.uuid = device_uuid;
+    raw.device.fsid = raw.fsid;
+    raw.system_chunk_array[..system_chunk.len()].copy_from_slice(&system_chunk);
+    raw.system_chunk_array_size =
+        U32::new(u32::try_from(system_chunk.len()).expect("system chunk size fits u32"));
+    raw.label[..11].copy_from_slice(b"fedora-test");
     finalize_checksum(&mut data);
     data
 }
@@ -35,10 +50,13 @@ fn finalize_checksum_as(
     checksum_type: crate::checksum::ChecksumType,
     raw_type: u16,
 ) {
-    data[0xc4..0xc6].copy_from_slice(&raw_type.to_le_bytes());
-    data[..32].fill(0);
+    let raw = RawSuperblock::mut_from_bytes(data).expect("superblock layout");
+    raw.checksum_type = U16::new(raw_type);
+    raw.checksum.fill(0);
     let checksum = checksum_type.compute(&data[32..]);
-    data[..32].copy_from_slice(&checksum);
+    RawSuperblock::mut_from_bytes(data)
+        .expect("superblock layout")
+        .checksum = checksum;
 }
 
 fn valid_image() -> Vec<u8> {
@@ -106,9 +124,56 @@ fn rejects_short_superblock() {
 }
 
 #[test]
+fn rejects_empty_system_chunk_array() {
+    let mut data = valid_superblock();
+    RawSuperblock::mut_from_bytes(&mut data)
+        .expect("superblock layout")
+        .system_chunk_array_size = U32::new(0);
+    finalize_checksum(&mut data);
+
+    assert!(matches!(
+        BtrfsSuperblock::from_primary_bytes(&data),
+        Err(BtrfsError::InvalidSystemChunkArraySize { actual: 0 })
+    ));
+}
+
+#[test]
+fn rejects_structurally_invalid_system_chunk_array() {
+    let mut data = valid_superblock();
+    let raw = RawSuperblock::mut_from_bytes(&mut data).expect("superblock layout");
+    RawDiskKey::mut_from_bytes(&mut raw.system_chunk_array[..DISK_KEY_SIZE])
+        .expect("system chunk key")
+        .object_id = U64::new(0);
+    finalize_checksum(&mut data);
+
+    assert!(matches!(
+        BtrfsSuperblock::from_primary_bytes(&data),
+        Err(BtrfsError::MalformedItem { object_id: 0, .. })
+    ));
+}
+
+#[test]
+fn rejects_unknown_superblock_state_flags() {
+    let mut data = valid_superblock();
+    RawSuperblock::mut_from_bytes(&mut data)
+        .expect("superblock layout")
+        .flags = U64::new(1_u64 << 63);
+    finalize_checksum(&mut data);
+
+    assert!(matches!(
+        BtrfsSuperblock::from_primary_bytes(&data),
+        Err(BtrfsError::UnsupportedSuperblockFlags {
+            flags: 0x8000_0000_0000_0000
+        })
+    ));
+}
+
+#[test]
 fn rejects_magic_only_superblock() {
     let mut data = valid_superblock();
-    data[0x30..0x38].fill(0);
+    RawSuperblock::mut_from_bytes(&mut data)
+        .expect("superblock layout")
+        .physical_address = U64::new(0);
 
     assert!(matches!(
         BtrfsSuperblock::from_primary_bytes(&data),
@@ -119,7 +184,9 @@ fn rejects_magic_only_superblock() {
 #[test]
 fn rejects_used_space_beyond_volume_size() {
     let mut data = valid_superblock();
-    data[0x78..0x80].copy_from_slice(&2_147_483_648u64.to_le_bytes());
+    RawSuperblock::mut_from_bytes(&mut data)
+        .expect("superblock layout")
+        .bytes_used = U64::new(2_147_483_648);
     finalize_checksum(&mut data);
 
     assert!(matches!(
@@ -131,8 +198,9 @@ fn rejects_used_space_beyond_volume_size() {
 #[test]
 fn rejects_node_size_smaller_than_sector_size() {
     let mut data = valid_superblock();
-    data[0x90..0x94].copy_from_slice(&16_384u32.to_le_bytes());
-    data[0x94..0x98].copy_from_slice(&4096u32.to_le_bytes());
+    let raw = RawSuperblock::mut_from_bytes(&mut data).expect("superblock layout");
+    raw.sector_size = U32::new(16_384);
+    raw.node_size = U32::new(4096);
     finalize_checksum(&mut data);
 
     assert!(matches!(
@@ -144,7 +212,9 @@ fn rejects_node_size_smaller_than_sector_size() {
 #[test]
 fn preserves_non_utf8_label_bytes() {
     let mut data = valid_superblock();
-    data[0x12b..0x12e].copy_from_slice(&[0xff, 0xfe, 0]);
+    let raw = RawSuperblock::mut_from_bytes(&mut data).expect("superblock layout");
+    raw.label.fill(0);
+    raw.label[..2].copy_from_slice(&[0xff, 0xfe]);
     finalize_checksum(&mut data);
     let superblock = BtrfsSuperblock::from_primary_bytes(&data).expect("valid superblock");
 
@@ -184,8 +254,10 @@ fn parses_every_supported_superblock_checksum() {
 #[test]
 fn metadata_uuid_feature_selects_the_tree_block_uuid() {
     let mut data = valid_superblock();
-    data[0xbc..0xc4].copy_from_slice(&(1_u64 << 10).to_le_bytes());
-    data[0x23b..0x24b].fill(0x5a);
+    let raw = RawSuperblock::mut_from_bytes(&mut data).expect("superblock layout");
+    raw.incompat_flags = U64::new(1_u64 << 10);
+    raw.metadata_uuid.fill(0x5a);
+    raw.device.fsid = raw.metadata_uuid;
     finalize_checksum(&mut data);
 
     let parsed = BtrfsSuperblock::from_primary_bytes(&data).expect("metadata UUID feature");
@@ -195,7 +267,9 @@ fn metadata_uuid_feature_selects_the_tree_block_uuid() {
 #[test]
 fn rejects_incompatible_metadata_layouts() {
     let mut data = valid_superblock();
-    data[0xbc..0xc4].copy_from_slice(&(1_u64 << 13).to_le_bytes());
+    RawSuperblock::mut_from_bytes(&mut data)
+        .expect("superblock layout")
+        .incompat_flags = U64::new(1_u64 << 13);
     finalize_checksum(&mut data);
 
     assert!(matches!(

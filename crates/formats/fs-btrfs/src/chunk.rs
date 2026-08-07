@@ -2,15 +2,31 @@
 
 use alloc::vec::Vec;
 
-use crate::bytes::{array, slice, u16_at, u64_at};
-use crate::key::{DISK_KEY_SIZE, DiskKey};
+use crate::bytes::slice;
+#[cfg(any(test, feature = "fuzzing"))]
+use crate::key::DiskKey;
+use crate::key::{DISK_KEY_SIZE, RawDiskKey};
 use crate::{BtrfsError, Result};
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian as LE, U16, U32, U64, Unaligned,
+};
 
 pub(crate) const CHUNK_ITEM_KEY: u8 = 228;
 const FIRST_CHUNK_TREE_OBJECT_ID: u64 = 256;
 const CHUNK_HEADER_SIZE: usize = 48;
 const STRIPE_SIZE: usize = 32;
 const BTRFS_STRIPE_LENGTH: u64 = 64 * 1024;
+const MAX_CHUNK_LENGTH: u64 = 0xffff_ffff_u64 * BTRFS_STRIPE_LENGTH;
+#[cfg(any(test, feature = "fuzzing"))]
+const CANONICAL_SYSTEM_CHUNK_LENGTH: u64 = 64 * 1024 * 1024;
+#[cfg(any(test, feature = "fuzzing"))]
+const EXTENT_TREE_OBJECT_ID: u64 = 2;
+
+const TYPE_DATA: u64 = 1_u64 << 0;
+const TYPE_SYSTEM: u64 = 1_u64 << 1;
+const TYPE_METADATA: u64 = 1_u64 << 2;
+const TYPE_MASK: u64 = TYPE_DATA | TYPE_SYSTEM | TYPE_METADATA;
+const MIXED_GROUPS_INCOMPAT: u64 = 1_u64 << 2;
 
 const PROFILE_RAID0: u64 = 1_u64 << 3;
 const PROFILE_RAID1: u64 = 1_u64 << 4;
@@ -28,6 +44,113 @@ const PROFILE_MASK: u64 = PROFILE_RAID0
     | PROFILE_RAID6
     | PROFILE_RAID1C3
     | PROFILE_RAID1C4;
+const VALID_FLAGS: u64 = TYPE_MASK | PROFILE_MASK;
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+struct RawChunkHeader {
+    length: U64<LE>,
+    _owner: U64<LE>,
+    stripe_length: U64<LE>,
+    flags: U64<LE>,
+    _io_align: U32<LE>,
+    _io_width: U32<LE>,
+    sector_size: U32<LE>,
+    stripe_count: U16<LE>,
+    sub_stripes: U16<LE>,
+}
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+struct RawChunkStripe {
+    device_id: U64<LE>,
+    offset: U64<LE>,
+    device_uuid: [u8; 16],
+}
+
+#[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
+#[repr(C)]
+struct RawSystemChunkItemHeader {
+    key: RawDiskKey,
+    chunk: RawChunkHeader,
+}
+
+const _: [(); CHUNK_HEADER_SIZE] = [(); core::mem::size_of::<RawChunkHeader>()];
+const _: [(); STRIPE_SIZE] = [(); core::mem::size_of::<RawChunkStripe>()];
+const SYSTEM_CHUNK_ITEM_HEADER_SIZE: usize = core::mem::size_of::<RawSystemChunkItemHeader>();
+const _: [(); 65] = [(); SYSTEM_CHUNK_ITEM_HEADER_SIZE];
+pub(crate) const MIN_SYSTEM_CHUNK_ARRAY_SIZE: usize = SYSTEM_CHUNK_ITEM_HEADER_SIZE + STRIPE_SIZE;
+
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn canonical_system_chunk(
+    logical: u64,
+    sector_size: u32,
+    device_id: u64,
+    device_uuid: [u8; 16],
+) -> [u8; MIN_SYSTEM_CHUNK_ARRAY_SIZE] {
+    let header = RawSystemChunkItemHeader {
+        key: DiskKey {
+            object_id: FIRST_CHUNK_TREE_OBJECT_ID,
+            item_type: CHUNK_ITEM_KEY,
+            offset: logical,
+        }
+        .into(),
+        chunk: RawChunkHeader {
+            length: U64::new(CANONICAL_SYSTEM_CHUNK_LENGTH),
+            _owner: U64::new(EXTENT_TREE_OBJECT_ID),
+            stripe_length: U64::new(BTRFS_STRIPE_LENGTH),
+            flags: U64::new(TYPE_SYSTEM),
+            _io_align: U32::new(
+                u32::try_from(BTRFS_STRIPE_LENGTH).expect("stripe length fits u32"),
+            ),
+            _io_width: U32::new(
+                u32::try_from(BTRFS_STRIPE_LENGTH).expect("stripe length fits u32"),
+            ),
+            sector_size: U32::new(sector_size),
+            stripe_count: U16::new(1),
+            sub_stripes: U16::new(0),
+        },
+    };
+    let stripe = RawChunkStripe {
+        device_id: U64::new(device_id),
+        offset: U64::new(logical),
+        device_uuid,
+    };
+    let mut data = [0_u8; MIN_SYSTEM_CHUNK_ARRAY_SIZE];
+    data[..SYSTEM_CHUNK_ITEM_HEADER_SIZE].copy_from_slice(header.as_bytes());
+    data[SYSTEM_CHUNK_ITEM_HEADER_SIZE..].copy_from_slice(stripe.as_bytes());
+    data
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChunkProfile {
+    Single,
+    Raid0,
+    Raid1,
+    Dup,
+    Raid10,
+    Raid5,
+    Raid6,
+    Raid1C3,
+    Raid1C4,
+}
+
+impl ChunkProfile {
+    const fn from_flags(flags: u64) -> Option<Self> {
+        match flags & PROFILE_MASK {
+            0 => Some(Self::Single),
+            PROFILE_RAID0 => Some(Self::Raid0),
+            PROFILE_RAID1 => Some(Self::Raid1),
+            PROFILE_DUP => Some(Self::Dup),
+            PROFILE_RAID10 => Some(Self::Raid10),
+            PROFILE_RAID5 => Some(Self::Raid5),
+            PROFILE_RAID6 => Some(Self::Raid6),
+            PROFILE_RAID1C3 => Some(Self::Raid1C3),
+            PROFILE_RAID1C4 => Some(Self::Raid1C4),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ChunkStripe {
@@ -59,78 +182,92 @@ pub(crate) struct MappedSegment {
 }
 
 impl ChunkMapping {
-    pub(crate) fn parse(logical: u64, data: &[u8]) -> Result<Self> {
+    pub(crate) fn parse(
+        logical: u64,
+        data: &[u8],
+        sector_size: u32,
+        incompat_flags: u64,
+    ) -> Result<Self> {
         if data.len() < CHUNK_HEADER_SIZE {
             return Err(BtrfsError::InvalidChunk { logical });
         }
-        let stripe_count = usize::from(u16_at(data, 44)?);
+        let raw = RawChunkHeader::ref_from_bytes(&data[..CHUNK_HEADER_SIZE])
+            .map_err(|_| BtrfsError::InvalidChunk { logical })?;
+        let stripe_count = usize::from(raw.stripe_count.get());
         let stripe_bytes = stripe_count
             .checked_mul(STRIPE_SIZE)
             .ok_or(BtrfsError::IntegerOverflow)?;
         let expected = CHUNK_HEADER_SIZE
             .checked_add(stripe_bytes)
             .ok_or(BtrfsError::IntegerOverflow)?;
-        if stripe_count == 0 || data.len() < expected {
+        if stripe_count == 0 || data.len() != expected {
             return Err(BtrfsError::InvalidChunk { logical });
         }
 
         let mut stripes = Vec::with_capacity(stripe_count);
-        for index in 0..stripe_count {
-            let offset = CHUNK_HEADER_SIZE
-                .checked_add(
-                    index
-                        .checked_mul(STRIPE_SIZE)
-                        .ok_or(BtrfsError::IntegerOverflow)?,
-                )
-                .ok_or(BtrfsError::IntegerOverflow)?;
+        let serialized_stripes = data
+            .get(CHUNK_HEADER_SIZE..expected)
+            .ok_or(BtrfsError::InvalidChunk { logical })?;
+        for bytes in serialized_stripes.chunks_exact(STRIPE_SIZE) {
+            let raw_stripe = RawChunkStripe::ref_from_bytes(bytes)
+                .map_err(|_| BtrfsError::InvalidChunk { logical })?;
             stripes.push(ChunkStripe {
-                device_id: u64_at(data, offset)?,
-                offset: u64_at(data, offset + 8)?,
-                device_uuid: array(data, offset + 16)?,
+                device_id: raw_stripe.device_id.get(),
+                offset: raw_stripe.offset.get(),
+                device_uuid: raw_stripe.device_uuid,
             });
         }
 
         let mapping = Self {
             logical,
-            length: u64_at(data, 0)?,
-            stripe_length: u64_at(data, 16)?,
-            flags: u64_at(data, 24)?,
-            sub_stripes: u16_at(data, 46)?,
+            length: raw.length.get(),
+            stripe_length: raw.stripe_length.get(),
+            flags: raw.flags.get(),
+            sub_stripes: raw.sub_stripes.get(),
             stripes,
         };
-        mapping.validate()?;
+        mapping.validate(sector_size, incompat_flags, raw.sector_size.get())?;
         Ok(mapping)
     }
 
-    pub(crate) fn serialized_size(data: &[u8], logical: u64) -> Result<usize> {
-        if data.len() < CHUNK_HEADER_SIZE {
-            return Err(BtrfsError::InvalidChunk { logical });
-        }
-        CHUNK_HEADER_SIZE
-            .checked_add(
-                usize::from(u16_at(data, 44)?)
-                    .checked_mul(STRIPE_SIZE)
-                    .ok_or(BtrfsError::IntegerOverflow)?,
-            )
-            .ok_or(BtrfsError::IntegerOverflow)
-    }
-
-    fn validate(&self) -> Result<()> {
-        let profile = self.flags & PROFILE_MASK;
+    fn validate(
+        &self,
+        sector_size: u32,
+        incompat_flags: u64,
+        chunk_sector_size: u32,
+    ) -> Result<()> {
+        let profile = ChunkProfile::from_flags(self.flags);
+        let chunk_type = self.flags & TYPE_MASK;
         let stripe_count = self.stripes.len();
-        let valid = self.length != 0
+        let chunk_matches_sector_size = chunk_sector_size == sector_size;
+        let sector_size = u64::from(sector_size);
+        let valid_type = chunk_type != 0
+            && !(chunk_type & TYPE_SYSTEM != 0 && chunk_type & (TYPE_DATA | TYPE_METADATA) != 0)
+            && (!(chunk_type & TYPE_DATA != 0 && chunk_type & TYPE_METADATA != 0)
+                || incompat_flags & MIXED_GROUPS_INCOMPAT != 0);
+        let valid = sector_size != 0
+            && self.flags & !VALID_FLAGS == 0
+            && profile.is_some()
+            && valid_type
+            && chunk_matches_sector_size
+            && self.logical.is_multiple_of(sector_size)
+            && self.length.is_multiple_of(sector_size)
+            && self.length != 0
+            && self.length < MAX_CHUNK_LENGTH
             && self.stripe_length == BTRFS_STRIPE_LENGTH
             && match profile {
-                0 => stripe_count == 1,
-                PROFILE_DUP | PROFILE_RAID1 | PROFILE_RAID5 => stripe_count >= 2,
-                PROFILE_RAID0 => !self.stripes.is_empty(),
-                PROFILE_RAID1C3 | PROFILE_RAID6 => stripe_count >= 3,
-                PROFILE_RAID1C4 => stripe_count >= 4,
-                PROFILE_RAID10 => {
+                Some(ChunkProfile::Single) => stripe_count == 1,
+                Some(ChunkProfile::Dup | ChunkProfile::Raid1) => stripe_count == 2,
+                Some(ChunkProfile::Raid0) => !self.stripes.is_empty(),
+                Some(ChunkProfile::Raid1C3) => stripe_count == 3,
+                Some(ChunkProfile::Raid1C4) => stripe_count == 4,
+                Some(ChunkProfile::Raid5) => stripe_count >= 2,
+                Some(ChunkProfile::Raid6) => stripe_count >= 3,
+                Some(ChunkProfile::Raid10) => {
                     let copies = usize::from(self.sub_stripes);
-                    copies >= 2 && stripe_count >= copies && stripe_count.is_multiple_of(copies)
+                    copies == 2 && stripe_count >= copies && stripe_count.is_multiple_of(copies)
                 }
-                _ => false,
+                None => false,
             };
         if !valid {
             return Err(BtrfsError::InvalidChunk {
@@ -157,17 +294,21 @@ impl ChunkMapping {
         let chunk_remaining = self.length - relative;
         let requested_u64 = u64::try_from(requested).map_err(|_| BtrfsError::IntegerOverflow)?;
         let maximum = chunk_remaining.min(requested_u64);
-        let profile = self.flags & PROFILE_MASK;
+        let profile =
+            ChunkProfile::from_flags(self.flags).ok_or(BtrfsError::UnsupportedChunkProfile {
+                profile: self.flags & PROFILE_MASK,
+            })?;
 
         match profile {
-            0 | PROFILE_DUP | PROFILE_RAID1 | PROFILE_RAID1C3 | PROFILE_RAID1C4 => {
-                self.map_mirrored(relative, maximum)
-            }
-            PROFILE_RAID0 => self.map_raid0(relative, maximum),
-            PROFILE_RAID10 => self.map_raid10(relative, maximum),
-            PROFILE_RAID5 => self.map_raid56(relative, maximum, 1),
-            PROFILE_RAID6 => self.map_raid56(relative, maximum, 2),
-            _ => Err(BtrfsError::UnsupportedChunkProfile { profile }),
+            ChunkProfile::Single
+            | ChunkProfile::Dup
+            | ChunkProfile::Raid1
+            | ChunkProfile::Raid1C3
+            | ChunkProfile::Raid1C4 => self.map_mirrored(relative, maximum),
+            ChunkProfile::Raid0 => self.map_raid0(relative, maximum),
+            ChunkProfile::Raid10 => self.map_raid10(relative, maximum),
+            ChunkProfile::Raid5 => self.map_raid56(relative, maximum, 1),
+            ChunkProfile::Raid6 => self.map_raid56(relative, maximum, 2),
         }
     }
 
@@ -299,14 +440,28 @@ impl ChunkMapping {
     }
 }
 
-pub(crate) fn parse_system_chunks(data: &[u8]) -> Result<Vec<ChunkMapping>> {
+pub(crate) fn parse_system_chunks(
+    data: &[u8],
+    sector_size: u32,
+    incompat_flags: u64,
+) -> Result<Vec<ChunkMapping>> {
+    if !(MIN_SYSTEM_CHUNK_ARRAY_SIZE..=crate::superblock::SYSTEM_CHUNK_ARRAY_CAPACITY)
+        .contains(&data.len())
+    {
+        return Err(BtrfsError::InvalidSystemChunkArraySize {
+            actual: u32::try_from(data.len()).unwrap_or(u32::MAX),
+        });
+    }
     let mut chunks = Vec::new();
     let mut position = 0_usize;
     while position < data.len() {
-        let key_end = position
-            .checked_add(DISK_KEY_SIZE)
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        let key = DiskKey::parse(slice(data, position, DISK_KEY_SIZE)?)?;
+        let raw = RawSystemChunkItemHeader::ref_from_bytes(slice(
+            data,
+            position,
+            SYSTEM_CHUNK_ITEM_HEADER_SIZE,
+        )?)
+        .map_err(|_| BtrfsError::InvalidChunk { logical: 0 })?;
+        let key = raw.key.to_disk_key();
         if key.object_id != FIRST_CHUNK_TREE_OBJECT_ID || key.item_type != CHUNK_ITEM_KEY {
             return Err(BtrfsError::MalformedItem {
                 object_id: key.object_id,
@@ -314,15 +469,28 @@ pub(crate) fn parse_system_chunks(data: &[u8]) -> Result<Vec<ChunkMapping>> {
                 offset: key.offset,
             });
         }
-        let chunk_data = data.get(key_end..).ok_or(BtrfsError::InvalidChunk {
-            logical: key.offset,
-        })?;
-        let size = ChunkMapping::serialized_size(chunk_data, key.offset)?;
+        if raw.chunk.flags.get() & TYPE_SYSTEM == 0 {
+            return Err(BtrfsError::InvalidChunk {
+                logical: key.offset,
+            });
+        }
+        let stripe_bytes = usize::from(raw.chunk.stripe_count.get())
+            .checked_mul(STRIPE_SIZE)
+            .ok_or(BtrfsError::IntegerOverflow)?;
+        let size = CHUNK_HEADER_SIZE
+            .checked_add(stripe_bytes)
+            .ok_or(BtrfsError::IntegerOverflow)?;
+        let chunk_start = position
+            .checked_add(DISK_KEY_SIZE)
+            .ok_or(BtrfsError::IntegerOverflow)?;
+        let chunk_data = slice(data, chunk_start, size)?;
         chunks.push(ChunkMapping::parse(
             key.offset,
-            slice(chunk_data, 0, size)?,
+            chunk_data,
+            sector_size,
+            incompat_flags,
         )?);
-        position = key_end
+        position = chunk_start
             .checked_add(size)
             .ok_or(BtrfsError::IntegerOverflow)?;
     }
@@ -379,16 +547,20 @@ mod tests {
             logical: 0x10_0000,
             length: 0x40_0000,
             stripe_length: 0x1_0000,
-            flags,
+            flags: flags | TYPE_DATA,
             sub_stripes,
             stripes,
         }
     }
 
+    fn validate(mapping: &ChunkMapping) -> Result<()> {
+        mapping.validate(4096, 0, 4096)
+    }
+
     #[test]
     fn single_mapping_preserves_relative_offset() {
         let chunk = mapping(0, 0, alloc::vec![stripe(7, 0x20_0000)]);
-        chunk.validate().expect("single chunk");
+        validate(&chunk).expect("single chunk");
         let mapped = chunk.map(0x12_3456, 4096).expect("map");
 
         assert_eq!(mapped.length, 4096);
@@ -408,7 +580,7 @@ mod tests {
             0,
             alloc::vec![stripe(1, 0x20_0000), stripe(2, 0x30_0000)],
         );
-        chunk.validate().expect("raid1 chunk");
+        validate(&chunk).expect("raid1 chunk");
         let mapped = chunk.map(0x11_0000, 512).expect("map");
 
         assert_eq!(
@@ -433,7 +605,7 @@ mod tests {
             0,
             alloc::vec![stripe(1, 0x20_0000), stripe(2, 0x30_0000)],
         );
-        chunk.validate().expect("raid0 chunk");
+        validate(&chunk).expect("raid0 chunk");
 
         let first = chunk.map(0x10_8000, 0x1_0000).expect("first");
         assert_eq!(first.length, 0x8000);
@@ -452,7 +624,7 @@ mod tests {
     #[test]
     fn single_device_raid0_maps_like_one_data_stripe() {
         let chunk = mapping(PROFILE_RAID0, 0, alloc::vec![stripe(1, 0x20_0000)]);
-        chunk.validate().expect("one-stripe raid0");
+        validate(&chunk).expect("one-stripe raid0");
 
         let mapped = chunk.map(0x11_0000, 4096).expect("map");
         assert_eq!(mapped.locations[0].device_id, 1);
@@ -471,7 +643,7 @@ mod tests {
                 stripe(4, 0x50_0000),
             ],
         );
-        chunk.validate().expect("raid10 chunk");
+        validate(&chunk).expect("raid10 chunk");
 
         let first = chunk.map(0x10_0000, 4096).expect("first");
         assert_eq!(
@@ -504,7 +676,7 @@ mod tests {
                 stripe(3, 0x40_0000),
             ],
         );
-        chunk.validate().expect("structurally valid raid5");
+        validate(&chunk).expect("structurally valid raid5");
 
         let first = chunk.map(0x10_0000, 4096).expect("first data stripe");
         assert_eq!(first.locations[0].device_id, 1);
@@ -531,10 +703,90 @@ mod tests {
                 stripe(4, 0x50_0000),
             ],
         );
-        chunk.validate().expect("structurally valid raid6");
+        validate(&chunk).expect("structurally valid raid6");
 
         let rotated = chunk.map(0x12_0000, 4096).expect("second full stripe");
         assert_eq!(rotated.locations[0].device_id, 2);
         assert_eq!(rotated.locations[0].offset, 0x31_0000);
+    }
+
+    #[test]
+    fn fixed_replica_profiles_require_their_exact_stripe_counts() {
+        for (profile, expected) in [
+            (PROFILE_DUP, 2_usize),
+            (PROFILE_RAID1, 2),
+            (PROFILE_RAID1C3, 3),
+            (PROFILE_RAID1C4, 4),
+        ] {
+            let valid = mapping(
+                profile,
+                0,
+                (0..expected)
+                    .map(|index| stripe(u64::try_from(index + 1).expect("device ID"), 0x20_0000))
+                    .collect(),
+            );
+            validate(&valid).expect("exact replica count");
+
+            let mut extra = valid;
+            extra.stripes.push(stripe(99, 0x30_0000));
+            assert!(matches!(
+                validate(&extra),
+                Err(BtrfsError::InvalidChunk { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn raid10_requires_pairs_of_sub_stripes() {
+        let mut chunk = mapping(
+            PROFILE_RAID10,
+            3,
+            alloc::vec![
+                stripe(1, 0x20_0000),
+                stripe(2, 0x30_0000),
+                stripe(3, 0x40_0000),
+            ],
+        );
+        assert!(validate(&chunk).is_err());
+
+        chunk.sub_stripes = 2;
+        assert!(validate(&chunk).is_err());
+        chunk.stripes.push(stripe(4, 0x50_0000));
+        validate(&chunk).expect("paired RAID10 stripes");
+    }
+
+    #[test]
+    fn chunk_geometry_and_type_flags_match_the_superblock() {
+        let mut chunk = mapping(0, 0, alloc::vec![stripe(1, 0x20_0000)]);
+
+        chunk.flags = 0;
+        assert!(validate(&chunk).is_err());
+
+        chunk.flags = TYPE_SYSTEM | TYPE_DATA;
+        assert!(validate(&chunk).is_err());
+
+        chunk.flags = TYPE_DATA | TYPE_METADATA;
+        assert!(validate(&chunk).is_err());
+        chunk
+            .validate(4096, MIXED_GROUPS_INCOMPAT, 4096)
+            .expect("mixed block group feature");
+
+        chunk.logical += 1;
+        assert!(chunk.validate(4096, MIXED_GROUPS_INCOMPAT, 4096).is_err());
+        chunk.logical -= 1;
+        assert!(chunk.validate(4096, MIXED_GROUPS_INCOMPAT, 8192).is_err());
+    }
+
+    #[test]
+    fn system_chunk_array_requires_on_disk_superblock_bounds() {
+        assert!(matches!(
+            parse_system_chunks(&[], 4096, 0),
+            Err(BtrfsError::InvalidSystemChunkArraySize { actual: 0 })
+        ));
+        let oversized = alloc::vec![0_u8; crate::superblock::SYSTEM_CHUNK_ARRAY_CAPACITY + 1];
+        assert!(matches!(
+            parse_system_chunks(&oversized, 4096, 0),
+            Err(BtrfsError::InvalidSystemChunkArraySize { .. })
+        ));
     }
 }

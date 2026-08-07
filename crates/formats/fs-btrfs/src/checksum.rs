@@ -29,6 +29,16 @@ impl ChecksumType {
         }
     }
 
+    #[cfg(feature = "fuzzing")]
+    pub(crate) const fn raw(self) -> u16 {
+        match self {
+            Self::Crc32c => 0,
+            Self::XxHash64 => 1,
+            Self::Sha256 => 2,
+            Self::Blake2b256 => 3,
+        }
+    }
+
     /// Number of meaningful bytes in an on-disk checksum field.
     #[must_use]
     pub const fn size(self) -> usize {

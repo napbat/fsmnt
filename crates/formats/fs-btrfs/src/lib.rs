@@ -20,6 +20,10 @@ mod checksum;
 mod chunk;
 mod error;
 mod file;
+#[cfg(feature = "fuzzing")]
+/// Internal parser entry points used by the workspace fuzz targets.
+#[doc(hidden)]
+pub mod fuzzing;
 mod item;
 mod key;
 mod superblock;

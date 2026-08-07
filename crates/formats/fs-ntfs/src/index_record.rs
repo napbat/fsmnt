@@ -37,6 +37,21 @@ fn validated_usize(value: u32) -> usize {
 /// legitimate filesystem.
 const MAX_INDEX_RECORD_SIZE: u32 = 256 * 1024;
 
+pub(crate) fn validate_index_record_size(
+    index_record_size: u32,
+    position: NtfsPosition,
+) -> Result<()> {
+    if index_record_size > MAX_INDEX_RECORD_SIZE {
+        return Err(NtfsError::InvalidIndexAllocatedSize {
+            position,
+            expected: u64::from(MAX_INDEX_RECORD_SIZE),
+            actual: u64::from(index_record_size),
+        });
+    }
+
+    Ok(())
+}
+
 #[repr(C, packed)]
 struct IndexRecordHeader {
     record_header: RecordHeader,
@@ -82,14 +97,7 @@ impl NtfsIndexRecord {
         T: Read + Seek,
     {
         let data_position = value.data_position();
-
-        if index_record_size > MAX_INDEX_RECORD_SIZE {
-            return Err(NtfsError::InvalidIndexAllocatedSize {
-                position: data_position,
-                expected: u64::from(MAX_INDEX_RECORD_SIZE),
-                actual: u64::from(index_record_size),
-            });
-        }
+        validate_index_record_size(index_record_size, data_position)?;
 
         let buffer_size =
             usize::try_from(index_record_size).map_err(|_| IoError::invalid_input())?;
