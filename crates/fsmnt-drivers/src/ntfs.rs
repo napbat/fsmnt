@@ -17,6 +17,7 @@ use fsmnt_core::{
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 
 use crate::adapter::found;
+use crate::identity;
 use fsmnt_parser_core::iter::FsTryIterator;
 
 /// Convert an [`NtfsTime`] to `DateTime<Utc>`, mapping the zero timestamp
@@ -319,6 +320,10 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
         let mut bitmap = self.ntfs.cluster_bitmap(&mut self.reader).ok()?;
         let free_clusters = bitmap.free_clusters(&mut self.reader).ok()?;
         Some(free_clusters * u64::from(self.ntfs.cluster_size()))
+    }
+
+    fn volume_uuid(&self) -> Option<String> {
+        Some(identity::ntfs_serial(self.ntfs.serial_number()))
     }
 }
 

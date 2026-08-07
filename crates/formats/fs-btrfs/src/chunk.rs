@@ -1,5 +1,7 @@
 //! Logical-to-physical chunk mappings, including mirrored and striped layouts.
 
+mod validation;
+
 use alloc::vec::Vec;
 
 use crate::bytes::slice;
@@ -7,6 +9,7 @@ use crate::bytes::slice;
 use crate::key::DiskKey;
 use crate::key::{DISK_KEY_SIZE, RawDiskKey};
 use crate::{BtrfsError, Result};
+use validation::valid_profile_geometry;
 use zerocopy::{
     FromBytes, Immutable, IntoBytes, KnownLayout, LittleEndian as LE, U16, U32, U64, Unaligned,
 };
@@ -25,7 +28,9 @@ const EXTENT_TREE_OBJECT_ID: u64 = 2;
 const TYPE_DATA: u64 = 1_u64 << 0;
 const TYPE_SYSTEM: u64 = 1_u64 << 1;
 const TYPE_METADATA: u64 = 1_u64 << 2;
-const TYPE_MASK: u64 = TYPE_DATA | TYPE_SYSTEM | TYPE_METADATA;
+const FLAG_REMAPPED: u64 = 1_u64 << 11;
+const TYPE_METADATA_REMAP: u64 = 1_u64 << 12;
+const TYPE_MASK: u64 = TYPE_DATA | TYPE_SYSTEM | TYPE_METADATA | TYPE_METADATA_REMAP;
 const MIXED_GROUPS_INCOMPAT: u64 = 1_u64 << 2;
 
 const PROFILE_RAID0: u64 = 1_u64 << 3;
@@ -44,7 +49,7 @@ const PROFILE_MASK: u64 = PROFILE_RAID0
     | PROFILE_RAID6
     | PROFILE_RAID1C3
     | PROFILE_RAID1C4;
-const VALID_FLAGS: u64 = TYPE_MASK | PROFILE_MASK;
+const VALID_FLAGS: u64 = TYPE_MASK | PROFILE_MASK | FLAG_REMAPPED;
 
 #[derive(Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned)]
 #[repr(C)]
@@ -172,6 +177,7 @@ pub(crate) struct ChunkMapping {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PhysicalLocation {
     pub(crate) device_id: u64,
+    pub(crate) device_uuid: [u8; 16],
     pub(crate) offset: u64,
 }
 
@@ -179,6 +185,33 @@ pub(crate) struct PhysicalLocation {
 pub(crate) struct MappedSegment {
     pub(crate) locations: Vec<PhysicalLocation>,
     pub(crate) length: usize,
+    pub(crate) raid56: Option<Raid56Segment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Raid56Segment {
+    pub(crate) stripes: Vec<PhysicalLocation>,
+    pub(crate) data_stripes: usize,
+    pub(crate) parity_stripes: usize,
+    pub(crate) target_data: usize,
+}
+
+impl Raid56Segment {
+    pub(crate) fn replica_count(&self) -> usize {
+        if self.parity_stripes == 1 {
+            2
+        } else {
+            self.stripes.len()
+        }
+    }
+
+    pub(crate) fn forced_missing(&self, replica: usize) -> Option<usize> {
+        let candidate = replica.checked_sub(2)?;
+        (0..self.data_stripes)
+            .filter(|index| *index != self.target_data)
+            .chain(core::iter::once(self.data_stripes))
+            .nth(candidate)
+    }
 }
 
 impl ChunkMapping {
@@ -200,7 +233,7 @@ impl ChunkMapping {
         let expected = CHUNK_HEADER_SIZE
             .checked_add(stripe_bytes)
             .ok_or(BtrfsError::IntegerOverflow)?;
-        if stripe_count == 0 || data.len() != expected {
+        if data.len() != expected || (stripe_count == 0 && raw.flags.get() & FLAG_REMAPPED == 0) {
             return Err(BtrfsError::InvalidChunk { logical });
         }
 
@@ -239,12 +272,24 @@ impl ChunkMapping {
         let profile = ChunkProfile::from_flags(self.flags);
         let chunk_type = self.flags & TYPE_MASK;
         let stripe_count = self.stripes.len();
+        let remapped = self.is_remapped();
+        let remap_tree = incompat_flags & crate::superblock::REMAP_TREE_INCOMPAT != 0;
         let chunk_matches_sector_size = chunk_sector_size == sector_size;
         let sector_size = u64::from(sector_size);
-        let valid_type = chunk_type != 0
-            && !(chunk_type & TYPE_SYSTEM != 0 && chunk_type & (TYPE_DATA | TYPE_METADATA) != 0)
-            && (!(chunk_type & TYPE_DATA != 0 && chunk_type & TYPE_METADATA != 0)
-                || incompat_flags & MIXED_GROUPS_INCOMPAT != 0);
+        let valid_type = matches!(chunk_type, TYPE_DATA | TYPE_SYSTEM | TYPE_METADATA)
+            || (chunk_type == TYPE_METADATA_REMAP && remap_tree)
+            || (chunk_type == TYPE_DATA | TYPE_METADATA
+                && incompat_flags & MIXED_GROUPS_INCOMPAT != 0);
+        let valid_stripes = if remapped {
+            remap_tree
+                && if stripe_count == 0 {
+                    self.sub_stripes == 0
+                } else {
+                    valid_profile_geometry(profile, stripe_count, self.sub_stripes, false)
+                }
+        } else {
+            valid_profile_geometry(profile, stripe_count, self.sub_stripes, true)
+        };
         let valid = sector_size != 0
             && self.flags & !VALID_FLAGS == 0
             && profile.is_some()
@@ -255,20 +300,7 @@ impl ChunkMapping {
             && self.length != 0
             && self.length < MAX_CHUNK_LENGTH
             && self.stripe_length == BTRFS_STRIPE_LENGTH
-            && match profile {
-                Some(ChunkProfile::Single) => stripe_count == 1,
-                Some(ChunkProfile::Dup | ChunkProfile::Raid1) => stripe_count == 2,
-                Some(ChunkProfile::Raid0) => !self.stripes.is_empty(),
-                Some(ChunkProfile::Raid1C3) => stripe_count == 3,
-                Some(ChunkProfile::Raid1C4) => stripe_count == 4,
-                Some(ChunkProfile::Raid5) => stripe_count >= 2,
-                Some(ChunkProfile::Raid6) => stripe_count >= 3,
-                Some(ChunkProfile::Raid10) => {
-                    let copies = usize::from(self.sub_stripes);
-                    copies == 2 && stripe_count >= copies && stripe_count.is_multiple_of(copies)
-                }
-                None => false,
-            };
+            && valid_stripes;
         if !valid {
             return Err(BtrfsError::InvalidChunk {
                 logical: self.logical,
@@ -282,8 +314,81 @@ impl ChunkMapping {
         Ok(())
     }
 
+    pub(crate) fn is_readable_with(
+        &self,
+        mut device_available: impl FnMut(&ChunkStripe) -> bool,
+    ) -> bool {
+        if self.is_remapped() && self.stripes.is_empty() {
+            return true;
+        }
+        let profile = ChunkProfile::from_flags(self.flags);
+        match profile {
+            Some(ChunkProfile::Single | ChunkProfile::Raid0) => {
+                self.stripes.iter().all(&mut device_available)
+            }
+            Some(
+                ChunkProfile::Dup
+                | ChunkProfile::Raid1
+                | ChunkProfile::Raid1C3
+                | ChunkProfile::Raid1C4,
+            ) => self.stripes.iter().any(&mut device_available),
+            Some(ChunkProfile::Raid10) => {
+                let copies = usize::from(self.sub_stripes);
+                self.stripes
+                    .chunks_exact(copies)
+                    .all(|replicas| replicas.iter().any(&mut device_available))
+            }
+            Some(ChunkProfile::Raid5 | ChunkProfile::Raid6) => {
+                let parity_stripes = usize::from(matches!(profile, Some(ChunkProfile::Raid5)))
+                    + 2 * usize::from(matches!(profile, Some(ChunkProfile::Raid6)));
+                self.stripes
+                    .iter()
+                    .filter(|stripe| !device_available(stripe))
+                    .count()
+                    <= parity_stripes
+            }
+            None => false,
+        }
+    }
+
     pub(crate) fn contains(&self, logical: u64) -> bool {
         logical >= self.logical && logical < self.logical.saturating_add(self.length)
+    }
+
+    pub(crate) const fn is_remapped(&self) -> bool {
+        self.flags & FLAG_REMAPPED != 0
+    }
+
+    pub(crate) fn uses_raid_stripe_tree(&self) -> bool {
+        self.flags & TYPE_MASK == TYPE_DATA
+            && matches!(
+                ChunkProfile::from_flags(self.flags),
+                Some(
+                    ChunkProfile::Raid0
+                        | ChunkProfile::Raid1
+                        | ChunkProfile::Dup
+                        | ChunkProfile::Raid10
+                        | ChunkProfile::Raid1C3
+                        | ChunkProfile::Raid1C4
+                )
+            )
+    }
+
+    pub(crate) fn raid_stripe_count(&self) -> Option<usize> {
+        match ChunkProfile::from_flags(self.flags)? {
+            ChunkProfile::Raid0 => Some(1),
+            ChunkProfile::Raid1 | ChunkProfile::Dup | ChunkProfile::Raid10 => Some(2),
+            ChunkProfile::Raid1C3 => Some(3),
+            ChunkProfile::Raid1C4 => Some(4),
+            ChunkProfile::Single | ChunkProfile::Raid5 | ChunkProfile::Raid6 => None,
+        }
+    }
+
+    pub(crate) fn device_uuid(&self, device_id: u64) -> Option<[u8; 16]> {
+        self.stripes
+            .iter()
+            .find(|stripe| stripe.device_id == device_id)
+            .map(|stripe| stripe.device_uuid)
     }
 
     pub(crate) fn map(&self, logical: u64, requested: usize) -> Result<MappedSegment> {
@@ -317,6 +422,7 @@ impl ChunkMapping {
         for stripe in &self.stripes {
             locations.push(PhysicalLocation {
                 device_id: stripe.device_id,
+                device_uuid: stripe.device_uuid,
                 offset: stripe
                     .offset
                     .checked_add(relative)
@@ -326,6 +432,7 @@ impl ChunkMapping {
         Ok(MappedSegment {
             locations,
             length: usize::try_from(maximum).map_err(|_| BtrfsError::IntegerOverflow)?,
+            raid56: None,
         })
     }
 
@@ -350,9 +457,11 @@ impl ChunkMapping {
         Ok(MappedSegment {
             locations: alloc::vec![PhysicalLocation {
                 device_id: stripe.device_id,
+                device_uuid: stripe.device_uuid,
                 offset: physical,
             }],
             length: usize::try_from(contiguous).map_err(|_| BtrfsError::IntegerOverflow)?,
+            raid56: None,
         })
     }
 
@@ -382,12 +491,14 @@ impl ChunkMapping {
                 .ok_or(BtrfsError::IntegerOverflow)?;
             locations.push(PhysicalLocation {
                 device_id: stripe.device_id,
+                device_uuid: stripe.device_uuid,
                 offset: physical,
             });
         }
         Ok(MappedSegment {
             locations,
             length: usize::try_from(contiguous).map_err(|_| BtrfsError::IntegerOverflow)?,
+            raid56: None,
         })
     }
 
@@ -421,21 +532,50 @@ impl ChunkMapping {
         let within_stripe = relative % self.stripe_length;
         let contiguous = maximum.min(self.stripe_length - within_stripe);
         let stripe = &self.stripes[stripe_index];
+        let stripe_set_offset = full_stripe
+            .checked_mul(self.stripe_length)
+            .ok_or(BtrfsError::IntegerOverflow)?;
         let physical = stripe
             .offset
-            .checked_add(
-                full_stripe
-                    .checked_mul(self.stripe_length)
-                    .ok_or(BtrfsError::IntegerOverflow)?,
-            )
+            .checked_add(stripe_set_offset)
             .and_then(|offset| offset.checked_add(within_stripe))
             .ok_or(BtrfsError::IntegerOverflow)?;
+        let mut recovery_stripes = Vec::with_capacity(self.stripes.len());
+        for logical_index in 0..self.stripes.len() {
+            let logical_index =
+                u64::try_from(logical_index).map_err(|_| BtrfsError::IntegerOverflow)?;
+            let physical_index = usize::try_from(
+                full_stripe
+                    .checked_add(logical_index)
+                    .ok_or(BtrfsError::IntegerOverflow)?
+                    % stripe_count,
+            )
+            .map_err(|_| BtrfsError::IntegerOverflow)?;
+            let recovery_stripe = &self.stripes[physical_index];
+            recovery_stripes.push(PhysicalLocation {
+                device_id: recovery_stripe.device_id,
+                device_uuid: recovery_stripe.device_uuid,
+                offset: recovery_stripe
+                    .offset
+                    .checked_add(stripe_set_offset)
+                    .and_then(|offset| offset.checked_add(within_stripe))
+                    .ok_or(BtrfsError::IntegerOverflow)?,
+            });
+        }
         Ok(MappedSegment {
             locations: alloc::vec![PhysicalLocation {
                 device_id: stripe.device_id,
+                device_uuid: stripe.device_uuid,
                 offset: physical,
             }],
             length: usize::try_from(contiguous).map_err(|_| BtrfsError::IntegerOverflow)?,
+            raid56: Some(Raid56Segment {
+                stripes: recovery_stripes,
+                data_stripes,
+                parity_stripes,
+                target_data: usize::try_from(data_index)
+                    .map_err(|_| BtrfsError::IntegerOverflow)?,
+            }),
         })
     }
 }
@@ -568,6 +708,7 @@ mod tests {
             mapped.locations,
             alloc::vec![PhysicalLocation {
                 device_id: 7,
+                device_uuid: [0; 16],
                 offset: 0x22_3456
             }]
         );
@@ -588,10 +729,12 @@ mod tests {
             alloc::vec![
                 PhysicalLocation {
                     device_id: 1,
+                    device_uuid: [0; 16],
                     offset: 0x21_0000
                 },
                 PhysicalLocation {
                     device_id: 2,
+                    device_uuid: [0; 16],
                     offset: 0x31_0000
                 }
             ]
@@ -681,6 +824,16 @@ mod tests {
         let first = chunk.map(0x10_0000, 4096).expect("first data stripe");
         assert_eq!(first.locations[0].device_id, 1);
         assert_eq!(first.locations[0].offset, 0x20_0000);
+        let first_recovery = first.raid56.expect("RAID5 recovery geometry");
+        assert_eq!(first_recovery.target_data, 0);
+        assert_eq!(
+            first_recovery
+                .stripes
+                .iter()
+                .map(|location| location.device_id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
 
         let second = chunk.map(0x11_0000, 4096).expect("second data stripe");
         assert_eq!(second.locations[0].device_id, 2);
@@ -689,6 +842,15 @@ mod tests {
         let rotated = chunk.map(0x12_0000, 4096).expect("rotated parity");
         assert_eq!(rotated.locations[0].device_id, 2);
         assert_eq!(rotated.locations[0].offset, 0x31_0000);
+        let rotated_recovery = rotated.raid56.expect("rotated RAID5 geometry");
+        assert_eq!(
+            rotated_recovery
+                .stripes
+                .iter()
+                .map(|location| location.device_id)
+                .collect::<Vec<_>>(),
+            [2, 3, 1]
+        );
     }
 
     #[test]
@@ -708,6 +870,53 @@ mod tests {
         let rotated = chunk.map(0x12_0000, 4096).expect("second full stripe");
         assert_eq!(rotated.locations[0].device_id, 2);
         assert_eq!(rotated.locations[0].offset, 0x31_0000);
+        let recovery = rotated.raid56.expect("RAID6 recovery geometry");
+        assert_eq!(recovery.replica_count(), 4);
+        assert_eq!(recovery.forced_missing(0), None);
+        assert_eq!(recovery.forced_missing(1), None);
+        assert_eq!(recovery.forced_missing(2), Some(1));
+        assert_eq!(recovery.forced_missing(3), Some(2));
+        assert_eq!(
+            recovery
+                .stripes
+                .iter()
+                .map(|location| location.device_id)
+                .collect::<Vec<_>>(),
+            [2, 3, 4, 1]
+        );
+    }
+
+    #[test]
+    fn profile_redundancy_controls_degraded_readability() {
+        let nonredundant = mapping(PROFILE_RAID0, 0, alloc::vec![stripe(1, 0), stripe(2, 0)]);
+        assert!(!nonredundant.is_readable_with(|stripe| stripe.device_id == 1));
+
+        let mirrored = mapping(PROFILE_RAID1, 0, alloc::vec![stripe(1, 0), stripe(2, 0)]);
+        assert!(mirrored.is_readable_with(|stripe| stripe.device_id == 1));
+
+        let paired_mirrors = mapping(
+            PROFILE_RAID10,
+            2,
+            alloc::vec![stripe(1, 0), stripe(2, 0), stripe(3, 0), stripe(4, 0)],
+        );
+        assert!(paired_mirrors.is_readable_with(|stripe| matches!(stripe.device_id, 1 | 3)));
+        assert!(!paired_mirrors.is_readable_with(|stripe| matches!(stripe.device_id, 1 | 2)));
+
+        let single_parity = mapping(
+            PROFILE_RAID5,
+            0,
+            alloc::vec![stripe(1, 0), stripe(2, 0), stripe(3, 0)],
+        );
+        assert!(single_parity.is_readable_with(|stripe| stripe.device_id != 2));
+        assert!(!single_parity.is_readable_with(|stripe| stripe.device_id == 1));
+
+        let double_parity = mapping(
+            PROFILE_RAID6,
+            0,
+            alloc::vec![stripe(1, 0), stripe(2, 0), stripe(3, 0), stripe(4, 0),],
+        );
+        assert!(double_parity.is_readable_with(|stripe| matches!(stripe.device_id, 1 | 4)));
+        assert!(!double_parity.is_readable_with(|stripe| stripe.device_id == 1));
     }
 
     #[test]

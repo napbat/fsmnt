@@ -92,11 +92,30 @@ pub(crate) enum TreeBlock {
 }
 
 impl TreeBlock {
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn parse(
         data: &[u8],
         logical: u64,
         expected_level: u8,
         tree_uuid: &[u8; 16],
+        checksum_type: ChecksumType,
+        sector_size: u32,
+    ) -> Result<Self> {
+        Self::parse_with_uuids(
+            data,
+            logical,
+            expected_level,
+            core::slice::from_ref(tree_uuid),
+            checksum_type,
+            sector_size,
+        )
+    }
+
+    pub(crate) fn parse_with_uuids(
+        data: &[u8],
+        logical: u64,
+        expected_level: u8,
+        tree_uuids: &[[u8; 16]],
         checksum_type: ChecksumType,
         sector_size: u32,
     ) -> Result<Self> {
@@ -111,7 +130,7 @@ impl TreeBlock {
         }
         let header = RawTreeHeader::ref_from_bytes(&data[..HEADER_SIZE])
             .map_err(|_| BtrfsError::MalformedTreeBlock { logical })?;
-        if header.fsid != *tree_uuid
+        if !tree_uuids.contains(&header.fsid)
             || header.logical.get() != logical
             || header.level != expected_level
             || expected_level >= MAX_TREE_LEVEL

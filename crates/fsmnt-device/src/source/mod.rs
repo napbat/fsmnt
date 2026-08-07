@@ -15,6 +15,7 @@
 mod assembly;
 mod device_set;
 mod volume;
+mod zones;
 
 pub use assembly::{AssembledVolume, RawAssemblyError, RawVolumeLayout, assemble_raw_volume};
 pub use device_set::{DeviceMember, DeviceSet, DeviceSetError, SourceMemberId};
@@ -22,3 +23,4 @@ pub use volume::{
     HostVolumeResolver, LogicalVolume, LogicalVolumeId, PartitionAddress, PhysicalExtent,
     SourceOrigin, SourceSelection, VolumeSelectionError, select_logical_volume,
 };
+pub use zones::{BlockZone, BlockZoneCondition, BlockZoneReporter, BlockZoneType};

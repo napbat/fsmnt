@@ -151,6 +151,28 @@ pub trait TargetFilesystem: Send {
     /// cannot be read.
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>>;
 
+    /// Read file bytes starting at `offset` into `buffer`.
+    ///
+    /// The returned count is at most `buffer.len()`. A read at or beyond the
+    /// end of the file returns zero. The default implementation preserves
+    /// compatibility with whole-file backends by calling [`read`](Self::read);
+    /// parsers and remote filesystems should override this method when they can
+    /// issue a bounded read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path does not exist, is not a file, or the
+    /// requested bytes cannot be read.
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let data = self.read(path)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(data.len());
+        let count = buffer.len().min(data.len() - start);
+        buffer[..count].copy_from_slice(&data[start..start + count]);
+        Ok(count)
+    }
+
     /// Open a file and return a reader.
     ///
     /// The default implementation reads the entire file into memory via
@@ -255,6 +277,15 @@ pub trait TargetFilesystem: Send {
     /// Used by mount backends to report free space to the OS.
     /// Returns `None` by default (unknown / not applicable).
     fn free_space(&mut self) -> Option<u64> {
+        None
+    }
+
+    /// Canonical filesystem UUID used by mount tables, if the format has one.
+    ///
+    /// The returned spelling follows the operating system's conventional
+    /// `UUID=` form for the filesystem (for example, RFC 4122 form for ext and
+    /// Btrfs, or `XXXX-XXXX` for FAT).
+    fn volume_uuid(&self) -> Option<String> {
         None
     }
 }

@@ -14,7 +14,7 @@ use crate::bytes::slice;
 use crate::key::DiskKey;
 use crate::{BtrfsError, Result};
 use zerocopy::FromBytes;
-#[cfg(any(test, feature = "fuzzing"))]
+#[cfg(feature = "fuzzing")]
 use zerocopy::IntoBytes;
 
 pub(crate) const ROOT_TREE_OBJECT_ID: u64 = 1;
@@ -22,15 +22,19 @@ pub(crate) const CHUNK_TREE_OBJECT_ID: u64 = 3;
 pub(crate) const FS_TREE_OBJECT_ID: u64 = 5;
 pub(crate) const CHECKSUM_TREE_OBJECT_ID: u64 = 7;
 pub(crate) const ROOT_TREE_DIR_OBJECT_ID: u64 = 6;
+pub(crate) const TREE_LOG_OBJECT_ID: u64 = u64::MAX - 5;
 pub(crate) const FIRST_FREE_OBJECT_ID: u64 = 256;
 const LAST_FREE_OBJECT_ID: u64 = u64::MAX - 255;
 const FREE_INODE_OBJECT_ID: u64 = u64::MAX - 11;
 
 pub(crate) const INODE_ITEM_KEY: u8 = 1;
+pub(crate) const DIR_LOG_ITEM_KEY: u8 = 60;
+pub(crate) const DIR_LOG_INDEX_KEY: u8 = 72;
 pub(crate) const DIR_ITEM_KEY: u8 = 84;
 pub(crate) const DIR_INDEX_KEY: u8 = 96;
 pub(crate) const EXTENT_DATA_KEY: u8 = 108;
 pub(crate) const EXTENT_CHECKSUM_KEY: u8 = 128;
+pub(crate) const MAX_COMPRESSED_EXTENT_BYTES: u64 = 128 * 1024;
 pub(crate) const ROOT_ITEM_KEY: u8 = 132;
 pub(crate) const EXTENT_CHECKSUM_OBJECT_ID: u64 = u64::MAX - 9;
 
@@ -419,15 +423,13 @@ pub(crate) fn parse_directory_entries(key: DiskKey, data: &[u8]) -> Result<Vec<R
 
 fn valid_directory_location(location: DiskKey) -> bool {
     match location.item_type {
-        ROOT_ITEM_KEY => {
-            valid_filesystem_tree_id(location.object_id) && location.offset == u64::MAX
-        }
+        ROOT_ITEM_KEY => valid_filesystem_tree_id(location.object_id),
         INODE_ITEM_KEY | 0 => valid_inode_object_id(location.object_id) && location.offset == 0,
         _ => false,
     }
 }
 
-const fn valid_inode_object_id(object_id: u64) -> bool {
+pub(crate) const fn valid_inode_object_id(object_id: u64) -> bool {
     object_id == ROOT_TREE_DIR_OBJECT_ID
         || object_id == FREE_INODE_OBJECT_ID
         || (object_id >= FIRST_FREE_OBJECT_ID && object_id <= LAST_FREE_OBJECT_ID)
@@ -553,6 +555,7 @@ impl FileExtent {
             }
             extent.inline_data = data[FILE_EXTENT_INLINE_HEADER_SIZE..].to_vec();
             extent.logical_bytes = extent.ram_bytes;
+            validate_compressed_extent(&extent)?;
             return Ok(extent);
         }
         if data.len() != FILE_EXTENT_REGULAR_SIZE {
@@ -581,6 +584,10 @@ impl FileExtent {
         {
             return Err(malformed(key));
         }
+        if kind == ExtentKind::Preallocated && compression != Compression::None {
+            return Err(malformed(key));
+        }
+        validate_compressed_extent(&extent)?;
         Ok(extent)
     }
 
@@ -599,6 +606,29 @@ impl FileExtent {
             .checked_add(length)
             .ok_or(BtrfsError::IntegerOverflow)
     }
+}
+
+fn validate_compressed_extent(extent: &FileExtent) -> Result<()> {
+    if extent.compression == Compression::None {
+        return Ok(());
+    }
+    let disk_bytes = if extent.kind == ExtentKind::Inline {
+        u64::try_from(extent.inline_data.len()).map_err(|_| BtrfsError::IntegerOverflow)?
+    } else {
+        extent.disk_bytes
+    };
+    if disk_bytes == 0
+        || extent.ram_bytes == 0
+        || disk_bytes > MAX_COMPRESSED_EXTENT_BYTES
+        || extent.ram_bytes > MAX_COMPRESSED_EXTENT_BYTES
+    {
+        return Err(BtrfsError::InvalidCompressedExtentSize {
+            disk_bytes,
+            ram_bytes: extent.ram_bytes,
+            maximum: MAX_COMPRESSED_EXTENT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn malformed(key: DiskKey) -> BtrfsError {
@@ -790,6 +820,43 @@ mod tests {
     }
 
     #[test]
+    fn directory_indexes_accept_subvolume_and_snapshot_root_locations() {
+        let key = DiskKey {
+            object_id: FIRST_FREE_OBJECT_ID,
+            item_type: DIR_INDEX_KEY,
+            offset: 2,
+        };
+        let mut data = directory_item(b"home", FIRST_FREE_OBJECT_ID);
+
+        for offset in [0, 42, u64::MAX] {
+            {
+                let raw = RawDirectoryItemHeader::mut_from_bytes(&mut data[..DIR_ITEM_HEADER_SIZE])
+                    .expect("directory item layout");
+                raw.file_type = 2;
+                raw.location = DiskKey {
+                    object_id: FIRST_FREE_OBJECT_ID,
+                    item_type: ROOT_ITEM_KEY,
+                    offset,
+                }
+                .into();
+            }
+            parse_directory_entries(key, &data).expect("valid filesystem-tree root");
+        }
+
+        {
+            let raw = RawDirectoryItemHeader::mut_from_bytes(&mut data[..DIR_ITEM_HEADER_SIZE])
+                .expect("directory item layout");
+            raw.location = DiskKey {
+                object_id: CHECKSUM_TREE_OBJECT_ID,
+                item_type: ROOT_ITEM_KEY,
+                offset: 0,
+            }
+            .into();
+        }
+        assert!(parse_directory_entries(key, &data).is_err());
+    }
+
+    #[test]
     fn inline_extent_data_starts_after_encoding_header() {
         let key = DiskKey {
             object_id: 300,
@@ -838,6 +905,42 @@ mod tests {
             .expect("extent layout")
             .logical_bytes = U64::new(8192);
         assert!(FileExtent::parse(key, &out_of_range, 4096).is_err());
+    }
+
+    #[test]
+    fn compressed_extents_enforce_btrfs_memory_and_io_limits() {
+        let key = DiskKey {
+            object_id: 300,
+            item_type: EXTENT_DATA_KEY,
+            offset: 0,
+        };
+        let mut data = valid_regular_extent();
+        {
+            let raw = RawFileExtentRegular::mut_from_bytes(&mut data).expect("extent layout");
+            raw.header.compression = 1;
+            raw.header.ram_bytes = U64::new(MAX_COMPRESSED_EXTENT_BYTES);
+            raw.disk_bytes = U64::new(MAX_COMPRESSED_EXTENT_BYTES);
+        }
+        FileExtent::parse(key, &data, 4096).expect("maximum compressed extent");
+
+        let mut oversized_disk = data;
+        RawFileExtentRegular::mut_from_bytes(&mut oversized_disk)
+            .expect("extent layout")
+            .disk_bytes = U64::new(MAX_COMPRESSED_EXTENT_BYTES + 4096);
+        assert!(matches!(
+            FileExtent::parse(key, &oversized_disk, 4096),
+            Err(BtrfsError::InvalidCompressedExtentSize { .. })
+        ));
+
+        let mut oversized_ram = data;
+        RawFileExtentRegular::mut_from_bytes(&mut oversized_ram)
+            .expect("extent layout")
+            .header
+            .ram_bytes = U64::new(MAX_COMPRESSED_EXTENT_BYTES + 4096);
+        assert!(matches!(
+            FileExtent::parse(key, &oversized_ram, 4096),
+            Err(BtrfsError::InvalidCompressedExtentSize { .. })
+        ));
     }
 
     #[test]

@@ -17,4 +17,7 @@ mod drives;
 mod volumes;
 
 #[cfg(target_os = "linux")]
+mod zones;
+
+#[cfg(target_os = "linux")]
 pub use drives::LinuxHostDrives;

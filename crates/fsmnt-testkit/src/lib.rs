@@ -6,6 +6,76 @@
 
 use std::path::{Path, PathBuf};
 
+/// Reader wrapper that mutates each successful read before returning it.
+///
+/// The callback receives the physical stream offset and only the initialized
+/// portion of the caller's buffer. Integration tests can use this to inject
+/// repeatable corruption without creating modified fixture files.
+pub struct MutatingReader<R, F> {
+    inner: R,
+    position: u64,
+    mutator: F,
+}
+
+impl<R, F> MutatingReader<R, F> {
+    /// Wrap `inner` with a callback applied to every non-empty read.
+    pub const fn new(inner: R, mutator: F) -> Self {
+        Self {
+            inner,
+            position: 0,
+            mutator,
+        }
+    }
+
+    /// Current byte position tracked across reads and seeks.
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// Consume the wrapper and return the underlying reader.
+    #[must_use]
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R, F> fsmnt_parser_core::io::Read for MutatingReader<R, F>
+where
+    R: fsmnt_parser_core::io::Read,
+    F: FnMut(u64, &mut [u8]),
+{
+    fn read(&mut self, buffer: &mut [u8]) -> fsmnt_parser_core::io::Result<usize> {
+        let start = self.position;
+        let read = self.inner.read(buffer)?;
+        let initialized = buffer
+            .get_mut(..read)
+            .ok_or(fsmnt_parser_core::io::ErrorKind::InvalidData)?;
+        (self.mutator)(start, initialized);
+        let read_u64 =
+            u64::try_from(read).map_err(|_| fsmnt_parser_core::io::ErrorKind::InvalidData)?;
+        self.position = self
+            .position
+            .checked_add(read_u64)
+            .ok_or(fsmnt_parser_core::io::ErrorKind::InvalidData)?;
+        Ok(read)
+    }
+}
+
+impl<R, F> fsmnt_parser_core::io::Seek for MutatingReader<R, F>
+where
+    R: fsmnt_parser_core::io::Seek,
+{
+    fn seek(
+        &mut self,
+        position: fsmnt_parser_core::io::SeekFrom,
+    ) -> fsmnt_parser_core::io::Result<u64> {
+        let position = self.inner.seek(position)?;
+        self.position = position;
+        Ok(position)
+    }
+}
+
 /// In-memory cursor compatible with both `std::io` and the parsers'
 /// no-std I/O traits.
 #[derive(Clone, Debug, Default)]
@@ -275,6 +345,18 @@ pub fn read_optional_fixture(
     }
 }
 
+/// Read a non-empty host device identifier from an environment variable.
+///
+/// Live-device integration tests use this opt-in boundary so ordinary test
+/// runs never touch host block devices.
+#[must_use]
+pub fn live_device_id(variable: &str) -> Option<String> {
+    std::env::var(variable)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::single_partition_mbr;
@@ -303,5 +385,16 @@ mod tests {
     #[test]
     fn single_partition_mbr_rejects_empty_partition() {
         assert!(single_partition_mbr(&[], 0x83, 1, 512).is_err());
+    }
+
+    #[test]
+    fn absent_live_device_configuration_skips_cleanly() {
+        let variable = "FSMNT_TESTKIT_UNSET_LIVE_DEVICE";
+        // SAFETY: This test owns a uniquely named environment variable and no
+        // other test in the process reads or writes it.
+        unsafe {
+            std::env::remove_var(variable);
+        }
+        assert_eq!(super::live_device_id(variable), None);
     }
 }

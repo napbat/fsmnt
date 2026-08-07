@@ -276,9 +276,10 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
         _info: &OperationInfo<'c, 'h, Self>,
         context: &'c Self::Context,
     ) -> OperationResult<u32> {
-        let data = {
+        let offset = u64::try_from(offset).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let count = {
             let mut fs = self.fs.lock().unwrap();
-            fs.read(&context.path).map_err(|error| {
+            fs.read_at(&context.path, offset, buffer).map_err(|error| {
                 eprintln!(
                     "fsmnt-dokan: failed to read {:?} at offset {offset}: {error}",
                     context.path
@@ -286,13 +287,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
                 STATUS_UNSUCCESSFUL
             })?
         };
-
-        let offset = usize::try_from(offset).map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let start = offset.min(data.len());
-        let end = (start + buffer.len()).min(data.len());
-        let n = end - start;
-        buffer[..n].copy_from_slice(&data[start..end]);
-        u32::try_from(n).map_err(|_| STATUS_UNSUCCESSFUL)
+        u32::try_from(count).map_err(|_| STATUS_UNSUCCESSFUL)
     }
 
     fn get_file_information(
@@ -320,7 +315,10 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
     ) -> OperationResult<()> {
         let path = to_internal_path(file_name);
         let mut fs = self.fs.lock().unwrap();
-        let entries = fs.read_dir(&path).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let entries = fs.read_dir(&path).map_err(|error| {
+            eprintln!("fsmnt-dokan: failed to list {path:?}: {error}");
+            STATUS_UNSUCCESSFUL
+        })?;
         let visible = filter_entries(&entries);
 
         for entry in &visible {

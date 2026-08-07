@@ -9,6 +9,7 @@ edition.workspace = true
 fsmnt-device = { workspace = true }
 fsmnt-proxy = { workspace = true }
 libc = { workspace = true }
+linux-raw-sys = { workspace = true, features = ["ioctl"] }
 
 [lints]
 workspace = true

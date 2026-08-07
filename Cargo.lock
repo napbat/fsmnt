@@ -678,6 +678,7 @@ dependencies = [
  "fsmnt-device",
  "fsmnt-proxy",
  "libc",
+ "linux-raw-sys",
 ]
 
 [[package]]

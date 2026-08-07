@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use crate::DeviceReader;
 
-use super::{LogicalVolumeId, PhysicalExtent};
+use super::{BlockZoneReporter, LogicalVolumeId, PhysicalExtent};
 
 /// Identity and provenance of one readable block source.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +21,7 @@ pub struct DeviceMember {
     reader: Box<dyn DeviceReader>,
     length: u64,
     sector_size: u32,
+    zone_reporter: Option<Box<dyn BlockZoneReporter>>,
 }
 
 impl DeviceMember {
@@ -44,7 +45,15 @@ impl DeviceMember {
             reader,
             length,
             sector_size,
+            zone_reporter: None,
         })
+    }
+
+    /// Attach sparse block-zone reporting for this member.
+    #[must_use]
+    pub fn with_zone_reporter(mut self, reporter: Box<dyn BlockZoneReporter>) -> Self {
+        self.zone_reporter = Some(reporter);
+        self
     }
 
     /// Source identity.
@@ -63,6 +72,12 @@ impl DeviceMember {
     #[must_use]
     pub const fn sector_size(&self) -> u32 {
         self.sector_size
+    }
+
+    /// Sparse zone reporter for a zoned block device, when available.
+    #[must_use]
+    pub fn zone_reporter(&self) -> Option<&dyn BlockZoneReporter> {
+        self.zone_reporter.as_deref()
     }
 
     /// Shared reader access.

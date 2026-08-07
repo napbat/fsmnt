@@ -22,6 +22,7 @@ use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
 
 use crate::adapter::{found, read_up_to};
+use crate::identity;
 
 /// Map an [`ExFatError`] onto the closest [`FsError`] variant.
 fn map_exfat_error(e: ExFatError, path: &str) -> FsError {
@@ -217,6 +218,10 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
     fn free_space(&mut self) -> Option<u64> {
         let bitmap = self.exfat.bitmap()?;
         Some(u64::from(bitmap.free_count()) * u64::from(self.exfat.cluster_size()))
+    }
+
+    fn volume_uuid(&self) -> Option<String> {
+        Some(identity::fat_serial(self.exfat.volume_serial_number()))
     }
 }
 

@@ -5,11 +5,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use fsmnt_device::{
-    HostDriveId, HostDriveResult, HostVolumeResolver, LogicalVolume, LogicalVolumeId,
-    PhysicalExtent,
+    BlockZoneReporter, HostDriveId, HostDriveResult, HostVolumeResolver, LogicalVolume,
+    LogicalVolumeId, PhysicalExtent,
 };
 
 use crate::drives::{LinuxHostDrives, open_device};
+use crate::zones::reporter_for_path;
 
 const SYSFS_SECTOR_SIZE: u64 = 512;
 
@@ -32,8 +33,28 @@ impl HostVolumeResolver for LinuxHostDrives {
             .collect())
     }
 
+    fn physical_zone_reporter(
+        extent: &PhysicalExtent,
+    ) -> HostDriveResult<Option<Box<dyn BlockZoneReporter>>> {
+        reporter_for_path(
+            &format!("/dev/{}", extent.drive()),
+            extent.offset(),
+            extent.length(),
+        )
+    }
+
     fn open_logical_volume(volume: &LogicalVolume) -> HostDriveResult<Self::VolumeReader> {
         open_device(&volume.device_path().to_string_lossy())
+    }
+
+    fn logical_zone_reporter(
+        volume: &LogicalVolume,
+    ) -> HostDriveResult<Option<Box<dyn BlockZoneReporter>>> {
+        reporter_for_path(
+            &volume.device_path().to_string_lossy(),
+            0,
+            volume.length().unwrap_or(u64::MAX),
+        )
     }
 }
 

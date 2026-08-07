@@ -18,6 +18,7 @@ use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::iter::FsTryIterator;
 
 use crate::adapter::{found, found_and, read_up_to};
+use crate::identity;
 
 /// Timestamps and DOS attribute bits read from a directory entry.
 #[derive(Debug, Default, Clone, Copy)]
@@ -288,6 +289,10 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
 
     fn total_size(&self) -> Option<u64> {
         Some(self.fat.size())
+    }
+
+    fn volume_uuid(&self) -> Option<String> {
+        Some(identity::fat_serial(self.fat.serial_number()))
     }
 }
 

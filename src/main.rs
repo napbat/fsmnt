@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use fsmnt::DirFilesystem;
 
@@ -13,6 +13,20 @@ use fsmnt::DirFilesystem;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Args, Clone, Debug, Default)]
+struct FilesystemMountOptions {
+    /// Filesystem-owned root to mount: default, top-level, path:PATH,
+    /// id:NUMBER, index:NUMBER, name:NAME, or role:ROLE.
+    #[arg(long, value_name = "SELECTOR")]
+    fs_root: Option<fsmnt::device::FilesystemRoot>,
+}
+
+impl FilesystemMountOptions {
+    fn root(self) -> fsmnt::device::FilesystemRoot {
+        self.fs_root.unwrap_or_default()
+    }
 }
 
 #[derive(Subcommand)]
@@ -63,6 +77,9 @@ enum Commands {
         /// Path to a `BitLocker` .BEK startup key file.
         #[arg(long)]
         bek_file: Option<PathBuf>,
+
+        #[command(flatten)]
+        filesystem: FilesystemMountOptions,
     },
 
     /// List physical drives on this machine.
@@ -101,8 +118,8 @@ enum Commands {
         #[arg(long, value_name = "ID")]
         volume: Option<String>,
 
-        /// Add a raw multi-device member as `DRIVE:PARTITION`. May be
-        /// repeated and requires `--raw`.
+        /// Add a raw member as `DRIVE:PARTITION` when automatic discovery
+        /// cannot enumerate it. May be repeated and requires `--raw`.
         #[arg(long, value_name = "DRIVE:PARTITION", requires = "raw")]
         member: Vec<String>,
 
@@ -119,6 +136,19 @@ enum Commands {
         /// Path to a `BitLocker` .BEK startup key file.
         #[arg(long)]
         bek_file: Option<PathBuf>,
+
+        /// Compose child mounts from the selected root's fstab. With no path,
+        /// reads /etc/fstab.
+        #[arg(
+            long,
+            value_name = "PATH",
+            num_args = 0..=1,
+            default_missing_value = "/etc/fstab"
+        )]
+        fstab: Option<String>,
+
+        #[command(flatten)]
+        filesystem: FilesystemMountOptions,
     },
 }
 
@@ -139,6 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             volname,
             recovery_password,
             bek_file,
+            filesystem,
         } => handle_mount_image(
             &image,
             &mountpoint,
@@ -146,6 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             volname.as_deref(),
             recovery_password,
             bek_file.as_deref(),
+            filesystem.root(),
         ),
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Commands::Drives => handle_drives(),
@@ -162,6 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             volname,
             recovery_password,
             bek_file,
+            fstab,
+            filesystem,
         } => handle_mount_device(MountDeviceOptions {
             drive: &drive,
             partition,
@@ -172,6 +206,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             volname: volname.as_deref(),
             recovery_password,
             bek_file: bek_file.as_deref(),
+            fstab: fstab.as_deref(),
+            filesystem_root: filesystem.root(),
         }),
     }
 }
@@ -400,8 +436,11 @@ fn handle_mount_image(
     volname: Option<&str>,
     recovery_password: Option<String>,
     bek_file: Option<&std::path::Path>,
+    filesystem_root: fsmnt::device::FilesystemRoot,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use fsmnt::device::{DetectedBootSector, PartitionReader, detect_boot_sector_at};
+    use fsmnt::device::{
+        DetectedBootSector, FilesystemOpenOptions, PartitionReader, detect_boot_sector_at,
+    };
     use std::io::{Seek, SeekFrom};
 
     let mut file = std::fs::File::open(image)
@@ -431,7 +470,11 @@ fn handle_mount_image(
     file.seek(SeekFrom::Start(0))?;
     let reader = PartitionReader::new(file, offset, size - offset);
     let drivers = build_registry(recovery_password, bek_file)?;
-    let filesystem = drivers.open(Box::new(reader), detected)?;
+    let filesystem = drivers.open_with_options(
+        Box::new(reader),
+        detected,
+        &FilesystemOpenOptions::new().with_root(filesystem_root),
+    )?;
 
     ensure_unix_mountpoint(mountpoint)?;
 
@@ -470,6 +513,8 @@ struct MountDeviceOptions<'a> {
     volname: Option<&'a str>,
     recovery_password: Option<String>,
     bek_file: Option<&'a std::path::Path>,
+    fstab: Option<&'a str>,
+    filesystem_root: fsmnt::device::FilesystemRoot,
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -496,12 +541,27 @@ fn handle_mount_device(options: MountDeviceOptions<'_>) -> Result<(), Box<dyn st
     } else {
         SourceSelection::Auto
     };
-    let opened = fsmnt::open_device_partition_with_selection::<HostDrives>(
-        &id,
-        options.partition,
-        &drivers,
-        selection,
-    )?;
+    let open_options = fsmnt::PartitionOpenOptions::new()
+        .with_source(selection)
+        .with_filesystem_root(options.filesystem_root);
+    let opened = if let Some(fstab) = options.fstab {
+        let opened = fsmnt::open_device_partition_with_fstab::<HostDrives>(
+            &id,
+            options.partition,
+            &drivers,
+            open_options,
+            fstab,
+        )?;
+        println!("Composed child mounts from {fstab}");
+        opened
+    } else {
+        fsmnt::open_device_partition_with_options::<HostDrives>(
+            &id,
+            options.partition,
+            &drivers,
+            open_options,
+        )?
+    };
 
     ensure_unix_mountpoint(options.mountpoint)?;
 
@@ -555,7 +615,8 @@ fn parse_partition_address(
 
 #[cfg(all(test, any(windows, target_os = "linux", target_os = "macos")))]
 mod tests {
-    use super::{Cli, Parser, parse_partition_address};
+    use super::{Cli, Commands, FilesystemMountOptions, Parser, parse_partition_address};
+    use fsmnt::device::FilesystemRoot;
 
     #[test]
     fn raw_member_address_uses_last_colon() {
@@ -582,5 +643,106 @@ mod tests {
             "logical-id",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn filesystem_root_is_parsed_for_device_mounts() {
+        let cli = Cli::try_parse_from([
+            "fsmnt",
+            "mount-device",
+            "0",
+            "Z:",
+            "--raw",
+            "--fs-root",
+            "path:root/snapshot",
+        ])
+        .expect("filesystem root path");
+        let Commands::MountDevice { filesystem, .. } = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(
+            filesystem.root(),
+            FilesystemRoot::Path("root/snapshot".to_string())
+        );
+    }
+
+    #[test]
+    fn filesystem_root_supports_cross_format_selectors() {
+        for (selector, expected) in [
+            ("default", FilesystemRoot::Default),
+            ("top-level", FilesystemRoot::TopLevel),
+            ("id:256", FilesystemRoot::Id(256)),
+            ("index:2", FilesystemRoot::Index(2)),
+            (
+                "name:Macintosh HD - Data",
+                FilesystemRoot::Name("Macintosh HD - Data".to_string()),
+            ),
+            ("role:data", FilesystemRoot::Role("data".to_string())),
+        ] {
+            let cli =
+                Cli::try_parse_from(["fsmnt", "mount-image", "image", "Z:", "--fs-root", selector])
+                    .expect("filesystem root selector");
+            let Commands::MountImage { filesystem, .. } = cli.command else {
+                panic!("wrong command");
+            };
+            assert_eq!(filesystem.root(), expected);
+        }
+    }
+
+    #[test]
+    fn default_filesystem_root_is_typed() {
+        assert_eq!(
+            FilesystemMountOptions::default().root(),
+            FilesystemRoot::Default
+        );
+    }
+
+    #[test]
+    fn malformed_filesystem_root_is_rejected_by_clap() {
+        let result = Cli::try_parse_from([
+            "fsmnt",
+            "mount-image",
+            "image",
+            "Z:",
+            "--fs-root",
+            "subvolume-without-a-selector-kind",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn fstab_flag_defaults_to_the_selected_roots_table() {
+        let cli = Cli::try_parse_from([
+            "fsmnt",
+            "mount-device",
+            "1",
+            "Z:",
+            "--raw",
+            "--fstab",
+            "--fs-root",
+            "path:root",
+        ])
+        .expect("fstab mount");
+        let Commands::MountDevice { fstab, .. } = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(fstab.as_deref(), Some("/etc/fstab"));
+    }
+
+    #[test]
+    fn fstab_flag_accepts_a_custom_guest_path() {
+        let cli = Cli::try_parse_from([
+            "fsmnt",
+            "mount-device",
+            "1",
+            "Z:",
+            "--fstab",
+            "/etc/fstab.forensic",
+        ])
+        .expect("custom fstab mount");
+        let Commands::MountDevice { fstab, .. } = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(fstab.as_deref(), Some("/etc/fstab.forensic"));
     }
 }

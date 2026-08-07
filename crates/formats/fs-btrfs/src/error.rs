@@ -11,7 +11,7 @@ pub type Result<T, E = BtrfsError> = core::result::Result<T, E>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BtrfsError {
-    /// The reader failed while locating or loading the primary superblock.
+    /// The reader failed while locating or loading a superblock mirror.
     #[error("I/O error: {0:?}")]
     Io(io::Error),
     /// A supplied superblock buffer is shorter than the on-disk structure.
@@ -22,18 +22,43 @@ pub enum BtrfsError {
         /// Number of bytes supplied.
         actual: usize,
     },
-    /// The primary superblock does not carry the Btrfs signature.
+    /// A candidate superblock does not carry the Btrfs signature.
     #[error("invalid Btrfs magic: {actual:?}")]
     InvalidMagic {
         /// Eight bytes found in the magic field.
         actual: [u8; 8],
     },
-    /// The superblock's physical self-address is not the primary location.
-    #[error("invalid primary-superblock address: {actual:#x}")]
+    /// A superblock's physical self-address differs from the mirror read.
+    #[error(
+        "invalid Btrfs superblock self-address {actual:#x}; expected mirror address {expected:#x}"
+    )]
     InvalidPhysicalAddress {
+        /// Physical mirror address from which the bytes were read.
+        expected: u64,
         /// Physical address stored in the superblock.
         actual: u64,
     },
+    /// A reported zoned-device zone size is outside Btrfs's supported range.
+    #[error("invalid Btrfs zoned-device zone size: {actual}")]
+    InvalidZoneSize {
+        /// Reported uniform zone size in bytes.
+        actual: u64,
+    },
+    /// A reported zone has invalid, overlapping, or inconsistent geometry.
+    #[error("invalid Btrfs zone geometry at byte offset {start:#x}")]
+    InvalidZoneGeometry {
+        /// Start offset of the invalid zone or zone pair.
+        start: u64,
+    },
+    /// A zoned superblock pair has a state that cannot occur in Btrfs's log.
+    #[error("invalid Btrfs zoned superblock log state for mirror {mirror:#x}")]
+    InvalidZonedSuperblockLogState {
+        /// Conventional mirror identity associated with the log pair.
+        mirror: u64,
+    },
+    /// No written superblock exists in the reported zoned log pairs.
+    #[error("no Btrfs superblock was written to the reported zoned log pairs")]
+    ZonedSuperblockNotFound,
     /// The superblock sets state bits that this reader cannot interpret.
     #[error("unsupported Btrfs superblock flags {flags:#x}")]
     UnsupportedSuperblockFlags {
@@ -51,7 +76,7 @@ pub enum BtrfsError {
     /// The embedded device item identifies a different filesystem.
     #[error("Btrfs superblock and embedded device item UUIDs do not match")]
     SuperblockUuidMismatch,
-    /// The declared volume size cannot contain the primary superblock.
+    /// The declared volume size cannot contain Btrfs's minimum metadata region.
     #[error("invalid Btrfs volume size: {actual} bytes")]
     InvalidTotalBytes {
         /// Declared total volume size.
@@ -148,6 +173,30 @@ pub enum BtrfsError {
         /// Logical address that could not be translated.
         logical: u64,
     },
+    /// A remapped chunk has no remap-tree item covering the requested address.
+    #[error("Btrfs remap tree does not cover logical address {logical:#x}")]
+    RemapMissing {
+        /// Source logical address lacking a translation.
+        logical: u64,
+    },
+    /// A remap-tree item has an invalid key, payload, or address range.
+    #[error("invalid Btrfs remap-tree item covering logical address {logical:#x}")]
+    InvalidRemapItem {
+        /// Requested source logical address.
+        logical: u64,
+    },
+    /// A RAID stripe-tree-managed extent has no item covering the requested address.
+    #[error("Btrfs RAID stripe tree does not cover logical address {logical:#x}")]
+    RaidStripeMissing {
+        /// Data logical address lacking a stripe item.
+        logical: u64,
+    },
+    /// A RAID stripe-tree item has invalid geometry or references an unrelated device.
+    #[error("invalid Btrfs RAID stripe-tree item covering logical address {logical:#x}")]
+    InvalidRaidStripeItem {
+        /// Requested data logical address.
+        logical: u64,
+    },
     /// A chunk references a device that was not supplied.
     #[error("Btrfs device {device_id} was not supplied")]
     MissingDevice {
@@ -161,6 +210,12 @@ pub enum BtrfsError {
         expected: u64,
         /// Number of readers supplied by the caller.
         actual: usize,
+    },
+    /// Supplied members cannot satisfy one chunk's redundancy profile.
+    #[error("not enough available devices to read Btrfs chunk at logical address {logical:#x}")]
+    InsufficientDevicesForChunk {
+        /// Logical start of the unreadable chunk.
+        logical: u64,
     },
     /// A supplied member belongs to another Btrfs filesystem.
     #[error("supplied Btrfs device belongs to another filesystem")]
@@ -199,12 +254,61 @@ pub enum BtrfsError {
         /// Root-tree object identifier.
         tree_id: u64,
     },
+    /// A global tree does not contain exactly the roots declared by the
+    /// extent-tree-v2 superblock.
+    #[error(
+        "Btrfs global tree {tree_id} has {actual} root(s); \
+         the superblock declares {expected}"
+    )]
+    GlobalRootCountMismatch {
+        /// Root-tree object identifier.
+        tree_id: u64,
+        /// Number of roots declared in the superblock.
+        expected: u64,
+        /// Number of root items found.
+        actual: u64,
+    },
+    /// An extent-tree-v2 global root item has a non-contiguous identifier.
+    #[error(
+        "Btrfs global tree {tree_id} root identifier {actual} \
+         appears where identifier {expected} was required"
+    )]
+    InvalidGlobalRootId {
+        /// Root-tree object identifier.
+        tree_id: u64,
+        /// Contiguous identifier required at this position.
+        expected: u64,
+        /// Identifier stored in the root-item key.
+        actual: u64,
+    },
+    /// A block-group-tree item is missing or inconsistent with its chunk.
+    #[error("invalid Btrfs block-group item at logical address {logical:#x}")]
+    InvalidBlockGroupItem {
+        /// Logical start address from the block-group key.
+        logical: u64,
+    },
+    /// A block group selects a global root outside the declared root set.
+    #[error(
+        "Btrfs block group at {logical:#x} selects global root {global_root_id}, \
+         but only {global_root_count} root(s) exist"
+    )]
+    InvalidBlockGroupRootId {
+        /// Logical start address of the block group.
+        logical: u64,
+        /// Identifier stored in the block-group item.
+        global_root_id: u64,
+        /// Number of declared global roots.
+        global_root_count: u64,
+    },
     /// A filesystem object or directory name was absent.
     #[error("Btrfs object was not found")]
     NotFound,
     /// An operation requiring a directory received another inode type.
     #[error("Btrfs object is not a directory")]
     NotADirectory,
+    /// A requested path names an ordinary object rather than a subvolume root.
+    #[error("Btrfs object is not a subvolume")]
+    NotASubvolume,
     /// An operation requiring regular file data received another inode type.
     #[error("Btrfs object is not a regular file or symbolic link")]
     NotAFile,
@@ -234,6 +338,30 @@ pub enum BtrfsError {
         compression: u8,
         /// Decoder or extent-range failure.
         reason: String,
+    },
+    /// A compressed extent has an empty or oversized encoded/decoded length.
+    #[error(
+        "invalid Btrfs compressed extent lengths: encoded {disk_bytes}, \
+         decoded {ram_bytes}; both must be between 1 and {maximum} bytes"
+    )]
+    InvalidCompressedExtentSize {
+        /// Encoded extent length stored on disk.
+        disk_bytes: u64,
+        /// Decoded extent length declared by the extent.
+        ram_bytes: u64,
+        /// Maximum encoded and decoded extent length supported by Btrfs.
+        maximum: u64,
+    },
+    /// RAID5/6 cannot reconstruct a stripe after too many failures.
+    #[error(
+        "Btrfs RAID5/6 recovery has {failures} unavailable stripe(s), \
+         but only {parity_stripes} parity stripe(s)"
+    )]
+    Raid56RecoveryFailed {
+        /// Number of data and parity stripes unavailable to reconstruction.
+        failures: usize,
+        /// Number of parity stripes in the chunk profile.
+        parity_stripes: usize,
     },
     /// Extent metadata selected bytes outside the encoded or decoded buffer.
     #[error("Btrfs file extent range exceeds its backing data")]

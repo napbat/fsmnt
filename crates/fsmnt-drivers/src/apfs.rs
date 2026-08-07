@@ -18,7 +18,11 @@ use fs_apfs::{
     ExtendedFields, File, FileType, Inode, Volume, VolumeRole, Xattr,
 };
 use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
-use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use fsmnt_device::{
+    DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
+};
+
+use crate::identity;
 
 use crate::adapter::{found, found_and};
 
@@ -37,6 +41,41 @@ pub enum VolumeSelector {
     Role(VolumeRole),
     /// The first volume with this exact name.
     Name(String),
+}
+
+fn parse_volume_role(role: &str) -> Option<VolumeRole> {
+    match role.to_ascii_lowercase().as_str() {
+        "none" => Some(VolumeRole::None),
+        "system" => Some(VolumeRole::System),
+        "user" => Some(VolumeRole::User),
+        "recovery" => Some(VolumeRole::Recovery),
+        "vm" => Some(VolumeRole::Vm),
+        "preboot" => Some(VolumeRole::Preboot),
+        "installer" => Some(VolumeRole::Installer),
+        "data" => Some(VolumeRole::Data),
+        "baseband" => Some(VolumeRole::Baseband),
+        "update" => Some(VolumeRole::Update),
+        "xart" => Some(VolumeRole::Xart),
+        "hardware" => Some(VolumeRole::Hardware),
+        "backup" => Some(VolumeRole::Backup),
+        "enterprise" => Some(VolumeRole::Enterprise),
+        "prelogin" => Some(VolumeRole::Prelogin),
+        _ => None,
+    }
+}
+
+fn requested_volume(root: &FilesystemRoot) -> FsResult<VolumeSelector> {
+    match root {
+        FilesystemRoot::Default => Ok(VolumeSelector::Auto),
+        FilesystemRoot::Index(index) => Ok(VolumeSelector::Index(*index)),
+        FilesystemRoot::Name(name) => Ok(VolumeSelector::Name(name.clone())),
+        FilesystemRoot::Role(role) => parse_volume_role(role)
+            .map(VolumeSelector::Role)
+            .ok_or_else(|| FsError::Filesystem(format!("unknown APFS volume role {role:?}"))),
+        FilesystemRoot::TopLevel | FilesystemRoot::Path(_) | FilesystemRoot::Id(_) => Err(
+            FsError::Filesystem(format!("APFS does not support root selector {root:?}")),
+        ),
+    }
 }
 
 /// Map an [`ApfsError`] onto the closest [`FsError`] variant.
@@ -114,6 +153,7 @@ fn metadata_of(inode: &Inode, size: u64) -> FsMetadata {
 pub struct ApfsFilesystem<R: Read + Seek + Send> {
     reader: R,
     volume: Volume,
+    volume_uuid: [u8; 16],
     block_size: u32,
     total_size: u64,
 }
@@ -151,11 +191,13 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
         }
         let block_size = apfs.block_size();
         let total_size = apfs.block_count().saturating_mul(u64::from(block_size));
+        let volume_uuid = superblock.vol_uuid.0;
         let volume =
             Volume::open(&apfs, &mut reader, index).map_err(|e| map_apfs_error(e, "<volume>"))?;
         Ok(Self {
             reader,
             volume,
+            volume_uuid,
             block_size,
             total_size,
         })
@@ -312,6 +354,10 @@ impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
     fn total_size(&self) -> Option<u64> {
         Some(self.total_size)
     }
+
+    fn volume_uuid(&self) -> Option<String> {
+        Some(identity::uuid(&self.volume_uuid))
+    }
 }
 
 /// [`FilesystemDriver`] for APFS containers.
@@ -336,6 +382,18 @@ impl FilesystemDriver for ApfsDriver {
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
         Ok(Box::new(ApfsFilesystem::new(reader)?))
+    }
+
+    fn open_with_options(
+        &self,
+        reader: Box<dyn DeviceReader>,
+        _detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        Ok(Box::new(ApfsFilesystem::open(
+            reader,
+            &requested_volume(options.root())?,
+        )?))
     }
 }
 
@@ -386,6 +444,24 @@ mod tests {
     #[test]
     fn driver_name_is_stable() {
         assert_eq!(ApfsDriver.name(), "apfs");
+    }
+
+    #[test]
+    fn generic_root_selection_maps_to_apfs_volumes() {
+        assert_eq!(
+            requested_volume(&FilesystemRoot::Index(2)).expect("index"),
+            VolumeSelector::Index(2)
+        );
+        assert_eq!(
+            requested_volume(&FilesystemRoot::Name("Data".to_string())).expect("name"),
+            VolumeSelector::Name("Data".to_string())
+        );
+        assert_eq!(
+            requested_volume(&FilesystemRoot::Role("DATA".to_string())).expect("role"),
+            VolumeSelector::Role(VolumeRole::Data)
+        );
+        assert!(requested_volume(&FilesystemRoot::Path("root".to_string())).is_err());
+        assert!(requested_volume(&FilesystemRoot::Role("unknown".to_string())).is_err());
     }
 
     #[test]

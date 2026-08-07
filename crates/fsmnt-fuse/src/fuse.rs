@@ -126,7 +126,6 @@ impl InodeTable {
 struct FuseState {
     fs: Box<dyn TargetFilesystem>,
     inodes: InodeTable,
-    file_cache: HashMap<u64, Vec<u8>>,
 }
 
 /// FUSE filesystem backed by a [`TargetFilesystem`].
@@ -140,7 +139,6 @@ impl FuseFs {
             state: Mutex::new(FuseState {
                 fs,
                 inodes: InodeTable::new(),
-                file_cache: HashMap::new(),
             }),
         }
     }
@@ -272,19 +270,25 @@ impl Filesystem for FuseFs {
             reply.error(fuser::Errno::ENOENT);
             return;
         };
-        if !g.file_cache.contains_key(&i.0) {
-            let Ok(data) = g.fs.read(&path) else {
-                reply.error(fuser::Errno::EIO);
-                return;
-            };
-            g.file_cache.insert(i.0, data);
+        let Ok(requested) = usize::try_from(size) else {
+            reply.error(fuser::Errno::EOVERFLOW);
+            return;
+        };
+        let mut data = Vec::new();
+        if data.try_reserve_exact(requested).is_err() {
+            reply.error(fuser::Errno::ENOMEM);
+            return;
         }
-        let data = g.file_cache.get(&i.0).unwrap();
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(data.len());
-        let end = start.saturating_add(size as usize).min(data.len());
-        reply.data(&data[start..end]);
+        data.resize(requested, 0);
+        let Ok(count) = g.fs.read_at(&path, offset, &mut data) else {
+            reply.error(fuser::Errno::EIO);
+            return;
+        };
+        let Some(data) = data.get(..count) else {
+            reply.error(fuser::Errno::EIO);
+            return;
+        };
+        reply.data(data);
     }
 
     fn readdir(
@@ -326,25 +330,11 @@ impl Filesystem for FuseFs {
 
         let skip = usize::try_from(offset).unwrap_or(usize::MAX);
         for (idx, (name, child_ino, kind)) in all.iter().enumerate().skip(skip) {
-            if reply.add(ino(*child_ino), (idx as u64) + 1, *kind, name) {
+            let next_offset = u64::try_from(idx).unwrap_or(u64::MAX).saturating_add(1);
+            if reply.add(ino(*child_ino), next_offset, *kind, name) {
                 break;
             }
         }
-        reply.ok();
-    }
-
-    fn release(
-        &self,
-        _req: &Request,
-        i: fuser::INodeNo,
-        _fh: fuser::FileHandle,
-        _flags: fuser::OpenFlags,
-        _lock: Option<fuser::LockOwner>,
-        _flush: bool,
-        reply: fuser::ReplyEmpty,
-    ) {
-        let mut g = self.state.lock().unwrap();
-        g.file_cache.remove(&i.0);
         reply.ok();
     }
 

@@ -6,7 +6,7 @@
 //! source-remapping layer replaced by a single root directory and explicit
 //! protection against paths escaping that root.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -93,6 +93,14 @@ impl TargetFilesystem for DirFilesystem {
         std::fs::read(&resolved).map_err(|e| io_error(path, e))
     }
 
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let resolved = self.resolve(path)?;
+        let mut file = std::fs::File::open(&resolved).map_err(|e| io_error(path, e))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| io_error(path, e))?;
+        file.read(buffer).map_err(|e| io_error(path, e))
+    }
+
     fn open(&mut self, path: &str) -> FsResult<Box<dyn Read + Send + '_>> {
         let resolved = self.resolve(path)?;
         let file = std::fs::File::open(&resolved).map_err(|e| io_error(path, e))?;
@@ -166,6 +174,21 @@ mod tests {
         let (_dir, mut fs) = fixture();
         assert_eq!(fs.read("hello.txt").expect("read"), b"hello");
         assert_eq!(fs.read("sub/nested.txt").expect("read nested"), b"nested");
+    }
+
+    #[test]
+    fn reads_bounded_file_ranges() {
+        let (_dir, mut fs) = fixture();
+        let mut buffer = [0_u8; 8];
+        let count = fs.read_at("sub/nested.txt", 2, &mut buffer).expect("read");
+        assert_eq!(count, 4);
+        assert_eq!(&buffer[..count], b"sted");
+
+        assert_eq!(
+            fs.read_at("sub/nested.txt", 100, &mut buffer)
+                .expect("read past end"),
+            0
+        );
     }
 
     #[test]

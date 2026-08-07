@@ -64,6 +64,7 @@ mod btrfs;
 mod exfat;
 mod ext;
 mod fat;
+mod identity;
 mod ntfs;
 
 pub use apfs::{ApfsDriver, ApfsFilesystem, VolumeSelector};

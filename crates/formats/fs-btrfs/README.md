@@ -10,12 +10,18 @@ Fixed-width records use typed little-endian layouts with compile-time size
 checks. Variable-length records use checked arithmetic and bounded slices.
 The parser verifies:
 
-- primary-superblock identity, checksum, geometry, features, and SYSTEM chunks;
+- superblock-mirror identity, checksum, geometry, features, and SYSTEM chunks,
+  selecting the newest valid generation across the 64 KiB, 64 MiB, and
+  256 GiB mirror locations;
+- typed historical root backups, with automatic read-only rollback when the
+  live root or chunk tree is corrupt;
 - chunk types, profiles, stripe geometry, and non-overlapping logical ranges;
 - tree-block checksums, identity, generation, owner, level, key ordering,
   pointers, and packed leaf-item boundaries;
 - inode, root, directory, extent, and checksum-item invariants; and
-- data checksums, including retrying healthy replicas after checksum failures.
+- extent-tree-v2 global-root sets and block-group assignments; and
+- data checksums, including per-block-group global checksum roots and retrying
+  healthy replicas after checksum failures.
 
 These checks follow the Linux Btrfs tree checker and the documented on-disk
 format:
@@ -27,16 +33,26 @@ format:
 
 ## Deliberate scope
 
-- Only committed trees are exposed; the write-ahead log is not replayed.
-- Opening currently reads the primary superblock and does not recover from a
-  backup superblock mirror.
-- Multi-device filesystems require every declared member. Seed-device chains
-  and degraded RAID5/6 parity reconstruction are not implemented.
-- RAID5/6 data stripes are mapped directly when every member is healthy.
-- Extent-tree-v2, RAID-stripe-tree, and remap-tree layouts are rejected through
-  their incompatibility feature bits.
-- `read_file` returns a complete `Vec`, so callers should inspect inode size
-  before requesting files that are too large for their memory budget.
+- A pending fsync tree log is projected over committed filesystem trees,
+  including creates, overwrites, holes, truncation, extension, deletion,
+  rename, directory authoritative ranges, and logged data checksums.
+- Multi-device reads support single, DUP, RAID0, RAID1, RAID1C3, RAID1C4,
+  RAID10, RAID5, and RAID6 chunks. Missing members are accepted when the
+  chunk profile remains readable; RAID5/6 data is reconstructed from P/Q
+  parity, including checksum-driven recovery from silent corruption.
+- Read-only seed devices, writable sprouts, and chained seed layers are
+  resolved by device UUID even when filesystem-local device IDs overlap.
+- Extent-tree-v2 loads every extent, checksum, and free-space global root and
+  selects checksums through typed block-group-tree items.
+- If live-tree initialization fails, valid embedded backup roots are tried from
+  newest to oldest. Recovery can pair a historical filesystem root with either
+  the current chunk tree or its matching historical chunk tree.
+- RAID-stripe-tree and remap-tree layouts remain rejected through their
+  incompatibility feature bits.
+
+`read_file_range` performs bounded sparse, uncompressed, and compressed reads.
+The compatibility `read_file` helper still returns a complete `Vec`; mount
+backends use the bounded interface instead.
 
 ## Verification
 

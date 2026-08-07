@@ -8,8 +8,10 @@
 
 use fsmnt_core::{FsError, FsResult, TargetFilesystem};
 use nostdio::{Read, Seek};
+use std::fmt;
+use std::str::FromStr;
 
-use crate::{DetectedBootSector, DeviceSet};
+use crate::{DetectedBootSector, DeviceMember, DeviceSet};
 
 /// Combined reader bound required by filesystem drivers.
 ///
@@ -17,6 +19,226 @@ use crate::{DetectedBootSector, DeviceSet};
 pub trait DeviceReader: Read + Seek + Send {}
 
 impl<T: Read + Seek + Send + ?Sized> DeviceReader for T {}
+
+/// Filesystem-owned tree or volume to expose as the mounted root.
+///
+/// Drivers interpret the selectors they support and reject incompatible
+/// selectors explicitly. This layer is distinct from [`SourceSelection`]:
+/// source selection chooses an operating-system or physical block view,
+/// while this type chooses a root inside the opened filesystem/container.
+///
+/// [`SourceSelection`]: crate::SourceSelection
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum FilesystemRoot {
+    /// Use the filesystem driver's normal default root.
+    #[default]
+    Default,
+    /// Use the filesystem's top-level tree rather than a configured child.
+    TopLevel,
+    /// Select a filesystem-owned root by a hierarchy path.
+    Path(String),
+    /// Select a filesystem-owned root by numeric identifier.
+    Id(u64),
+    /// Select a container volume by its zero-based index.
+    Index(usize),
+    /// Select a container volume by its exact name.
+    Name(String),
+    /// Select a container volume by its semantic role.
+    Role(String),
+}
+
+impl fmt::Display for FilesystemRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => formatter.write_str("default"),
+            Self::TopLevel => formatter.write_str("top-level"),
+            Self::Path(path) => write!(formatter, "path:{path}"),
+            Self::Id(id) => write!(formatter, "id:{id}"),
+            Self::Index(index) => write!(formatter, "index:{index}"),
+            Self::Name(name) => write!(formatter, "name:{name}"),
+            Self::Role(role) => write!(formatter, "role:{role}"),
+        }
+    }
+}
+
+/// Failure to parse a textual [`FilesystemRoot`] selector.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "invalid filesystem root selector {value:?}: expected default, top-level, \
+     path:PATH, id:NUMBER, index:NUMBER, name:NAME, or role:ROLE"
+)]
+pub struct FilesystemRootParseError {
+    value: String,
+}
+
+impl FromStr for FilesystemRoot {
+    type Err = FilesystemRootParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => return Ok(Self::Default),
+            "top-level" => return Ok(Self::TopLevel),
+            _ => {}
+        }
+        let (kind, payload) = value
+            .split_once(':')
+            .filter(|(_, payload)| !payload.is_empty())
+            .ok_or_else(|| invalid_root_selector(value))?;
+        match kind {
+            "path" => Ok(Self::Path(payload.to_string())),
+            "id" => payload
+                .parse()
+                .map(Self::Id)
+                .map_err(|_| invalid_root_selector(value)),
+            "index" => payload
+                .parse()
+                .map(Self::Index)
+                .map_err(|_| invalid_root_selector(value)),
+            "name" => Ok(Self::Name(payload.to_string())),
+            "role" => Ok(Self::Role(payload.to_string())),
+            _ => Err(invalid_root_selector(value)),
+        }
+    }
+}
+
+fn invalid_root_selector(value: &str) -> FilesystemRootParseError {
+    FilesystemRootParseError {
+        value: value.to_string(),
+    }
+}
+
+/// Options applied while a filesystem driver opens its source.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FilesystemOpenOptions {
+    root: FilesystemRoot,
+}
+
+impl FilesystemOpenOptions {
+    /// Create options using the driver's default filesystem root.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            root: FilesystemRoot::Default,
+        }
+    }
+
+    /// Select the filesystem-owned root to expose.
+    #[must_use]
+    pub fn with_root(mut self, root: FilesystemRoot) -> Self {
+        self.root = root;
+        self
+    }
+
+    /// Requested filesystem-owned root.
+    #[must_use]
+    pub const fn root(&self) -> &FilesystemRoot {
+        &self.root
+    }
+}
+
+/// Filesystem opened after any geometry-dependent driver probe.
+pub struct ResolvedFilesystem {
+    /// Opened mountable filesystem.
+    pub filesystem: Box<dyn TargetFilesystem>,
+    /// Format selected by the winning driver.
+    pub detected: DetectedBootSector,
+}
+
+/// Opaque identity of one member in a filesystem-owned multi-device layout.
+///
+/// The bytes are interpreted only by the driver that produced them. The
+/// device layer uses equality to match discovered partitions without learning
+/// filesystem-specific on-disk structures.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct FilesystemMemberId(Vec<u8>);
+
+impl FilesystemMemberId {
+    /// Wrap a stable driver-defined member identity.
+    #[must_use]
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+
+    /// Driver-defined identity bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Member information obtained from filesystem-owned metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilesystemMemberDiscovery {
+    member: FilesystemMemberId,
+    required: Vec<FilesystemMemberId>,
+    detected: DetectedBootSector,
+}
+
+impl FilesystemMemberDiscovery {
+    /// Create a discovery result and normalize its required-member set.
+    #[must_use]
+    pub fn new(
+        detected: DetectedBootSector,
+        member: FilesystemMemberId,
+        mut required: Vec<FilesystemMemberId>,
+    ) -> Self {
+        if !required.contains(&member) {
+            required.push(member.clone());
+        }
+        required.sort_unstable();
+        required.dedup();
+        Self {
+            member,
+            required,
+            detected,
+        }
+    }
+
+    /// Filesystem format resolved by the driver.
+    #[must_use]
+    pub const fn detected(&self) -> DetectedBootSector {
+        self.detected
+    }
+
+    /// Identity of the member that was inspected.
+    #[must_use]
+    pub const fn member(&self) -> &FilesystemMemberId {
+        &self.member
+    }
+
+    /// Every member referenced by authoritative filesystem metadata.
+    #[must_use]
+    pub fn required_members(&self) -> &[FilesystemMemberId] {
+        &self.required
+    }
+
+    /// Whether `candidate` is referenced by this filesystem.
+    #[must_use]
+    pub fn requires(&self, candidate: &FilesystemMemberId) -> bool {
+        self.required.contains(candidate)
+    }
+}
+
+/// Driver-qualified member discovery result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedMemberDiscovery {
+    driver_name: &'static str,
+    discovery: FilesystemMemberDiscovery,
+}
+
+impl ResolvedMemberDiscovery {
+    /// Driver that interpreted the member metadata.
+    #[must_use]
+    pub const fn driver_name(&self) -> &'static str {
+        self.driver_name
+    }
+
+    /// Filesystem-owned discovery details.
+    #[must_use]
+    pub const fn discovery(&self) -> &FilesystemMemberDiscovery {
+        &self.discovery
+    }
+}
 
 /// Opens a [`TargetFilesystem`] over a raw partition reader.
 ///
@@ -31,6 +253,44 @@ pub trait FilesystemDriver: Send + Sync {
     /// Whether this driver can open a partition of the given detected type.
     fn supports(&self, detected: DetectedBootSector) -> bool;
 
+    /// Probe a device set when boot-sector detection alone is insufficient.
+    ///
+    /// The default implementation delegates to [`supports`](Self::supports)
+    /// without reading. Drivers for layouts whose identifying metadata moves
+    /// with device geometry can override this method. An override must restore
+    /// every reader position before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when authoritative source geometry or probe bytes
+    /// cannot be read.
+    fn probe_devices(
+        &self,
+        _devices: &mut DeviceSet,
+        detected: DetectedBootSector,
+    ) -> FsResult<Option<DetectedBootSector>> {
+        Ok(self.supports(detected).then_some(detected))
+    }
+
+    /// Inspect one raw member for filesystem-owned multi-device identities.
+    ///
+    /// Drivers that own device mapping, such as Btrfs, return the inspected
+    /// member identity and every member referenced by authoritative metadata.
+    /// Other drivers return `None`. Implementations must restore the reader
+    /// position before returning, including on errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a positively identified filesystem has malformed
+    /// member metadata or the original reader position cannot be restored.
+    fn discover_members(
+        &self,
+        _member: &mut DeviceMember,
+        _detected: DetectedBootSector,
+    ) -> FsResult<Option<FilesystemMemberDiscovery>> {
+        Ok(None)
+    }
+
     /// Open a filesystem over `reader`.
     ///
     /// # Errors
@@ -42,6 +302,27 @@ pub trait FilesystemDriver: Send + Sync {
         reader: Box<dyn DeviceReader>,
         detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>>;
+
+    /// Open a filesystem with an explicit filesystem-owned root selection.
+    ///
+    /// The default implementation accepts only [`FilesystemRoot::Default`]
+    /// and delegates to [`open`](Self::open).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this driver does not support the requested root
+    /// selector or opening fails.
+    fn open_with_options(
+        &self,
+        reader: Box<dyn DeviceReader>,
+        detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        if options.root() != &FilesystemRoot::Default {
+            return Err(unsupported_root(self.name(), options.root()));
+        }
+        self.open(reader, detected)
+    }
 
     /// Open a filesystem from one or more raw device members.
     ///
@@ -63,6 +344,37 @@ pub trait FilesystemDriver: Send + Sync {
             .map_err(|error| FsError::Filesystem(error.to_string()))?;
         self.open(reader, detected)
     }
+
+    /// Open one or more raw members with filesystem-open options.
+    ///
+    /// The default implementation delegates default-root requests to
+    /// [`open_devices`](Self::open_devices). For an explicit root, it accepts
+    /// one member and delegates to [`open_with_options`](Self::open_with_options).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device set or requested root is unsupported,
+    /// or opening fails.
+    fn open_devices_with_options(
+        &self,
+        devices: DeviceSet,
+        detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        if options.root() == &FilesystemRoot::Default {
+            return self.open_devices(devices, detected);
+        }
+        let reader = devices
+            .into_single_reader()
+            .map_err(|error| FsError::Filesystem(error.to_string()))?;
+        self.open_with_options(reader, detected, options)
+    }
+}
+
+fn unsupported_root(driver: &str, root: &FilesystemRoot) -> FsError {
+    FsError::Filesystem(format!(
+        "filesystem driver {driver:?} does not support root selector {root:?}"
+    ))
 }
 
 /// An ordered collection of [`FilesystemDriver`]s.
@@ -120,16 +432,27 @@ impl DriverRegistry {
         detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
         let Some(driver) = self.find(detected) else {
-            let available = if self.drivers.is_empty() {
-                "none registered".to_string()
-            } else {
-                self.names().join(", ")
-            };
-            return Err(FsError::Filesystem(format!(
-                "no filesystem driver for {detected:?} (available drivers: {available})"
-            )));
+            return Err(self.no_driver_error(detected));
         };
         driver.open(reader, detected)
+    }
+
+    /// Open a filesystem using explicit filesystem-owned root options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no driver supports `detected`, the selected driver
+    /// rejects the requested root, or opening fails.
+    pub fn open_with_options(
+        &self,
+        reader: Box<dyn DeviceReader>,
+        detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        let Some(driver) = self.find(detected) else {
+            return Err(self.no_driver_error(detected));
+        };
+        driver.open_with_options(reader, detected, options)
     }
 
     /// Open a filesystem over one or more raw device members.
@@ -140,20 +463,101 @@ impl DriverRegistry {
     /// selected driver rejects the supplied device set, or if parsing fails.
     pub fn open_devices(
         &self,
-        devices: DeviceSet,
+        mut devices: DeviceSet,
         detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        let Some(driver) = self.find(detected) else {
-            let available = if self.drivers.is_empty() {
-                "none registered".to_string()
-            } else {
-                self.names().join(", ")
-            };
-            return Err(FsError::Filesystem(format!(
-                "no filesystem driver for {detected:?} (available drivers: {available})"
-            )));
+        let Some((driver, resolved)) = self.find_for_devices(&mut devices, detected)? else {
+            return Err(self.no_driver_error(detected));
         };
-        driver.open_devices(devices, detected)
+        driver.open_devices(devices, resolved)
+    }
+
+    /// Open one or more raw members using filesystem-owned root options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no driver supports `detected`, the selected driver
+    /// rejects the requested root or device set, or opening fails.
+    pub fn open_devices_with_options(
+        &self,
+        devices: DeviceSet,
+        detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        self.open_devices_with_options_resolved(devices, detected, options)
+            .map(|opened| opened.filesystem)
+    }
+
+    /// Open device members and preserve the format selected by a
+    /// geometry-dependent driver probe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if probing fails, no driver recognizes the source, or
+    /// the selected driver cannot open the requested filesystem root.
+    pub fn open_devices_with_options_resolved(
+        &self,
+        mut devices: DeviceSet,
+        detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<ResolvedFilesystem> {
+        let Some((driver, resolved)) = self.find_for_devices(&mut devices, detected)? else {
+            return Err(self.no_driver_error(detected));
+        };
+        let filesystem = driver.open_devices_with_options(devices, resolved, options)?;
+        Ok(ResolvedFilesystem {
+            filesystem,
+            detected: resolved,
+        })
+    }
+
+    /// Ask registered drivers for filesystem-owned member identities.
+    ///
+    /// Drivers are consulted in registration order. A driver must return
+    /// `None` without error when the member is not its format.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a driver positively identifies the member but
+    /// cannot parse its authoritative discovery metadata.
+    pub fn discover_members(
+        &self,
+        member: &mut DeviceMember,
+        detected: DetectedBootSector,
+    ) -> FsResult<Option<ResolvedMemberDiscovery>> {
+        for driver in &self.drivers {
+            if let Some(discovery) = driver.discover_members(member, detected)? {
+                return Ok(Some(ResolvedMemberDiscovery {
+                    driver_name: driver.name(),
+                    discovery,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_for_devices<'a>(
+        &'a self,
+        devices: &mut DeviceSet,
+        detected: DetectedBootSector,
+    ) -> FsResult<Option<(&'a dyn FilesystemDriver, DetectedBootSector)>> {
+        for driver in &self.drivers {
+            if let Some(resolved) = driver.probe_devices(devices, detected)? {
+                return Ok(Some((driver.as_ref(), resolved)));
+            }
+        }
+        Ok(None)
+    }
+
+    fn no_driver_error(&self, detected: DetectedBootSector) -> FsError {
+        let available = if self.drivers.is_empty() {
+            "none registered".to_string()
+        } else {
+            self.names().join(", ")
+        };
+        FsError::Filesystem(format!(
+            "no filesystem driver for {detected:?} (available drivers: {available})"
+        ))
     }
 }
 
@@ -203,6 +607,34 @@ mod tests {
         }
     }
 
+    struct ProbeDriver;
+
+    impl FilesystemDriver for ProbeDriver {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+
+        fn supports(&self, _detected: DetectedBootSector) -> bool {
+            false
+        }
+
+        fn probe_devices(
+            &self,
+            _devices: &mut DeviceSet,
+            detected: DetectedBootSector,
+        ) -> FsResult<Option<DetectedBootSector>> {
+            Ok((detected == DetectedBootSector::Unknown).then_some(DetectedBootSector::Ntfs))
+        }
+
+        fn open(
+            &self,
+            _reader: Box<dyn DeviceReader>,
+            _detected: DetectedBootSector,
+        ) -> FsResult<Box<dyn TargetFilesystem>> {
+            Ok(Box::new(NullFs))
+        }
+    }
+
     #[test]
     fn empty_registry_reports_no_driver() {
         let registry = DriverRegistry::new();
@@ -224,5 +656,90 @@ mod tests {
 
         let reader = Box::new(std::io::Cursor::new(vec![0u8; 512]));
         assert!(registry.open(reader, DetectedBootSector::Ntfs).is_ok());
+    }
+
+    #[test]
+    fn device_geometry_probe_can_select_an_unknown_format() {
+        let mut registry = DriverRegistry::new();
+        registry.register(Box::new(ProbeDriver));
+        let member = crate::DeviceMember::new(
+            crate::SourceMemberId::Synthetic("probe".to_string()),
+            Box::new(std::io::Cursor::new(vec![0_u8; 512])),
+            512,
+            512,
+        )
+        .expect("device member");
+        assert!(
+            registry
+                .open_devices(crate::DeviceSet::new(member), DetectedBootSector::Unknown)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn filesystem_root_specs_round_trip() {
+        for root in [
+            FilesystemRoot::Default,
+            FilesystemRoot::TopLevel,
+            FilesystemRoot::Path("root/snapshot:1".to_string()),
+            FilesystemRoot::Id(256),
+            FilesystemRoot::Index(2),
+            FilesystemRoot::Name("Macintosh HD - Data".to_string()),
+            FilesystemRoot::Role("data".to_string()),
+        ] {
+            assert_eq!(
+                root.to_string().parse::<FilesystemRoot>(),
+                Ok(root),
+                "selector should round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_filesystem_root_specs_are_rejected() {
+        for value in [
+            "",
+            "root",
+            "path:",
+            "id:",
+            "id:not-a-number",
+            "index:-1",
+            "role:",
+            "unknown:value",
+        ] {
+            assert!(
+                value.parse::<FilesystemRoot>().is_err(),
+                "{value:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn default_driver_contract_rejects_explicit_roots() {
+        let mut registry = DriverRegistry::new();
+        registry.register(Box::new(NullDriver));
+        let reader = Box::new(std::io::Cursor::new(vec![0_u8; 512]));
+        let options =
+            FilesystemOpenOptions::new().with_root(FilesystemRoot::Path("child".to_string()));
+        let Err(error) = registry.open_with_options(reader, DetectedBootSector::Ntfs, &options)
+        else {
+            panic!("null driver has no root-selection support");
+        };
+        assert!(error.to_string().contains("root selector"));
+    }
+
+    #[test]
+    fn member_discovery_includes_the_inspected_member_and_deduplicates() {
+        let inspected = FilesystemMemberId::new(b"member-b".to_vec());
+        let member_a = FilesystemMemberId::new(b"member-a".to_vec());
+        let discovery = FilesystemMemberDiscovery::new(
+            DetectedBootSector::Btrfs,
+            inspected.clone(),
+            vec![member_a.clone(), inspected.clone(), member_a.clone()],
+        );
+
+        assert_eq!(discovery.member(), &inspected);
+        assert_eq!(discovery.required_members(), &[member_a, inspected]);
+        assert!(discovery.requires(discovery.member()));
     }
 }

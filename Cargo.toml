@@ -123,6 +123,7 @@ zeroize = { version = "1.7", default-features = false, features = [
 ctrlc = "3.5"
 fuser = "0.17"
 libc = "0.2"
+linux-raw-sys = { version = "0.12", default-features = false }
 
 # Windows mount backend (Dokan)
 dokan = { git = "https://github.com/coconutbird/dokan-rust.git", rev = "a01841c855aefd3cbaaf042f90d16d5b4bc34692" }

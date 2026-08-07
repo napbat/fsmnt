@@ -34,6 +34,7 @@ mod disk;
 mod drive;
 mod driver;
 mod partition_reader;
+mod sector_reader;
 mod source;
 
 pub use detection::detect_boot_sector_at;
@@ -42,7 +43,11 @@ pub use drive::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,
     HostDriveResult,
 };
-pub use driver::{DeviceReader, DriverRegistry, FilesystemDriver};
+pub use driver::{
+    DeviceReader, DriverRegistry, FilesystemDriver, FilesystemMemberDiscovery, FilesystemMemberId,
+    FilesystemOpenOptions, FilesystemRoot, FilesystemRootParseError, ResolvedFilesystem,
+    ResolvedMemberDiscovery,
+};
 pub use fsmnt_parser_core::boot_sector::{
     BOOT_SECTOR_SIZE, BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_MAGIC,
     BTRFS_SUPERBLOCK_PROBE_SIZE, BootSectorDiagnosis, BootSectorHeader, BootSectorUnknownReason,
@@ -54,9 +59,11 @@ pub use fsmnt_parser_core::partition::{
     GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry, read_gpt_header,
 };
 pub use partition_reader::PartitionReader;
+pub use sector_reader::SectorReader;
 pub use source::{
-    AssembledVolume, DeviceMember, DeviceSet, DeviceSetError, HostVolumeResolver, LogicalVolume,
-    LogicalVolumeId, PartitionAddress, PhysicalExtent, RawAssemblyError, RawVolumeLayout,
-    SourceMemberId, SourceOrigin, SourceSelection, VolumeSelectionError, assemble_raw_volume,
+    AssembledVolume, BlockZone, BlockZoneCondition, BlockZoneReporter, BlockZoneType, DeviceMember,
+    DeviceSet, DeviceSetError, HostVolumeResolver, LogicalVolume, LogicalVolumeId,
+    PartitionAddress, PhysicalExtent, RawAssemblyError, RawVolumeLayout, SourceMemberId,
+    SourceOrigin, SourceSelection, VolumeSelectionError, assemble_raw_volume,
     select_logical_volume,
 };

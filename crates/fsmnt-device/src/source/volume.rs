@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{HostDriveEnumerator, HostDriveId, HostDriveResult};
 
+use super::BlockZoneReporter;
+
 /// A byte range located on one physical drive.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PhysicalExtent {
@@ -224,6 +226,20 @@ pub trait HostVolumeResolver: HostDriveEnumerator {
     /// Returns an error if platform volume discovery fails.
     fn logical_volumes(extent: &PhysicalExtent) -> HostDriveResult<Vec<LogicalVolume>>;
 
+    /// Create an on-demand zone reporter whose coordinates are relative to
+    /// `extent`.
+    ///
+    /// The default implementation reports an ordinary non-zoned source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when zone geometry exists but cannot be queried.
+    fn physical_zone_reporter(
+        _extent: &PhysicalExtent,
+    ) -> HostDriveResult<Option<Box<dyn BlockZoneReporter>>> {
+        Ok(None)
+    }
+
     /// Open the operating system's logical block view of `volume`.
     ///
     /// # Errors
@@ -231,6 +247,20 @@ pub trait HostVolumeResolver: HostDriveEnumerator {
     /// Returns an error if the volume disappeared, is locked, or cannot be
     /// opened for read-only access.
     fn open_logical_volume(volume: &LogicalVolume) -> HostDriveResult<Self::VolumeReader>;
+
+    /// Create an on-demand zone reporter for an operating-system logical
+    /// volume.
+    ///
+    /// The default implementation reports an ordinary non-zoned source.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when zone geometry exists but cannot be queried.
+    fn logical_zone_reporter(
+        _volume: &LogicalVolume,
+    ) -> HostDriveResult<Option<Box<dyn BlockZoneReporter>>> {
+        Ok(None)
+    }
 }
 
 /// How a partition's filesystem source should be selected.
@@ -243,7 +273,10 @@ pub enum SourceSelection {
     Logical(LogicalVolumeId),
     /// Bypass operating-system logical volumes and open physical partitions.
     Raw {
-        /// Additional raw partition members for a multi-device filesystem.
+        /// Additional raw partition members supplied explicitly.
+        ///
+        /// Filesystem drivers may discover other referenced members
+        /// automatically across enumerated host drives.
         additional_partitions: Vec<PartitionAddress>,
     },
 }

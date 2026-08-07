@@ -21,6 +21,7 @@ use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
 
 use crate::adapter::{found, read_up_to};
+use crate::identity;
 
 /// Root inode number for ext2/ext3/ext4.
 const EXT4_ROOT_INO: u32 = 2;
@@ -344,6 +345,10 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
 
     fn free_space(&mut self) -> Option<u64> {
         Some(self.ext.free_bytes())
+    }
+
+    fn volume_uuid(&self) -> Option<String> {
+        Some(identity::uuid(self.ext.uuid()))
     }
 }
 
