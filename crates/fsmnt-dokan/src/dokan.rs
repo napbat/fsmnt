@@ -278,7 +278,13 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
     ) -> OperationResult<u32> {
         let data = {
             let mut fs = self.fs.lock().unwrap();
-            fs.read(&context.path).map_err(|_| STATUS_UNSUCCESSFUL)?
+            fs.read(&context.path).map_err(|error| {
+                eprintln!(
+                    "fsmnt-dokan: failed to read {:?} at offset {offset}: {error}",
+                    context.path
+                );
+                STATUS_UNSUCCESSFUL
+            })?
         };
 
         let offset = usize::try_from(offset).map_err(|_| STATUS_UNSUCCESSFUL)?;

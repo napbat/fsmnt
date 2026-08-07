@@ -35,7 +35,7 @@ enum Commands {
         fsname: String,
     },
 
-    /// Mount a raw filesystem image file (NTFS, FAT, exFAT, ext, APFS,
+    /// Mount a raw filesystem image file (NTFS, FAT, exFAT, ext, APFS, Btrfs,
     /// `BitLocker`) as a read-only volume.
     MountImage {
         /// Path to the image file. Must start with the filesystem itself,
@@ -76,8 +76,8 @@ enum Commands {
         drive: String,
     },
 
-    /// Mount a partition from a physical drive (NTFS, FAT, exFAT, ext,
-    /// APFS, `BitLocker`).
+    /// Mount a partition from a physical drive (NTFS, FAT, exFAT, ext, APFS,
+    /// Btrfs, `BitLocker`).
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     MountDevice {
         /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`).

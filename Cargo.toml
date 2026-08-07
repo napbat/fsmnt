@@ -49,8 +49,11 @@ nt-bitlocker = { path = "crates/formats/nt-bitlocker" }
 # All external dependencies are declared here. Member crates import them
 # with `<name> = { workspace = true }` — never with a version of their own.
 bitflags = "2.11"
+blake2 = { version = "0.10", default-features = false }
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lzokay = { version = "2", default-features = false, features = ["alloc", "decompress"] }
 tempfile = "3"
 thiserror = { version = "2", default-features = false }
 time = { version = "0.3", default-features = false }
@@ -81,6 +84,8 @@ strum_macros = "0.28"
 # Unicode's stability policy, so it matches Apple's Unicode-10 NFD.
 unicode-normalization = { version = "0.1", default-features = false }
 unicode-casefold = "0.2"
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh64"] }
+zstd = { version = "0.13", default-features = false }
 
 # Crypto stack (ext4 fscrypt, BitLocker). The majors below are pinned and
 # must be bumped in lockstep — see the individual comments.

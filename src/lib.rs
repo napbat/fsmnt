@@ -36,9 +36,7 @@
 //! operating-system logical view by default; raw access is always explicit.
 //!
 //! The [`drivers`] layer supplies the parser adapters: NTFS, FAT12/16/32,
-//! `exFAT`, ext2/3/4, APFS, and `BitLocker` (which unlocks to NTFS). Btrfs
-//! volumes are identified and their primary superblocks are parsed, but
-//! filesystem-tree traversal is not implemented yet.
+//! `exFAT`, ext2/3/4, APFS, Btrfs, and `BitLocker` (which unlocks to NTFS).
 //! [`drivers::default_registry`] returns a [`device::DriverRegistry`] with
 //! every driver that needs no configuration; `BitLocker` credentials ride
 //! on [`drivers::BitLockerDriver`], which

@@ -1,36 +1,214 @@
-//! Detection-only adapter over the `fs-btrfs` superblock parser.
-//!
-//! [`BtrfsDriver`] validates the volume and reports its identity through the
-//! normal driver registry. It returns an explicit error from `open` until the
-//! format crate grows B-tree traversal support.
+//! Read-only Btrfs adapter over the no_std-capable `fs-btrfs` parser.
 
-use fs_btrfs::{Btrfs, BtrfsError};
-use fsmnt_core::{FsError, FsResult, TargetFilesystem};
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use fs_btrfs::{
+    Btrfs, BtrfsDirEntry, BtrfsEntry, BtrfsError, BtrfsFileType, BtrfsInode, BtrfsTimestamp,
+};
+use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
 use fsmnt_device::{DetectedBootSector, DeviceReader, DeviceSet, FilesystemDriver};
 
-fn map_btrfs_error(error: BtrfsError) -> FsError {
+fn map_btrfs_error(error: BtrfsError, path: &str) -> FsError {
     match error {
         BtrfsError::Io(error) => FsError::Io(error),
-        other => FsError::Filesystem(format!("invalid Btrfs primary superblock: {other}")),
+        BtrfsError::NotFound => FsError::NotFound(path.to_string()),
+        BtrfsError::NotADirectory => FsError::NotADirectory(path.to_string()),
+        BtrfsError::NotAFile => FsError::NotAFile(path.to_string()),
+        other => FsError::Filesystem(other.to_string()),
     }
 }
 
-fn traversal_stub(superblock: &fs_btrfs::BtrfsSuperblock) -> FsResult<Box<dyn TargetFilesystem>> {
-    let label = superblock
-        .label()
-        .filter(|label| !label.is_empty())
-        .map_or_else(|| "<unlabeled>".to_string(), |label| format!("{label:?}"));
-
-    Err(FsError::Filesystem(format!(
-        "Btrfs volume {label} (generation {}, {} bytes, {} device(s)) is recognized, \
-         but filesystem-tree traversal is not implemented",
-        superblock.generation(),
-        superblock.total_bytes(),
-        superblock.num_devices(),
-    )))
+fn canonicalise_btrfs_path(path: &str) -> Vec<&str> {
+    let mut components = Vec::new();
+    for component in path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|component| !component.is_empty())
+    {
+        match component {
+            "." => {}
+            ".." => {
+                components.pop();
+            }
+            name => components.push(name),
+        }
+    }
+    components
 }
 
-/// Driver that recognizes Btrfs volumes while traversal remains unimplemented.
+fn timestamp_to_utc(timestamp: BtrfsTimestamp) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp(timestamp.seconds(), timestamp.nanoseconds())
+}
+
+fn metadata_of(inode: &BtrfsInode) -> FsMetadata {
+    let is_dir = inode.file_type().is_directory();
+    FsMetadata {
+        size: if is_dir { 0 } else { inode.size() },
+        is_dir,
+        created: timestamp_to_utc(inode.created()),
+        modified: timestamp_to_utc(inode.modified()),
+        accessed: timestamp_to_utc(inode.accessed()),
+        readonly: inode.mode() & 0o222 == 0,
+        hidden: false,
+        system: false,
+    }
+}
+
+fn entry_flags(file_type: BtrfsFileType, inode: &BtrfsInode) -> FsEntryFlags {
+    let mut flags = FsEntryFlags::empty();
+    if file_type.is_symbolic_link() {
+        flags.insert(FsEntryFlags::REPARSE_POINT);
+    }
+    if inode.link_count() > 1 {
+        flags.insert(FsEntryFlags::HARD_LINK);
+    }
+    flags
+}
+
+/// A raw Btrfs volume exposed through [`TargetFilesystem`].
+pub struct BtrfsFilesystem<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> {
+    volume: Btrfs<R>,
+}
+
+impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
+    /// Open and fully bootstrap one Btrfs device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the superblock, chunk mapping, root tree, default
+    /// subvolume, or root inode cannot be read and validated.
+    pub fn new(reader: R) -> FsResult<Self> {
+        Self::from_volume(Btrfs::new(reader).map_err(|error| map_btrfs_error(error, "<open>"))?)
+    }
+
+    /// Open and fully bootstrap every member of a Btrfs filesystem.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing, duplicate, foreign, unreadable, or
+    /// structurally invalid device members.
+    pub fn from_devices(readers: Vec<R>) -> FsResult<Self> {
+        Self::from_volume(
+            Btrfs::from_devices(readers).map_err(|error| map_btrfs_error(error, "<open>"))?,
+        )
+    }
+
+    fn from_volume(mut volume: Btrfs<R>) -> FsResult<Self> {
+        volume
+            .initialize()
+            .map_err(|error| map_btrfs_error(error, "<bootstrap>"))?;
+        Ok(Self { volume })
+    }
+
+    /// Access the format parser.
+    #[must_use]
+    pub const fn volume(&self) -> &Btrfs<R> {
+        &self.volume
+    }
+
+    fn resolve(&mut self, path: &str) -> FsResult<BtrfsEntry> {
+        let components = canonicalise_btrfs_path(path);
+        self.volume
+            .resolve_path(components.iter().map(|component| component.as_bytes()))
+            .map_err(|error| map_btrfs_error(error, path))
+    }
+
+    fn directory_entry(
+        &mut self,
+        parent: &Path,
+        raw: &BtrfsDirEntry,
+        source_path: &str,
+    ) -> FsResult<FsEntry> {
+        let inode = self
+            .volume
+            .inode(raw.entry())
+            .map_err(|error| map_btrfs_error(error, source_path))?;
+        let name = String::from_utf8_lossy(raw.name()).into_owned();
+        Ok(FsEntry {
+            path: parent.join(&name),
+            name,
+            flags: entry_flags(inode.file_type(), &inode),
+            file_id: Some(raw.entry().object_id()),
+            metadata: metadata_of(&inode),
+        })
+    }
+}
+
+impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek + Send> TargetFilesystem for BtrfsFilesystem<R> {
+    fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
+        let entry = self.resolve(path)?;
+        self.volume
+            .read_file(entry)
+            .map_err(|error| map_btrfs_error(error, path))
+    }
+
+    fn try_exists(&mut self, path: &str) -> FsResult<bool> {
+        match self.resolve(path) {
+            Ok(_) => Ok(true),
+            Err(FsError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
+        match self.metadata(path) {
+            Ok(metadata) => Ok(metadata.is_dir),
+            Err(FsError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
+        match self.metadata(path) {
+            Ok(metadata) => Ok(!metadata.is_dir),
+            Err(FsError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
+        let entry = self.resolve(path)?;
+        let inode = self
+            .volume
+            .inode(entry)
+            .map_err(|error| map_btrfs_error(error, path))?;
+        Ok(metadata_of(&inode))
+    }
+
+    fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
+        let directory = self.resolve(path)?;
+        let raw_entries = self
+            .volume
+            .read_dir(directory)
+            .map_err(|error| map_btrfs_error(error, path))?;
+        let normalized = canonicalise_btrfs_path(path).join("/");
+        let parent = if normalized.is_empty() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(normalized)
+        };
+        raw_entries
+            .into_iter()
+            .map(|entry| self.directory_entry(&parent, &entry, path))
+            .collect()
+    }
+
+    fn total_size(&self) -> Option<u64> {
+        Some(self.volume.superblock().total_bytes())
+    }
+
+    fn free_space(&mut self) -> Option<u64> {
+        Some(
+            self.volume
+                .superblock()
+                .total_bytes()
+                .saturating_sub(self.volume.superblock().bytes_used()),
+        )
+    }
+}
+
+/// Driver for read-only Btrfs volumes, including native multi-device layouts.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BtrfsDriver;
 
@@ -48,8 +226,7 @@ impl FilesystemDriver for BtrfsDriver {
         reader: Box<dyn DeviceReader>,
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        let volume = Btrfs::new(reader).map_err(map_btrfs_error)?;
-        traversal_stub(volume.superblock())
+        Ok(Box::new(BtrfsFilesystem::new(reader)?))
     }
 
     fn open_devices(
@@ -57,95 +234,18 @@ impl FilesystemDriver for BtrfsDriver {
         devices: DeviceSet,
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        let supplied = u64::try_from(devices.len()).map_err(|_| {
-            FsError::Filesystem("Btrfs device-member count exceeds u64".to_string())
-        })?;
-        let mut superblocks = Vec::with_capacity(devices.len());
-        for member in devices.into_members() {
-            let volume = Btrfs::new(member.into_reader()).map_err(map_btrfs_error)?;
-            superblocks.push(volume.superblock().clone());
-        }
-        let Some(primary) = superblocks.first() else {
-            return Err(FsError::Filesystem(
-                "Btrfs device set unexpectedly contained no members".to_string(),
-            ));
-        };
-
-        if supplied != primary.num_devices() {
-            return Err(FsError::Filesystem(format!(
-                "Btrfs declares {} device(s), but {supplied} member(s) were supplied; \
-                 use --raw with one --member DRIVE:PARTITION for each additional device",
-                primary.num_devices(),
-            )));
-        }
-        if superblocks
-            .iter()
-            .skip(1)
-            .any(|candidate| candidate.fsid() != primary.fsid())
-        {
-            return Err(FsError::Filesystem(
-                "supplied Btrfs members have different filesystem UUIDs".to_string(),
-            ));
-        }
-        if superblocks
-            .iter()
-            .skip(1)
-            .any(|candidate| candidate.num_devices() != primary.num_devices())
-        {
-            return Err(FsError::Filesystem(
-                "supplied Btrfs members disagree about the device count".to_string(),
-            ));
-        }
-        for (index, member) in superblocks.iter().enumerate() {
-            if superblocks.iter().skip(index + 1).any(|candidate| {
-                candidate.device_id() == member.device_id()
-                    || candidate.device_uuid() == member.device_uuid()
-            }) {
-                return Err(FsError::Filesystem(
-                    "the same Btrfs device ID or UUID was supplied more than once".to_string(),
-                ));
-            }
-        }
-
-        traversal_stub(primary)
+        let readers = devices
+            .into_members()
+            .into_iter()
+            .map(fsmnt_device::DeviceMember::into_reader)
+            .collect();
+        Ok(Box::new(BtrfsFilesystem::from_devices(readers)?))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_btrfs::{PRIMARY_SUPERBLOCK_OFFSET, SUPERBLOCK_MAGIC, SUPERBLOCK_SIZE};
-    use std::io::Cursor;
-
-    fn valid_image() -> Vec<u8> {
-        valid_image_for([0_u8; 16], 1, 1, [1_u8; 16])
-    }
-
-    fn valid_image_for(
-        fsid: [u8; 16],
-        device_count: u64,
-        device_id: u64,
-        device_uuid: [u8; 16],
-    ) -> Vec<u8> {
-        let offset =
-            usize::try_from(PRIMARY_SUPERBLOCK_OFFSET).expect("superblock offset fits usize");
-        let mut image = vec![0_u8; offset + SUPERBLOCK_SIZE];
-        let superblock = &mut image[offset..];
-        superblock[0x20..0x30].copy_from_slice(&fsid);
-        superblock[0x30..0x38].copy_from_slice(&PRIMARY_SUPERBLOCK_OFFSET.to_le_bytes());
-        superblock[0x40..0x48].copy_from_slice(&SUPERBLOCK_MAGIC);
-        superblock[0x48..0x50].copy_from_slice(&101_479u64.to_le_bytes());
-        superblock[0x70..0x78].copy_from_slice(&3_998_008_475_648u64.to_le_bytes());
-        superblock[0x78..0x80].copy_from_slice(&1_684_313_673_728u64.to_le_bytes());
-        superblock[0x80..0x88].copy_from_slice(&6u64.to_le_bytes());
-        superblock[0x88..0x90].copy_from_slice(&device_count.to_le_bytes());
-        superblock[0x90..0x94].copy_from_slice(&4096u32.to_le_bytes());
-        superblock[0x94..0x98].copy_from_slice(&16_384u32.to_le_bytes());
-        superblock[0xc9..0xd1].copy_from_slice(&device_id.to_le_bytes());
-        superblock[0x10b..0x11b].copy_from_slice(&device_uuid);
-        superblock[0x12b..0x137].copy_from_slice(b"fedora-test\0");
-        image
-    }
 
     #[test]
     fn driver_supports_only_btrfs() {
@@ -173,109 +273,20 @@ mod tests {
     }
 
     #[test]
-    fn invalid_superblock_is_reported_before_stub_error() {
-        let reader = Box::new(Cursor::new(vec![0_u8; 0x1_1000]));
+    fn path_resolution_preserves_btrfs_filename_bytes() {
+        assert_eq!(
+            canonicalise_btrfs_path("/a\\b/C:literal/./child/../tail"),
+            ["a\\b", "C:literal", "tail"]
+        );
+    }
+
+    #[test]
+    fn invalid_superblock_is_reported_before_bootstrap() {
+        let reader = Box::new(std::io::Cursor::new(vec![0_u8; 0x1_1000]));
         let Err(error) = BtrfsDriver.open(reader, DetectedBootSector::Btrfs) else {
             panic!("zeroed superblock must fail");
         };
 
-        assert!(error.to_string().contains("invalid Btrfs"), "{error}");
-    }
-
-    #[test]
-    fn valid_volume_reports_unimplemented_traversal() {
-        let reader = Box::new(Cursor::new(valid_image()));
-        let Err(error) = BtrfsDriver.open(reader, DetectedBootSector::Btrfs) else {
-            panic!("stub driver must not return a fake filesystem");
-        };
-        let message = error.to_string();
-
-        assert!(message.contains("fedora-test"), "{message}");
-        assert!(message.contains("generation 101479"), "{message}");
-        assert!(
-            message.contains("traversal is not implemented"),
-            "{message}"
-        );
-    }
-
-    fn member(id: &str, image: Vec<u8>) -> fsmnt_device::DeviceMember {
-        let length = u64::try_from(image.len()).expect("test image length fits u64");
-        fsmnt_device::DeviceMember::new(
-            fsmnt_device::SourceMemberId::Synthetic(id.to_string()),
-            Box::new(Cursor::new(image)),
-            length,
-            512,
-        )
-        .expect("test member")
-    }
-
-    #[test]
-    fn multi_device_open_validates_complete_matching_set() {
-        let fsid = [0x5a; 16];
-        let mut devices = DeviceSet::new(member("one", valid_image_for(fsid, 2, 1, [1; 16])));
-        devices
-            .push(member("two", valid_image_for(fsid, 2, 2, [2; 16])))
-            .expect("second member");
-
-        let Err(error) = BtrfsDriver.open_devices(devices, DetectedBootSector::Btrfs) else {
-            panic!("traversal remains a stub");
-        };
-        assert!(error.to_string().contains("2 device(s)"), "{error}");
-        assert!(
-            error.to_string().contains("traversal is not implemented"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn multi_device_open_rejects_missing_member() {
-        let devices = DeviceSet::new(member("one", valid_image_for([0x5a; 16], 2, 1, [1; 16])));
-
-        let Err(error) = BtrfsDriver.open_devices(devices, DetectedBootSector::Btrfs) else {
-            panic!("missing member must fail");
-        };
-        assert!(
-            error.to_string().contains("but 1 member(s) were supplied"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn multi_device_open_rejects_foreign_member() {
-        let mut devices = DeviceSet::new(member("one", valid_image_for([0x5a; 16], 2, 1, [1; 16])));
-        devices
-            .push(member(
-                "foreign",
-                valid_image_for([0xa5; 16], 2, 2, [2; 16]),
-            ))
-            .expect("foreign identity is distinct");
-
-        let Err(error) = BtrfsDriver.open_devices(devices, DetectedBootSector::Btrfs) else {
-            panic!("foreign member must fail");
-        };
-        assert!(
-            error.to_string().contains("different filesystem UUIDs"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn multi_device_open_rejects_duplicate_device() {
-        let fsid = [0x5a; 16];
-        let image = valid_image_for(fsid, 2, 1, [1; 16]);
-        let mut devices = DeviceSet::new(member("one", image.clone()));
-        devices
-            .push(member("duplicate", image))
-            .expect("synthetic source identities are distinct");
-
-        let Err(error) = BtrfsDriver.open_devices(devices, DetectedBootSector::Btrfs) else {
-            panic!("duplicate member must fail");
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("device ID or UUID was supplied more than once"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("invalid Btrfs magic"), "{error}");
     }
 }

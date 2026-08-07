@@ -19,7 +19,7 @@
 //! | `exFAT`         | [`ExFatFilesystem`]    | [`ExFatDriver`]       |
 //! | ext2/3/4        | [`ExtFilesystem`]      | [`ExtDriver`]         |
 //! | APFS            | [`ApfsFilesystem`]     | [`ApfsDriver`]        |
-//! | Btrfs           | superblock only        | [`BtrfsDriver`]       |
+//! | Btrfs           | [`BtrfsFilesystem`]    | [`BtrfsDriver`]       |
 //! | `BitLocker`     | (unlocks to NTFS)      | [`BitLockerDriver`]   |
 //!
 //! # Quick start
@@ -68,7 +68,7 @@ mod ntfs;
 
 pub use apfs::{ApfsDriver, ApfsFilesystem, VolumeSelector};
 pub use bitlocker::BitLockerDriver;
-pub use btrfs::BtrfsDriver;
+pub use btrfs::{BtrfsDriver, BtrfsFilesystem};
 pub use exfat::{ExFatDriver, ExFatFilesystem};
 pub use ext::{ExtDriver, ExtFilesystem};
 pub use fat::{FatDriver, FatFilesystem};
@@ -78,8 +78,7 @@ use fsmnt_device::DriverRegistry;
 
 /// A registry holding every driver that needs no configuration.
 ///
-/// Registration order is NTFS, FAT, `exFAT`, ext, APFS, Btrfs. The Btrfs
-/// driver validates its superblock but reports traversal as unimplemented.
+/// Registration order is NTFS, FAT, `exFAT`, ext, APFS, Btrfs.
 /// `BitLocker` partitions are *not* covered — that driver carries
 /// credentials, so use [`registry_with_bitlocker`] (a clear-key-only
 /// [`BitLockerDriver::new`] still unlocks suspended volumes).
