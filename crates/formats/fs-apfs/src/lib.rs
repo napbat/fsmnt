@@ -15,8 +15,7 @@
 //! The core parser is implemented and tested: this crate mounts containers,
 //! selects the latest valid checkpoint, resolves virtual objects through
 //! object maps, walks the catalog B-tree, and reads file content. The
-//! on-disk format reference lives in
-//! [`docs/`](https://github.com/DataRelicForensics/tracium/tree/master/crates/fs-apfs/docs).
+//! on-disk format reference lives in this crate's `docs/` directory.
 //!
 //! Most APIs are parser primitives verified against synthetic on-disk
 //! structures; real-image integration tests are fixture-gated (see
@@ -38,18 +37,12 @@
 //! | Sealed-volume integrity metadata and verification | implemented |
 //! | Reaper, Fusion address resolution, keybag parsing | implemented |
 //! | Encryption-rolling state, deleted-file recovery | implemented |
-//! | `decmpfs` zlib compression | partial — [#227] (LZVN/LZFSE: [#281]) |
-//! | `FileVault` key hierarchy and AES-XTS decryption | partial — [#235] |
-//! | Encryption-rolling state v1 layout | open — [#279] |
-//! | Keybag object-subtype decoding | open — [#280] |
+//! | `decmpfs` zlib compression | partial — LZVN and LZFSE not yet decoded |
+//! | `FileVault` key hierarchy and AES-XTS decryption | partial |
+//! | Encryption-rolling state v1 layout | open |
+//! | Keybag object-subtype decoding | open |
 //! | On-disk mutation / write paths | unsupported by design — read-only parser |
 //! | Hardware-bound keys (T2 / Secure Enclave) | unsupported — not derivable offline |
-//!
-//! [#227]: https://github.com/DataRelicForensics/tracium/issues/227
-//! [#235]: https://github.com/DataRelicForensics/tracium/issues/235
-//! [#279]: https://github.com/DataRelicForensics/tracium/issues/279
-//! [#280]: https://github.com/DataRelicForensics/tracium/issues/280
-//! [#281]: https://github.com/DataRelicForensics/tracium/issues/281
 //!
 //! # On-disk layers
 //!

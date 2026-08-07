@@ -10,10 +10,13 @@ members = ["crates/fsmnt-*", "crates/formats/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/napbat/fsmnt"
 # Inherited by the vendored crates under crates/formats/, which declare
-# `authors.workspace = true` / `license.workspace = true`.
-authors = []
-license = "LicenseRef-Proprietary"
+# `authors.workspace = true` / `license.workspace = true`. Some of those
+# crates derive from third-party work under the same dual license; their
+# original copyright notices are preserved in THIRD-PARTY-NOTICES.md.
+authors = ["Jon-Luke Biddle"]
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Internal crates
@@ -28,7 +31,7 @@ fsmnt-fuse = { path = "crates/fsmnt-fuse" }
 fsmnt-parser-core = { path = "crates/fsmnt-parser-core", default-features = false }
 fsmnt-proxy = { path = "crates/fsmnt-proxy" }
 fsmnt-testkit = { path = "crates/fsmnt-testkit" }
-nostdio = { path = "../../coconutbird/nostdio", default-features = false }
+nostdio = { version = "0.2", default-features = false }
 
 # Vendored filesystem-format crates (crates/formats/). Their manifests
 # reference these entries with `<name> = { workspace = true }`.
@@ -143,8 +146,13 @@ pedantic = { level = "deny", priority = -1 }
 
 [package]
 name = "fsmnt"
+description = "Read-only virtual mounting of filesystem images and block devices (NTFS, FAT, exFAT, ext, APFS, Btrfs, BitLocker) via FUSE and Dokan"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
 
 [dependencies]
 clap = { workspace = true }

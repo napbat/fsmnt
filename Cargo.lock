@@ -1008,6 +1008,8 @@ dependencies = [
 [[package]]
 name = "nostdio"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e818b1435af48545c0f098dc3f267548c7c01640651c8f556f8123562df0be54"
 
 [[package]]
 name = "nt-bitlocker"

@@ -1,6 +1,6 @@
 //! Cross-compatibility tests using vectors from `MagnetForensics/rust-lzxpress`.
 //!
-//! Copyright (c) `MagnetForensics` — `MIT` License.
+//! Copyright (c) 2021 Comae Technologies — MIT License.
 //! <https://github.com/MagnetForensics/rust-lzxpress>
 //!
 //! `OSS-Fuzz` crash reproducers are sourced from the same repository.

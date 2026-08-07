@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes the in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # fuser links libfuse3 through pkg-config. Dokan needs nothing extra:
+      # dokan-sys builds the bundled dokany sources when the SDK environment
+      # variable is absent.
+      - name: Install FUSE
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FUSE
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
+      # Fixture-backed tests skip themselves when the generated images are
+      # absent; the tracked canonical fixtures and fuzz regressions still run.
+      - run: cargo test --locked --workspace
+
+  macos:
+    # The mount backend needs macFUSE, whose cask install is not reliable on
+    # hosted runners, so macOS coverage is scoped to the portable parsers —
+    # the bulk of the code and the part with real platform risk.
+    name: check parsers (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo check --locked --all-targets
+          -p fsmnt-core -p fsmnt-parser-core
+          -p fs-ntfs -p fs-fat -p fs-exfat -p fs-ext -p fs-apfs -p fs-btrfs
+          -p nt-compression -p nt-bitlocker
+
+  policy:
+    name: workspace policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The no_std invariant is a correctness property, so it gates here as
+      # well as in the prek hooks. The 1000-line file limit is a guideline
+      # rather than a gate; it stays a local pre-commit hook only.
+      - name: Format crates stay no_std
+        run: python3 scripts/check_formats_no_std.py

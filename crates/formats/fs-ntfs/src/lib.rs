@@ -30,7 +30,15 @@
 //! }
 //! ```
 //!
-//! Check out the [docs](https://docs.rs/ntfs), the tests, and the supplied [`ntfs-shell`](https://github.com/ColinFinck/ntfs/tree/master/examples/ntfs-shell) application for more examples on how to use the `ntfs` library.
+//! The crate's own tests cover further usage patterns.
+//!
+//! # Provenance
+//!
+//! This crate derives from the [`ntfs`](https://github.com/ColinFinck/ntfs)
+//! crate by Colin Finck, used under `MIT OR Apache-2.0` — the same dual
+//! license this workspace carries. It has been adapted to parse through the
+//! first-party `fsmnt-parser-core` reader and error traits. See
+//! `THIRD-PARTY-NOTICES.md` at the repository root for the full notice.
 //!
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
