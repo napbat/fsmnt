@@ -34,7 +34,9 @@
 //! [`proxy`] helper automatically when direct raw-device access is denied.
 //!
 //! The [`drivers`] layer supplies the parser adapters: NTFS, FAT12/16/32,
-//! `exFAT`, ext2/3/4, APFS, and `BitLocker` (which unlocks to NTFS).
+//! `exFAT`, ext2/3/4, APFS, and `BitLocker` (which unlocks to NTFS). Btrfs
+//! volumes are identified and their primary superblocks are parsed, but
+//! filesystem-tree traversal is not implemented yet.
 //! [`drivers::default_registry`] returns a [`device::DriverRegistry`] with
 //! every driver that needs no configuration; `BitLocker` credentials ride
 //! on [`drivers::BitLockerDriver`], which
@@ -129,13 +131,30 @@ pub struct OpenedPartition {
     pub size_bytes: u64,
 }
 
+/// Selects which operating-system view is used to open a device partition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PartitionOpenMode {
+    /// Prefer the volume already mounted by the operating system, falling
+    /// back to the raw partition when no mapped volume is available.
+    #[default]
+    PreferMounted,
+    /// Bypass any mounted volume and read the partition directly from the
+    /// physical drive.
+    Raw,
+}
+
 /// Open partition `partition` (0-based, counting non-empty entries) on
 /// `drive` using the filesystem drivers in `drivers`.
 ///
 /// Works with GPT and MBR partition tables; for a bare (unpartitioned)
-/// filesystem, pass `partition = 0` to open the whole disk.  The drive is
-/// opened twice: once to read the partition table, once for the returned
-/// filesystem's own reader.
+/// filesystem, pass `partition = 0` to open the whole disk. The physical
+/// drive is opened to read the partition table and reopened if the raw
+/// partition becomes the filesystem source.
+///
+/// The platform's mounted-volume view is preferred when available. On
+/// Windows, this means an OS-unlocked encrypted volume can be read without
+/// supplying its key again. Use [`open_device_partition_with_mode`] with
+/// [`PartitionOpenMode::Raw`] to bypass that view.
 ///
 /// The enumerator type parameter selects the platform: on Windows, Linux,
 /// and macOS, use [`HostDrives`].
@@ -150,6 +169,31 @@ pub fn open_device_partition<E: HostDriveEnumerator>(
     drive: &HostDriveId,
     partition: usize,
     drivers: &DriverRegistry,
+) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
+    open_device_partition_with_mode::<E>(
+        drive,
+        partition,
+        drivers,
+        PartitionOpenMode::PreferMounted,
+    )
+}
+
+/// Open a device partition using the requested operating-system view.
+///
+/// [`PartitionOpenMode::PreferMounted`] asks the platform enumerator for the
+/// volume mapped to the partition's physical extent before opening the raw
+/// partition. [`PartitionOpenMode::Raw`] bypasses that lookup.
+///
+/// # Errors
+///
+/// Returns an error if the drive cannot be opened, the partition does not
+/// exist, the disk layout is unrecognized, or no registered driver can open
+/// the detected filesystem.
+pub fn open_device_partition_with_mode<E: HostDriveEnumerator>(
+    drive: &HostDriveId,
+    partition: usize,
+    drivers: &DriverRegistry,
+    mode: PartitionOpenMode,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
     let info = E::get_drive_info(drive).ok();
     let sector_size = info.as_ref().and_then(|i| i.sector_size).unwrap_or(512);
@@ -203,6 +247,12 @@ pub fn open_device_partition<E: HostDriveEnumerator>(
         }
     };
 
+    if mode == PartitionOpenMode::PreferMounted
+        && let Some(opened) = try_open_mounted_volume::<E>(drive, offset, size, drivers)?
+    {
+        return Ok(opened);
+    }
+
     let detected = disk.detect_boot_sector_at(offset)?;
 
     // Re-open the device so the filesystem owns an independent reader.
@@ -216,3 +266,26 @@ pub fn open_device_partition<E: HostDriveEnumerator>(
         size_bytes: if size == u64::MAX { 0 } else { size },
     })
 }
+
+fn try_open_mounted_volume<E: HostDriveEnumerator>(
+    drive: &HostDriveId,
+    offset: u64,
+    size: u64,
+    drivers: &DriverRegistry,
+) -> Result<Option<OpenedPartition>, Box<dyn std::error::Error>> {
+    let Some(mut reader) = E::open_volume_at(drive, offset)? else {
+        return Ok(None);
+    };
+    let detected = fsmnt_device::detect_boot_sector_at(&mut reader, 0)?;
+
+    std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0))?;
+    let filesystem = drivers.open(Box::new(reader), detected)?;
+    Ok(Some(OpenedPartition {
+        filesystem,
+        detected,
+        size_bytes: if size == u64::MAX { 0 } else { size },
+    }))
+}
+
+#[cfg(test)]
+mod tests;

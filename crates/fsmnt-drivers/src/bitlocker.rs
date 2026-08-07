@@ -159,6 +159,7 @@ mod tests {
             DetectedBootSector::ExFat,
             DetectedBootSector::Ext,
             DetectedBootSector::Apfs,
+            DetectedBootSector::Btrfs,
             DetectedBootSector::GptPartitioned,
             DetectedBootSector::Unknown,
         ] {

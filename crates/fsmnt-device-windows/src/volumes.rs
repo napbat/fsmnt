@@ -1,29 +1,28 @@
-//! Windows volume enumeration — maps physical-disk extents to drive letters.
+//! Windows volume enumeration — maps physical-disk extents to volume GUIDs.
 //!
 //! Uses `FindFirstVolumeW`/`FindNextVolumeW` to discover all volumes,
 //! `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` to find which physical disk and
 //! byte offset each volume lives on, and
-//! `GetVolumePathNamesForVolumeNameW` to resolve drive letters.
+//! `GetVolumePathNamesForVolumeNameW` to resolve assigned mount points.
 //!
 //! This mapping is what lets
 //! [`open_volume_at`](fsmnt_device::HostDriveEnumerator::open_volume_at)
-//! read OS-decrypted data (e.g. an unlocked `BitLocker` partition) through
-//! the mounted volume (`\\.\C:`) instead of the raw physical drive.
+//! read the operating system's volume view (including decrypted data from an
+//! unlocked `BitLocker` partition) through its volume GUID instead of the raw
+//! physical drive.
 
 use std::ffi::c_void;
-use std::fs::OpenOptions;
-use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
-    GetVolumePathNamesForVolumeNameW, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+    FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetVolumePathNamesForVolumeNameW,
+    IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::core::PCWSTR;
 
-use crate::drives::{ioctl_len, read_i64_le, read_u32_le};
+use crate::drives::{ioctl_len, open_device, read_i64_le, read_u32_le};
 
 /// Byte offset of `NumberOfDiskExtents` within `VOLUME_DISK_EXTENTS`.
 const VDE_NUMBER_OF_EXTENTS: usize = 0;
@@ -133,11 +132,7 @@ pub fn find_volume_for_extent(disk_number: u32, offset: u64) -> Option<VolumeInf
 fn query_volume(vol_path: &str) -> Option<VolumeInfo> {
     // Open the volume (strip the trailing backslash for CreateFile).
     let device_path = vol_path.trim_end_matches('\\');
-    let file = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
-        .open(device_path)
-        .ok()?;
+    let file = open_device(device_path).ok()?;
 
     let mut buffer = [0u8; 256];
     let mut bytes_returned: u32 = 0;

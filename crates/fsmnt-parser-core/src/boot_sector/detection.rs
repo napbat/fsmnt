@@ -1,6 +1,6 @@
 use super::{
     BOOT_SECTOR_SIZE, BOOT_SIGNATURE, BootSectorHeader, DosBpb, ExFatBootSector, Fat16Ebpb,
-    Fat32Ebpb, NtfsEbpb, probe_apfs, probe_ext,
+    Fat32Ebpb, NtfsEbpb, probe_apfs, probe_btrfs_volume, probe_ext,
 };
 use zerocopy::byteorder::LittleEndian;
 use zerocopy::{FromBytes, Immutable, KnownLayout, U16, Unaligned};
@@ -50,6 +50,8 @@ pub enum DetectedBootSector {
     Ext,
     /// APFS container (one or more volumes; `NXSB` block-zero superblock)
     Apfs,
+    /// Btrfs filesystem (primary superblock at 64 KiB)
+    Btrfs,
     /// BitLocker-encrypted volume (detected container/encrypted-volume type)
     BitLocker,
     /// MBR partitioned disk (need to enumerate partitions)
@@ -126,6 +128,7 @@ impl DetectedBootSector {
                 | DetectedBootSector::ExFat
                 | DetectedBootSector::Ext
                 | DetectedBootSector::Apfs
+                | DetectedBootSector::Btrfs
         )
     }
 
@@ -142,19 +145,20 @@ impl DetectedBootSector {
 /// Diagnose a boot sector from raw bytes and retain distinct failure modes.
 ///
 /// Trusts the 512-byte boot signature path first — a disk whose first sector
-/// identifies as MBR/GPT/FAT/NTFS/exFAT/BitLocker is not a bare ext image,
-/// even if bytes at 0x438 happen to pass the ext sanity checks. Only when
-/// the standard classification yields `Unknown` do we fall through to the
-/// ext superblock probe (which requires at least
-/// [`FS_DETECT_PROBE_SIZE`] bytes).
+/// identifies as MBR/GPT/FAT/NTFS/exFAT/BitLocker wins over later filesystem
+/// probes. Only when the standard classification yields `Unknown` do we test
+/// APFS, Btrfs, and ext superblocks.
 #[must_use]
 pub fn diagnose_boot_sector(boot_sector: &[u8]) -> BootSectorDiagnosis {
     let standard = diagnose_boot_sector_standard(boot_sector);
     if matches!(standard, BootSectorDiagnosis::Unknown(_)) {
-        // APFS and ext both lack the 0xAA55 boot signature, so they are
-        // probed only after standard detection reports Unknown.
+        // These formats lack the 0xAA55 boot signature, so they are probed
+        // only after standard detection reports Unknown.
         if probe_apfs(boot_sector) {
             return BootSectorDiagnosis::Detected(DetectedBootSector::Apfs);
+        }
+        if probe_btrfs_volume(boot_sector) {
+            return BootSectorDiagnosis::Detected(DetectedBootSector::Btrfs);
         }
         if probe_ext(boot_sector) {
             return BootSectorDiagnosis::Detected(DetectedBootSector::Ext);

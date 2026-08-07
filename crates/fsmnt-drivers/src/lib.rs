@@ -19,6 +19,7 @@
 //! | `exFAT`         | [`ExFatFilesystem`]    | [`ExFatDriver`]       |
 //! | ext2/3/4        | [`ExtFilesystem`]      | [`ExtDriver`]         |
 //! | APFS            | [`ApfsFilesystem`]     | [`ApfsDriver`]        |
+//! | Btrfs           | superblock only        | [`BtrfsDriver`]       |
 //! | `BitLocker`     | (unlocks to NTFS)      | [`BitLockerDriver`]   |
 //!
 //! # Quick start
@@ -59,6 +60,7 @@
 mod adapter;
 mod apfs;
 mod bitlocker;
+mod btrfs;
 mod exfat;
 mod ext;
 mod fat;
@@ -66,6 +68,7 @@ mod ntfs;
 
 pub use apfs::{ApfsDriver, ApfsFilesystem, VolumeSelector};
 pub use bitlocker::BitLockerDriver;
+pub use btrfs::BtrfsDriver;
 pub use exfat::{ExFatDriver, ExFatFilesystem};
 pub use ext::{ExtDriver, ExtFilesystem};
 pub use fat::{FatDriver, FatFilesystem};
@@ -75,9 +78,10 @@ use fsmnt_device::DriverRegistry;
 
 /// A registry holding every driver that needs no configuration.
 ///
-/// Registration order is NTFS, FAT, `exFAT`, ext, APFS.  `BitLocker`
-/// partitions are *not* covered — that driver carries credentials, so use
-/// [`registry_with_bitlocker`] (a clear-key-only
+/// Registration order is NTFS, FAT, `exFAT`, ext, APFS, Btrfs. The Btrfs
+/// driver validates its superblock but reports traversal as unimplemented.
+/// `BitLocker` partitions are *not* covered — that driver carries
+/// credentials, so use [`registry_with_bitlocker`] (a clear-key-only
 /// [`BitLockerDriver::new`] still unlocks suspended volumes).
 #[must_use]
 pub fn default_registry() -> DriverRegistry {
@@ -87,6 +91,7 @@ pub fn default_registry() -> DriverRegistry {
     registry.register(Box::new(ExFatDriver));
     registry.register(Box::new(ExtDriver));
     registry.register(Box::new(ApfsDriver));
+    registry.register(Box::new(BtrfsDriver));
     registry
 }
 
@@ -112,7 +117,7 @@ mod tests {
         assert!(!registry.is_empty());
         assert_eq!(
             registry.names(),
-            ["ntfs", "fat", "exfat", "ext", "apfs"],
+            ["ntfs", "fat", "exfat", "ext", "apfs", "btrfs"],
             "registration order is part of the dispatch contract"
         );
     }
@@ -128,6 +133,7 @@ mod tests {
             (D::ExFat, "exfat"),
             (D::Ext, "ext"),
             (D::Apfs, "apfs"),
+            (D::Btrfs, "btrfs"),
         ] {
             let driver = registry
                 .find(detected)
@@ -169,7 +175,7 @@ mod tests {
         let registry = registry_with_bitlocker(BitLockerDriver::new());
         assert_eq!(
             registry.names(),
-            ["ntfs", "fat", "exfat", "ext", "apfs", "bitlocker"]
+            ["ntfs", "fat", "exfat", "ext", "apfs", "btrfs", "bitlocker"]
         );
         let driver = registry.find(D::BitLocker).expect("bitlocker driver");
         assert_eq!(driver.name(), "bitlocker");

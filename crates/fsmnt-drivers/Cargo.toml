@@ -29,6 +29,7 @@ fs-ext = { workspace = true, features = [
     "verity",
 ] }
 fs-apfs = { workspace = true, features = ["std", "chrono"] }
+fs-btrfs = { workspace = true, features = ["std"] }
 fs-exfat = { workspace = true, features = ["std", "chrono"] }
 nt-bitlocker = { workspace = true }
 

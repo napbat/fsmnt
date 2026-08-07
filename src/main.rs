@@ -91,6 +91,11 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         partition: usize,
 
+        /// Bypass any operating-system-mounted volume and read the raw
+        /// partition directly.
+        #[arg(long)]
+        raw: bool,
+
         /// Volume label shown in the OS file manager (defaults to the
         /// drive model or ID).
         #[arg(long)]
@@ -141,12 +146,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             drive,
             mountpoint,
             partition,
+            raw,
             volname,
             recovery_password,
             bek_file,
         } => handle_mount_device(
             &drive,
             partition,
+            raw,
             &mountpoint,
             volname.as_deref(),
             recovery_password,
@@ -231,6 +238,7 @@ fn fs_label(detected: fsmnt::device::DetectedBootSector) -> &'static str {
         D::ExFat => "exfat",
         D::Ext => "extfs",
         D::Apfs => "apfs",
+        D::Btrfs => "btrfs",
         D::MbrPartitioned | D::GptPartitioned | D::Unknown => "unknown",
     }
 }
@@ -379,7 +387,7 @@ fn handle_mount_image(
     recovery_password: Option<String>,
     bek_file: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use fsmnt::device::{DetectedBootSector, FS_DETECT_PROBE_SIZE, PartitionReader};
+    use fsmnt::device::{DetectedBootSector, PartitionReader, detect_boot_sector_at};
     use std::io::{Seek, SeekFrom};
 
     let mut file = std::fs::File::open(image)
@@ -393,12 +401,7 @@ fn handle_mount_image(
         .into());
     }
 
-    // Classify the filesystem at `offset`.  A short tail is fine: detection
-    // tolerates a probe smaller than FS_DETECT_PROBE_SIZE.
-    let mut probe = vec![0u8; FS_DETECT_PROBE_SIZE];
-    file.seek(SeekFrom::Start(offset))?;
-    let read = read_up_to(&mut file, &mut probe)?;
-    let detected = DetectedBootSector::from_bytes(&probe[..read]);
+    let detected = detect_boot_sector_at(&mut file, offset)?;
 
     if detected == DetectedBootSector::MbrPartitioned
         || detected == DetectedBootSector::GptPartitioned
@@ -441,27 +444,12 @@ fn handle_mount_image(
     )
 }
 
-/// Fill `buf` as far as the reader allows, returning the byte count.
-///
-/// Unlike `read_exact` this tolerates a source shorter than `buf`.
-fn read_up_to<R: std::io::Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(filled)
-}
-
 /// Mount a partition from a physical drive.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn handle_mount_device(
     drive: &str,
     partition: usize,
+    raw: bool,
     mountpoint: &str,
     volname: Option<&str>,
     recovery_password: Option<String>,
@@ -473,7 +461,13 @@ fn handle_mount_device(
     let id = HostDriveId::new(drive);
     let drivers = build_registry(recovery_password, bek_file)?;
 
-    let opened = fsmnt::open_device_partition::<HostDrives>(&id, partition, &drivers)?;
+    let mode = if raw {
+        fsmnt::PartitionOpenMode::Raw
+    } else {
+        fsmnt::PartitionOpenMode::PreferMounted
+    };
+    let opened =
+        fsmnt::open_device_partition_with_mode::<HostDrives>(&id, partition, &drivers, mode)?;
 
     ensure_unix_mountpoint(mountpoint)?;
 

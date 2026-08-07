@@ -74,7 +74,7 @@ fn test_diagnose_boot_sector_unsupported_hpfs() {
 }
 
 // ========================================================================
-// DetectedBootSector ext detection tests
+// DetectedBootSector non-BPB filesystem detection tests
 // ========================================================================
 
 fn synthesize_ext_superblock(buf: &mut [u8]) {
@@ -108,6 +108,23 @@ fn synthesize_apfs_superblock(buf: &mut [u8]) {
     buf[0x24..0x28].copy_from_slice(&4096u32.to_le_bytes());
 }
 
+fn synthesize_btrfs_superblock(buf: &mut [u8]) {
+    let base = 0x1_0000;
+    buf[base + 0x30..base + 0x38].copy_from_slice(&0x1_0000u64.to_le_bytes());
+    buf[base + 0x40..base + 0x48].copy_from_slice(b"_BHRfS_M");
+    buf[base + 0x48..base + 0x50].copy_from_slice(&42u64.to_le_bytes());
+    buf[base + 0x70..base + 0x78].copy_from_slice(&1_073_741_824u64.to_le_bytes());
+    buf[base + 0x78..base + 0x80].copy_from_slice(&16_777_216u64.to_le_bytes());
+    buf[base + 0x88..base + 0x90].copy_from_slice(&1u64.to_le_bytes());
+    buf[base + 0x90..base + 0x94].copy_from_slice(&4096u32.to_le_bytes());
+    buf[base + 0x94..base + 0x98].copy_from_slice(&16_384u32.to_le_bytes());
+}
+
+fn btrfs_volume_probe() -> Vec<u8> {
+    let offset = usize::try_from(BTRFS_PRIMARY_SUPERBLOCK_OFFSET).expect("offset fits usize");
+    vec![0_u8; offset + BTRFS_SUPERBLOCK_PROBE_SIZE]
+}
+
 #[test]
 fn from_bytes_detects_apfs_container() {
     let mut buf = vec![0u8; FS_DETECT_PROBE_SIZE];
@@ -125,6 +142,55 @@ fn from_bytes_rejects_apfs_with_bad_block_size() {
     let mut buf = vec![0u8; FS_DETECT_PROBE_SIZE];
     synthesize_apfs_superblock(&mut buf);
     buf[0x24..0x28].copy_from_slice(&5000u32.to_le_bytes());
+    assert_eq!(
+        DetectedBootSector::from_bytes(&buf),
+        DetectedBootSector::Unknown
+    );
+}
+
+#[test]
+fn from_bytes_detects_btrfs_primary_superblock() {
+    let mut buf = btrfs_volume_probe();
+    synthesize_btrfs_superblock(&mut buf);
+
+    assert_eq!(
+        DetectedBootSector::from_bytes(&buf),
+        DetectedBootSector::Btrfs
+    );
+    assert!(DetectedBootSector::Btrfs.is_filesystem());
+}
+
+#[test]
+fn from_bytes_rejects_btrfs_magic_without_primary_address() {
+    let mut buf = btrfs_volume_probe();
+    synthesize_btrfs_superblock(&mut buf);
+    buf[0x1_0030..0x1_0038].fill(0);
+
+    assert_eq!(
+        DetectedBootSector::from_bytes(&buf),
+        DetectedBootSector::Unknown
+    );
+}
+
+#[test]
+fn from_bytes_rejects_btrfs_with_invalid_node_geometry() {
+    let mut buf = btrfs_volume_probe();
+    synthesize_btrfs_superblock(&mut buf);
+    buf[0x1_0094..0x1_0098].copy_from_slice(&8192u32.to_le_bytes());
+    buf[0x1_0090..0x1_0094].copy_from_slice(&16_384u32.to_le_bytes());
+
+    assert_eq!(
+        DetectedBootSector::from_bytes(&buf),
+        DetectedBootSector::Unknown
+    );
+}
+
+#[test]
+fn from_bytes_requires_btrfs_geometry_region() {
+    let mut buf = vec![0u8; 0x1_0097];
+    let base = 0x1_0000;
+    buf[base + 0x40..base + 0x48].copy_from_slice(b"_BHRfS_M");
+
     assert_eq!(
         DetectedBootSector::from_bytes(&buf),
         DetectedBootSector::Unknown
@@ -340,6 +406,7 @@ fn is_partition_table_true_for_mbr_and_gpt_only() {
     assert!(!DetectedBootSector::ExFat.is_partition_table());
     assert!(!DetectedBootSector::Ext.is_partition_table());
     assert!(!DetectedBootSector::Apfs.is_partition_table());
+    assert!(!DetectedBootSector::Btrfs.is_partition_table());
     assert!(!DetectedBootSector::BitLocker.is_partition_table());
     assert!(!DetectedBootSector::Unknown.is_partition_table());
 }

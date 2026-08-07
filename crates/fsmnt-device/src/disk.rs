@@ -16,8 +16,8 @@ use std::mem::size_of;
 
 use crate::partition_reader::PartitionReader;
 use crate::{
-    BOOT_SECTOR_SIZE, DetectedBootSector, FS_DETECT_PROBE_SIZE, GptHeader, GptPartitionEntry, Mbr,
-    MbrPartitionEntry, read_gpt_header,
+    BOOT_SECTOR_SIZE, DetectedBootSector, GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry,
+    read_gpt_header,
 };
 
 /// The layout/structure of a disk.
@@ -291,23 +291,20 @@ impl<R: Read + Seek> Disk<R> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the probe cannot be read.
+    /// Returns an error if seeking or reading the probe fails. Reaching the
+    /// end of a short source is not an error; detection uses the bytes read.
     pub fn detect_boot_sector_at(&mut self, offset: u64) -> std::io::Result<DetectedBootSector> {
-        self.reader.seek(SeekFrom::Start(offset))?;
-        let mut buf = [0u8; FS_DETECT_PROBE_SIZE];
-        self.reader.read_exact(&mut buf)?;
-        Ok(DetectedBootSector::from_bytes(&buf))
+        crate::detection::detect_boot_sector_at(&mut self.reader, offset)
     }
 
     /// Detect the disk layout by classifying the first sectors.
     fn detect_layout(reader: &mut R, sector_size: u32) -> std::io::Result<DiskLayout> {
-        // Read FS_DETECT_PROBE_SIZE bytes so filesystem-type detection
-        // (including ext) works for bare-filesystem disks.
-        reader.seek(SeekFrom::Start(0))?;
-        let mut buf = [0u8; FS_DETECT_PROBE_SIZE];
-        reader.read_exact(&mut buf)?;
+        let probe = crate::detection::probe_at(reader, 0)?;
+        if probe.prefix.len() < BOOT_SECTOR_SIZE {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
 
-        let detected = DetectedBootSector::from_bytes(&buf);
+        let detected = probe.detected;
 
         match detected {
             DetectedBootSector::Ntfs
@@ -317,7 +314,8 @@ impl<R: Read + Seek> Disk<R> {
             | DetectedBootSector::ExFat
             | DetectedBootSector::BitLocker
             | DetectedBootSector::Ext
-            | DetectedBootSector::Apfs => Ok(DiskLayout::Bare(detected)),
+            | DetectedBootSector::Apfs
+            | DetectedBootSector::Btrfs => Ok(DiskLayout::Bare(detected)),
 
             DetectedBootSector::GptPartitioned => {
                 let header = read_gpt_header(reader, u64::from(sector_size))?;
@@ -325,8 +323,7 @@ impl<R: Read + Seek> Disk<R> {
             }
 
             DetectedBootSector::MbrPartitioned => {
-                // MBR parsing only looks at the first 512 bytes of buf.
-                let mbr = Mbr::from_bytes(&buf[..BOOT_SECTOR_SIZE]).ok_or_else(|| {
+                let mbr = Mbr::from_bytes(&probe.prefix[..BOOT_SECTOR_SIZE]).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid MBR")
                 })?;
                 Ok(DiskLayout::Mbr {

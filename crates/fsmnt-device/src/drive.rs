@@ -280,18 +280,23 @@ pub trait HostDriveEnumerator {
     /// (e.g. insufficient privileges).
     fn open_drive(id: &HostDriveId) -> HostDriveResult<Self::Reader>;
 
-    /// Try to open a decrypted volume for a partition on the given drive.
+    /// Try to open the operating system's volume for a partition.
     ///
-    /// On Windows, when an encrypted volume (e.g. `BitLocker`) is unlocked by
-    /// the OS, the decrypted data is accessible via the mounted volume
-    /// (`\\.\X:`).  This method maps a physical drive + byte offset to such
-    /// a volume and returns a reader over the already-decrypted data.
+    /// On Windows, this maps a physical drive and byte offset to the matching
+    /// volume GUID. If that volume is encrypted and already unlocked, reads
+    /// use the operating system's decrypted view.
     ///
-    /// Returns `None` on platforms that don't support this, or when no
+    /// Returns `Ok(None)` on platforms that don't support this, or when no
     /// mounted volume matches the given extent.
-    #[must_use]
-    fn open_volume_at(_drive_id: &HostDriveId, _offset: u64) -> Option<Self::Reader> {
-        None
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a matching volume is found but cannot be opened.
+    fn open_volume_at(
+        _drive_id: &HostDriveId,
+        _offset: u64,
+    ) -> HostDriveResult<Option<Self::Reader>> {
+        Ok(None)
     }
 }
 

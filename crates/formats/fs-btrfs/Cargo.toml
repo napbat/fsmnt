@@ -1,0 +1,20 @@
+[package]
+name = "fs-btrfs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+fsmnt-parser-core = { workspace = true, default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+fsmnt-testkit = { workspace = true }
+
+[features]
+default = []
+std = ["fsmnt-parser-core/std", "thiserror/std"]
+
+[lints]
+workspace = true

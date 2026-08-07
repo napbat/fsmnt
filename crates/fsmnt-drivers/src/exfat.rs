@@ -257,6 +257,7 @@ mod tests {
             DetectedBootSector::Fat32,
             DetectedBootSector::Ext,
             DetectedBootSector::Apfs,
+            DetectedBootSector::Btrfs,
             DetectedBootSector::BitLocker,
             DetectedBootSector::GptPartitioned,
             DetectedBootSector::Unknown,

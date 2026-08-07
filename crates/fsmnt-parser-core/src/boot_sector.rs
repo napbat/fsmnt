@@ -20,10 +20,28 @@ use zerocopy::{FromBytes, Immutable, KnownLayout, U16, U32, U64, Unaligned};
 /// Standard boot sector size for IBM PC compatible systems
 pub const BOOT_SECTOR_SIZE: usize = 512;
 
-/// Probe length for filesystem-type detection. Large enough to include
-/// ext's superblock magic at offset 0x438. Callers that want filesystem
-/// detection (not just partition-table detection) should read this many
-/// bytes before calling [`DetectedBootSector::from_bytes`].
+const BTRFS_SUPERBLOCK_MAGIC_OFFSET: usize = 0x40;
+const BTRFS_TOTAL_BYTES_OFFSET: usize = 0x70;
+const BTRFS_BYTES_USED_OFFSET: usize = 0x78;
+const BTRFS_NUM_DEVICES_OFFSET: usize = 0x88;
+const BTRFS_SECTOR_SIZE_OFFSET: usize = 0x90;
+const BTRFS_NODE_SIZE_OFFSET: usize = 0x94;
+
+/// Byte offset of the primary Btrfs superblock within a volume.
+pub const BTRFS_PRIMARY_SUPERBLOCK_OFFSET: u64 = 0x1_0000;
+
+/// Bytes required from a Btrfs superblock to validate its identity and
+/// fundamental geometry.
+pub const BTRFS_SUPERBLOCK_PROBE_SIZE: usize = BTRFS_NODE_SIZE_OFFSET + 4;
+
+/// Signature stored in every Btrfs superblock.
+pub const BTRFS_SUPERBLOCK_MAGIC: [u8; 8] = *b"_BHRfS_M";
+
+/// Probe length for prefix-based filesystem detection.
+///
+/// This reaches ext's superblock fields at offset 0x438. Btrfs uses a sparse
+/// secondary probe at [`BTRFS_PRIMARY_SUPERBLOCK_OFFSET`] instead of forcing
+/// every caller to read the intervening 64 KiB.
 pub const FS_DETECT_PROBE_SIZE: usize = 2048;
 
 /// Boot signature value (little-endian: 0x55 at offset 510, 0xAA at offset 511)
@@ -43,6 +61,19 @@ fn read_u16_le(buf: &[u8], off: usize) -> u16 {
 
 fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
+
+fn read_u64_le(buf: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes([
+        buf[off],
+        buf[off + 1],
+        buf[off + 2],
+        buf[off + 3],
+        buf[off + 4],
+        buf[off + 5],
+        buf[off + 6],
+        buf[off + 7],
+    ])
 }
 
 /// Prefix probe for ext2/ext3/ext4 superblock. Runs cheap sanity checks
@@ -102,6 +133,50 @@ fn probe_apfs(buf: &[u8]) -> bool {
     }
     let block_size = read_u32_le(buf, APFS_NX_BLOCK_SIZE_OFFSET);
     block_size.is_power_of_two() && (512..=65536).contains(&block_size)
+}
+
+/// Validate identifying fields from a Btrfs primary superblock.
+///
+/// The magic is anchored by the superblock's self-address and basic volume
+/// geometry so random payload bytes do not classify as a filesystem.
+#[must_use]
+pub fn is_btrfs_primary_superblock(buf: &[u8]) -> bool {
+    if buf.len() < BTRFS_SUPERBLOCK_PROBE_SIZE {
+        return false;
+    }
+
+    if buf[BTRFS_SUPERBLOCK_MAGIC_OFFSET
+        ..BTRFS_SUPERBLOCK_MAGIC_OFFSET + BTRFS_SUPERBLOCK_MAGIC.len()]
+        != BTRFS_SUPERBLOCK_MAGIC
+    {
+        return false;
+    }
+    if read_u64_le(buf, 0x30) != BTRFS_PRIMARY_SUPERBLOCK_OFFSET {
+        return false;
+    }
+
+    let total_bytes = read_u64_le(buf, BTRFS_TOTAL_BYTES_OFFSET);
+    let bytes_used = read_u64_le(buf, BTRFS_BYTES_USED_OFFSET);
+    if total_bytes < BTRFS_PRIMARY_SUPERBLOCK_OFFSET + 0x1000 || bytes_used > total_bytes {
+        return false;
+    }
+    if read_u64_le(buf, BTRFS_NUM_DEVICES_OFFSET) == 0 {
+        return false;
+    }
+
+    let sector_size = read_u32_le(buf, BTRFS_SECTOR_SIZE_OFFSET);
+    if !sector_size.is_power_of_two() || !(4096..=65536).contains(&sector_size) {
+        return false;
+    }
+    let node_size = read_u32_le(buf, BTRFS_NODE_SIZE_OFFSET);
+    node_size.is_power_of_two() && (sector_size..=65536).contains(&node_size)
+}
+
+fn probe_btrfs_volume(buf: &[u8]) -> bool {
+    let Ok(offset) = usize::try_from(BTRFS_PRIMARY_SUPERBLOCK_OFFSET) else {
+        return false;
+    };
+    buf.get(offset..).is_some_and(is_btrfs_primary_superblock)
 }
 
 // ============================================================================

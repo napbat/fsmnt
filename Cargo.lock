@@ -508,6 +508,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-btrfs"
+version = "0.1.0"
+dependencies = [
+ "fsmnt-parser-core",
+ "fsmnt-testkit",
+ "thiserror",
+]
+
+[[package]]
 name = "fs-exfat"
 version = "0.1.0"
 dependencies = [
@@ -668,6 +677,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fs-apfs",
+ "fs-btrfs",
  "fs-exfat",
  "fs-ext",
  "fs-fat",

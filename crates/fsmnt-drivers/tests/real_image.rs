@@ -9,7 +9,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use fsmnt_core::TargetFilesystem;
-use fsmnt_device::{DetectedBootSector, FS_DETECT_PROBE_SIZE};
+use fsmnt_device::{DetectedBootSector, FS_DETECT_PROBE_SIZE, detect_boot_sector_at};
 use fsmnt_drivers::default_registry;
 
 /// Load a fixture image from a sibling vendored crate, or `None` if the
@@ -30,8 +30,7 @@ fn fixture(crate_name: &str, file: &str) -> Option<Vec<u8>> {
 
 /// Detect the filesystem type at the start of `image`.
 fn detect(image: &[u8]) -> DetectedBootSector {
-    let probe_len = image.len().min(FS_DETECT_PROBE_SIZE);
-    DetectedBootSector::from_bytes(&image[..probe_len])
+    detect_boot_sector_at(&mut Cursor::new(image), 0).expect("detect image")
 }
 
 /// Open `image` through the registry exactly as the mount path does.
@@ -77,7 +76,7 @@ fn exfat_image_detects_and_reads_through_registry() {
         .read(&file.name)
         .unwrap_or_else(|e| panic!("read {:?}: {e}", file.name));
     assert_eq!(
-        data.len() as u64,
+        u64::try_from(data.len()).expect("buffer length fits u64"),
         file.metadata.size,
         "short read for {:?}",
         file.name,

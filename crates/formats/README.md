@@ -1,6 +1,6 @@
 # formats
 
-Home of filesystem-format parser crates (NTFS, FAT32, ext, APFS, …).
+Home of filesystem-format parser crates (NTFS, FAT32, ext, APFS, Btrfs, …).
 
 Each crate in this directory parses one on-disk format and exposes a portable
 parser API. The parsers depend on the first-party, `no_std`-capable

@@ -30,13 +30,15 @@ kept as a thin wrapper over it. Member crates under `crates/`:
 - `fsmnt-fuse` / `fsmnt-dokan` — the mount backends (Unix FUSE / Windows
   Dokan).
 - `crates/formats/` — parent directory (not a crate) for filesystem-format
-  parser crates (`fs-ntfs`, `fs-fat`, `fs-ext`, `fs-apfs`, `fs-exfat`,
-  `nt-compression`, and `nt-bitlocker`); members via the `crates/formats/*`
+  parser crates (`fs-ntfs`, `fs-fat`, `fs-ext`, `fs-apfs`, `fs-btrfs`,
+  `fs-exfat`, `nt-compression`, and `nt-bitlocker`); members via the `crates/formats/*`
   glob. These are **vendored** from tracium — see "Vendored crates" below.
 - `fsmnt-drivers` — adapters binding the vendored parsers to
   `TargetFilesystem` / `FilesystemDriver`, so device and image mounting can
   open real partitions (NTFS, FAT12/16/32, exFAT, ext2/3/4, APFS, and
-  BitLocker-wrapped NTFS). This is first-party code: full house rules apply.
+  BitLocker-wrapped NTFS). Btrfs detection and superblock parsing are wired
+  through a stub driver pending tree traversal. This is first-party code:
+  full house rules apply.
 
 ## Vendored crates (`crates/formats/*`)
 

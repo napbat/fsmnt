@@ -381,6 +381,7 @@ mod tests {
             DetectedBootSector::Fat32,
             DetectedBootSector::ExFat,
             DetectedBootSector::Apfs,
+            DetectedBootSector::Btrfs,
             DetectedBootSector::BitLocker,
             DetectedBootSector::GptPartitioned,
             DetectedBootSector::Unknown,

@@ -16,6 +16,7 @@ NO_STD_CRATES = (
     "fs-fat",
     "fs-ext",
     "fs-apfs",
+    "fs-btrfs",
     "fs-exfat",
     "nt-compression",
 )

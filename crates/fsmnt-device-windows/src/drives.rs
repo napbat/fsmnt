@@ -113,11 +113,19 @@ impl HostDriveEnumerator for WindowsHostDrives {
         Ok(BufReader::new(open_device(&path)?))
     }
 
-    fn open_volume_at(drive_id: &HostDriveId, offset: u64) -> Option<Self::Reader> {
-        let disk_number: u32 = drive_id.as_str().parse().ok()?;
-        let vol = volumes::find_volume_for_extent(disk_number, offset)?;
-        let letter = vol.drive_letter()?;
-        Self::open_raw_volume(letter).ok()
+    fn open_volume_at(
+        drive_id: &HostDriveId,
+        offset: u64,
+    ) -> HostDriveResult<Option<Self::Reader>> {
+        let disk_number: u32 = drive_id
+            .as_str()
+            .parse()
+            .map_err(|_| HostDriveError::NotFound(drive_id.to_string()))?;
+        let Some(vol) = volumes::find_volume_for_extent(disk_number, offset) else {
+            return Ok(None);
+        };
+        let path = vol.volume_guid_path.trim_end_matches('\\');
+        Ok(Some(BufReader::new(open_device(path)?)))
     }
 }
 
@@ -136,7 +144,7 @@ fn physical_drive_path(id: &HostDriveId) -> HostDriveResult<String> {
 /// Tries a direct open first and, on access denial, asks the
 /// `fsmnt-proxy-server` at its default endpoint for a duplicated read-only
 /// handle.
-fn open_device(path: &str) -> HostDriveResult<File> {
+pub(crate) fn open_device(path: &str) -> HostDriveResult<File> {
     open_with_proxy_fallback(path, OpenMode::ReadOnly, 0).map_err(|error| {
         if error.kind() == ErrorKind::PermissionDenied {
             HostDriveError::AccessDenied
