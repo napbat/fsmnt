@@ -717,5 +717,5 @@ impl<'a> Mutator<'a> {
 }
 
 #[cfg(test)]
-#[path = "mutator_tests/mod.rs"]
+#[path = "../mutator_tests/mod.rs"]
 mod tests;

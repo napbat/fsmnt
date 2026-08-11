@@ -841,5 +841,5 @@ fn apply_dentry_record<'ext, T: Read + Seek>(
 }
 
 #[cfg(test)]
-#[path = "apply_tests/mod.rs"]
+#[path = "../apply_tests/mod.rs"]
 mod tests;

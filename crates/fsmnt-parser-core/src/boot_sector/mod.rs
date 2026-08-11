@@ -855,5 +855,5 @@ pub use detection::*;
 // ============================================================================
 
 #[cfg(test)]
-#[path = "boot_sector_tests/mod.rs"]
+#[path = "../boot_sector_tests/mod.rs"]
 mod tests;

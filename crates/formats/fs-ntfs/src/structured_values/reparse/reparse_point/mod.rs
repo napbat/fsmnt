@@ -482,5 +482,5 @@ impl NtfsReparseTag {
 }
 
 #[cfg(test)]
-#[path = "reparse_point_tests/mod.rs"]
+#[path = "../reparse_point_tests/mod.rs"]
 mod tests;

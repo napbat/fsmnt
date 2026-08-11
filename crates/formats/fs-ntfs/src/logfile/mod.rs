@@ -455,5 +455,5 @@ impl NtfsLogFile {
 }
 
 #[cfg(test)]
-#[path = "logfile_tests/mod.rs"]
+#[path = "../logfile_tests/mod.rs"]
 mod tests;

@@ -842,5 +842,4 @@ impl<R: Read + Seek> Btrfs<R> {
 }
 
 #[cfg(test)]
-#[path = "volume/tests.rs"]
 mod tests;

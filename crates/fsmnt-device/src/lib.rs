@@ -9,6 +9,8 @@
 //!   implement to enumerate and open physical drives.
 //! - [`Disk`] / [`DiskLayout`] — partition-table detection (GPT/MBR) and
 //!   on-demand partition entry access over any `Read + Seek` source.
+//! - [`ImageContainer`] / [`ImageReader`] — a common decoded-media contract
+//!   plus automatic raw/EWF/VHD/VHDX image opening.
 //! - [`PartitionReader`] — a reader windowed to one partition's extent.
 //! - [`HostVolumeResolver`] / [`LogicalVolume`] — the graph edge from a
 //!   physical partition extent to one or more operating-system logical block
@@ -33,6 +35,7 @@ mod detection;
 mod disk;
 mod drive;
 mod driver;
+mod image;
 mod partition_reader;
 mod sector_reader;
 mod source;
@@ -58,6 +61,7 @@ pub use fsmnt_parser_core::boot_sector::{
 pub use fsmnt_parser_core::partition::{
     GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry, read_gpt_header,
 };
+pub use image::{ImageContainer, ImageFormat, ImageOpenError, ImageReader};
 pub use partition_reader::PartitionReader;
 pub use sector_reader::SectorReader;
 pub use source::{

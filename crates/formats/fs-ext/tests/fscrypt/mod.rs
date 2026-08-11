@@ -9,13 +9,8 @@
 
 #![cfg(feature = "fscrypt")]
 
-#[path = "fscrypt/basic.rs"]
 mod basic;
-#[path = "fscrypt/modes.rs"]
 mod modes;
-#[path = "fscrypt/nokey.rs"]
 mod nokey;
-#[path = "fscrypt/support.rs"]
 mod support;
-#[path = "fscrypt/wrapped.rs"]
 mod wrapped;

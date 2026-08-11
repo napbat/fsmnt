@@ -41,6 +41,10 @@ unicode-normalization = { workspace = true, optional = true }
 fsmnt-testkit = { workspace = true }
 mutants = { workspace = true }
 
+[[test]]
+name = "fscrypt"
+path = "tests/fscrypt/mod.rs"
+
 [features]
 default = ["fscrypt", "verity"]
 std = [

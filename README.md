@@ -3,11 +3,12 @@
 [![CI](https://github.com/napbat/fsmnt/actions/workflows/ci.yml/badge.svg)](https://github.com/napbat/fsmnt/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Cross-platform **read-only** virtual mounting for filesystem images and block
-devices. `fsmnt` parses on-disk filesystems in pure Rust and presents them as
-a browsable volume, so files can be inspected and copied with ordinary OS
-tools — no kernel driver for the guest filesystem required, and nothing is
-ever written back to the source.
+Cross-platform **read-only** virtual mounting for raw, Expert Witness Format
+(EWF), VHD, and VHDX filesystem images and block devices. `fsmnt` parses
+on-disk filesystems in pure Rust and presents them as a browsable volume, so
+files can be inspected and copied with ordinary OS tools — no kernel driver
+for the guest filesystem required, and nothing is ever written back to the
+source.
 
 | Platform      | Mount backend | Mount target              |
 |---------------|---------------|---------------------------|
@@ -81,10 +82,22 @@ key again. Useful flags:
 ```sh
 fsmnt mount-image disk.img Z:
 fsmnt mount-image disk.img /mnt/img --offset 1048576
+fsmnt mount-image evidence.E01 /mnt/evidence --offset 1048576
+fsmnt mount-image "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\Win11-dev.vhdx" Z: --offset 1048576
 ```
 
-The image must start at the filesystem itself; for a full partitioned-disk
-image, pass the partition's byte offset with `--offset`.
+Raw images, EWF v1/v2 physical evidence (`.E01`/`.Ex01`), legacy VHD, and VHDX
+are detected automatically. Pass the first EWF segment; sibling segments are
+discovered and decoded as one logical media stream. Fixed, dynamic, and
+differencing VHD/VHDX images are decoded by the repository-native readers;
+`.avhd` and `.avhdx` checkpoint parents are resolved from their container
+locators. Sparse blocks and VHDX log entries are read or replayed on demand,
+without attaching the image or writing to any layer.
+
+The decoded image must start at the filesystem itself. For a full partitioned
+disk image, including a typical Hyper-V system disk, pass the partition's byte
+offset with `--offset`; the offset always addresses decoded virtual media, not
+container storage.
 
 ### Choosing what to expose
 
@@ -144,7 +157,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `fsmnt_core::TargetFilesystem` is the trait a mountable filesystem implements,
 and `fsmnt_device::DriverRegistry` is the plug-in point — register your own
 `FilesystemDriver` alongside or instead of the built-in ones and hand the
-registry to `open_device_partition`.
+registry to `open_device_partition` or `open_image`. `ImageOpenOptions` selects
+an offset in decoded media and the filesystem-owned root. Every container
+implements the object-safe `fsmnt_device::ImageContainer` trait, so raw, EWF,
+VHD, and VHDX readers share one typed virtual-media boundary. The umbrella
+open functions return `OpenImageError`, retaining the failed path, decoded
+offset, detected layout, and underlying container or filesystem error.
 
 ## Workspace layout
 
@@ -155,7 +173,7 @@ under `crates/`:
 |-------|------|
 | `fsmnt-core` | `TargetFilesystem` trait, entry/metadata types, host-directory backend, fstab namespaces |
 | `fsmnt-parser-core` | `no_std` parser foundation: reader/error traits, boot-sector detection, GPT/MBR |
-| `fsmnt-device` | block-device abstraction, disk layout, partition readers, driver registry |
+| `fsmnt-device` | block-device abstraction, raw/EWF/VHD/VHDX image readers, disk layout, partition readers, driver registry |
 | `fsmnt-device-windows` / `-linux` / `-macos` | per-OS drive enumeration, raw opening, logical-volume resolution |
 | `fsmnt-proxy` | privileged handle-passing helper and its elevated server |
 | `fsmnt-fuse` / `fsmnt-dokan` | mount backends |

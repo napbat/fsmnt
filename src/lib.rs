@@ -56,6 +56,11 @@
 //! register their own [`device::FilesystemDriver`] implementations
 //! alongside (or instead of) the built-in ones, and
 //! [`open_device_partition`] uses whichever registry it is handed.
+//!
+//! Raw, Expert Witness Format, VHD, and VHDX images can be opened through
+//! [`open_image`] or [`open_image_with_options`]. Segment sets, sparse blocks,
+//! and VHD/VHDX differencing chains are decoded into the same seekable
+//! [`ImageContainer`] media view consumed by the filesystem drivers.
 
 pub use fsmnt_core::{
     DirFilesystem, FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, Fstab, FstabEntry,
@@ -63,6 +68,7 @@ pub use fsmnt_core::{
 };
 
 pub use fsmnt_device as device;
+pub use fsmnt_device::{ImageContainer, ImageFormat, ImageOpenError, ImageReader};
 pub use fsmnt_drivers as drivers;
 pub use fsmnt_proxy as proxy;
 
@@ -126,6 +132,212 @@ pub fn mount(
         let _ = (fs, mountpoint, fsname, volname, total_bytes, on_mount);
         Err("fsmnt is not supported on this platform".into())
     }
+}
+
+/// A filesystem opened from a decoded disk-image container, ready to mount.
+pub struct OpenedImage {
+    /// The filesystem opened by a registered driver.
+    pub filesystem: Box<dyn TargetFilesystem>,
+    /// The detected boot-sector type at the selected image offset.
+    pub detected: DetectedBootSector,
+    /// Size of the selected decoded media range in bytes.
+    pub size_bytes: u64,
+    /// Container format used to expose the decoded media.
+    pub format: ImageFormat,
+}
+
+/// Failure to decode an image or open a filesystem within its virtual media.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum OpenImageError {
+    /// The image container could not be opened or decoded.
+    #[error(transparent)]
+    Container(#[from] ImageOpenError),
+    /// The selected byte offset does not address decoded media.
+    #[error("offset {offset} is at or past the end of {path:?} ({size_bytes} decoded bytes)")]
+    OffsetOutOfRange {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Requested decoded-media offset.
+        offset: u64,
+        /// Total decoded-media size.
+        size_bytes: u64,
+    },
+    /// The selected offset identifies another partition table.
+    #[error(
+        "{path:?} contains a partition table at offset {offset} ({detected:?}); select the byte offset of a filesystem-containing partition"
+    )]
+    PartitionTable {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Decoded-media offset that contains the partition table.
+        offset: u64,
+        /// Partition-table type detected at the offset.
+        detected: DetectedBootSector,
+    },
+    /// Reading or classifying the selected boot sector failed.
+    #[error("failed to detect a filesystem at offset {offset} in {path:?}: {source}")]
+    Detection {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Decoded-media offset being inspected.
+        offset: u64,
+        /// Underlying seek or read failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A registered filesystem driver could not open the detected media.
+    #[error("failed to open {detected:?} at offset {offset} in {path:?}: {source}")]
+    Filesystem {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Decoded-media offset handed to the driver.
+        offset: u64,
+        /// Filesystem type detected at the offset.
+        detected: DetectedBootSector,
+        /// Driver or filesystem parser failure.
+        #[source]
+        source: FsError,
+    },
+}
+
+/// Offset and filesystem-root choices for opening a disk image.
+#[derive(Clone, Debug)]
+pub struct ImageOpenOptions {
+    offset: u64,
+    filesystem: FilesystemOpenOptions,
+}
+
+impl ImageOpenOptions {
+    /// Use the beginning of the decoded image and the filesystem's default
+    /// root.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            offset: 0,
+            filesystem: FilesystemOpenOptions::new(),
+        }
+    }
+
+    /// Select the byte offset of the filesystem within decoded image media.
+    #[must_use]
+    pub const fn with_offset(mut self, offset: u64) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Choose the filesystem-owned tree or container volume to expose.
+    #[must_use]
+    pub fn with_filesystem_root(mut self, root: FilesystemRoot) -> Self {
+        self.filesystem = self.filesystem.with_root(root);
+        self
+    }
+
+    /// Byte offset of the filesystem within decoded image media.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Requested filesystem-open options.
+    #[must_use]
+    pub const fn filesystem(&self) -> &FilesystemOpenOptions {
+        &self.filesystem
+    }
+}
+
+impl Default for ImageOpenOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Open a filesystem at the beginning of a supported disk image.
+///
+/// EWF container signatures are detected automatically and sibling segments
+/// are discovered from the supplied segment path. Fixed, dynamic, and
+/// differencing VHD/VHDX containers are decoded into virtual media; parent
+/// locators resolve accessible `.avhd` and `.avhdx` chains. Use
+/// [`open_image_with_options`] when the decoded image starts with a partition
+/// table or when a non-default filesystem root is needed.
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or decoded, its selected
+/// range is empty, it starts with a partition table, filesystem detection
+/// fails, or no registered driver can open it.
+pub fn open_image(
+    path: impl AsRef<std::path::Path>,
+    drivers: &DriverRegistry,
+) -> Result<OpenedImage, OpenImageError> {
+    open_image_with_options(path, drivers, ImageOpenOptions::new())
+}
+
+/// Open a filesystem from a supported disk image with explicit options.
+///
+/// The offset addresses decoded logical media, not EWF segment bytes or
+/// VHD/VHDX container storage. A partitioned whole-disk image requires the
+/// byte offset of the filesystem-containing partition.
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or decoded, `offset` is at
+/// or past the end of the decoded image, the selected range starts with a
+/// partition table, filesystem detection fails, or no registered driver can
+/// open the detected filesystem and requested root.
+pub fn open_image_with_options(
+    path: impl AsRef<std::path::Path>,
+    drivers: &DriverRegistry,
+    options: ImageOpenOptions,
+) -> Result<OpenedImage, OpenImageError> {
+    let path = path.as_ref();
+    let ImageOpenOptions { offset, filesystem } = options;
+    let mut image = ImageReader::open(path)?;
+    let image_size = image.len();
+    if offset >= image_size {
+        return Err(OpenImageError::OffsetOutOfRange {
+            path: path.to_path_buf(),
+            offset,
+            size_bytes: image_size,
+        });
+    }
+
+    let detected = fsmnt_device::detect_boot_sector_at(&mut image, offset).map_err(|source| {
+        OpenImageError::Detection {
+            path: path.to_path_buf(),
+            offset,
+            source,
+        }
+    })?;
+    if matches!(
+        detected,
+        DetectedBootSector::MbrPartitioned | DetectedBootSector::GptPartitioned
+    ) {
+        return Err(OpenImageError::PartitionTable {
+            path: path.to_path_buf(),
+            offset,
+            detected,
+        });
+    }
+
+    let format = image.format();
+    let size_bytes = image_size - offset;
+    let reader = PartitionReader::new(image, offset, size_bytes);
+    let filesystem = drivers
+        .open_with_options(Box::new(reader), detected, &filesystem)
+        .map_err(|source| OpenImageError::Filesystem {
+            path: path.to_path_buf(),
+            offset,
+            detected,
+            source,
+        })?;
+
+    Ok(OpenedImage {
+        filesystem,
+        detected,
+        size_bytes,
+        format,
+    })
 }
 
 /// A partition opened from a block device, ready to mount.

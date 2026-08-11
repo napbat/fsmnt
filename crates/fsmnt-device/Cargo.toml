@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+crc32c = { workspace = true }
+ewf = { workspace = true }
 fsmnt-core = { workspace = true }
 fsmnt-parser-core = { workspace = true, features = ["std"] }
 nostdio = { workspace = true, features = ["std"] }

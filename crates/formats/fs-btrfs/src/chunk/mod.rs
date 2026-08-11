@@ -673,29 +673,9 @@ fn sort_and_validate_chunks(chunks: &mut [ChunkMapping]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use support::{mapping, stripe, validate};
 
-    fn stripe(device_id: u64, offset: u64) -> ChunkStripe {
-        ChunkStripe {
-            device_id,
-            offset,
-            device_uuid: [0_u8; 16],
-        }
-    }
-
-    fn mapping(flags: u64, sub_stripes: u16, stripes: Vec<ChunkStripe>) -> ChunkMapping {
-        ChunkMapping {
-            logical: 0x10_0000,
-            length: 0x40_0000,
-            stripe_length: 0x1_0000,
-            flags: flags | TYPE_DATA,
-            sub_stripes,
-            stripes,
-        }
-    }
-
-    fn validate(mapping: &ChunkMapping) -> Result<()> {
-        mapping.validate(4096, 0, 4096)
-    }
+    mod support;
 
     #[test]
     fn single_mapping_preserves_relative_offset() {

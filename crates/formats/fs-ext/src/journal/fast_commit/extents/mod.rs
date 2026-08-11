@@ -989,5 +989,5 @@ struct MappedEditContext {
 }
 
 #[cfg(test)]
-#[path = "extents_tests/mod.rs"]
+#[path = "../extents_tests/mod.rs"]
 mod tests;

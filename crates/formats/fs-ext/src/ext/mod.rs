@@ -929,5 +929,5 @@ impl Ext {
 }
 
 #[cfg(test)]
-#[path = "ext_tests/mod.rs"]
+#[path = "../ext_tests/mod.rs"]
 mod tests;

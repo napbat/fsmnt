@@ -826,5 +826,5 @@ pub(crate) fn complete_truncate<T: Read + Seek>(
 }
 
 #[cfg(test)]
-#[path = "truncate_tests/mod.rs"]
+#[path = "../truncate_tests/mod.rs"]
 mod tests;

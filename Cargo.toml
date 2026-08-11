@@ -55,6 +55,7 @@ bitflags = "2.11"
 blake2 = { version = "0.10", default-features = false }
 chrono = { version = "0.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
+ewf = { version = "0.4", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 lzokay = { version = "2", default-features = false, features = ["alloc", "decompress"] }
 tempfile = "3"
@@ -146,7 +147,7 @@ pedantic = { level = "deny", priority = -1 }
 
 [package]
 name = "fsmnt"
-description = "Read-only virtual mounting of filesystem images and block devices (NTFS, FAT, exFAT, ext, APFS, Btrfs, BitLocker) via FUSE and Dokan"
+description = "Read-only virtual mounting of raw/EWF/VHD/VHDX filesystem images and block devices (NTFS, FAT, exFAT, ext, APFS, Btrfs, BitLocker) via FUSE and Dokan"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -160,9 +161,13 @@ fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
 fsmnt-drivers = { workspace = true }
 fsmnt-proxy = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
+crc32c = { workspace = true }
+flate2 = { workspace = true }
 fsmnt-testkit = { workspace = true, features = ["device"] }
+tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 fsmnt-fuse = { workspace = true }

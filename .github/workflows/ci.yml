@@ -45,23 +45,42 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+  test-linux:
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install FUSE
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config
-      # Fixture-backed tests skip themselves when the generated images are
-      # absent; the tracked canonical fixtures and fuzz regressions still run.
+      - name: Install FUSE and e2fsprogs
+        run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config e2fsprogs
+      # fs-ext's unit tests read generated ext2/3/4 images and fail hard when
+      # those are absent, so build them rather than lose the coverage. The
+      # generator runs unprivileged, and is invoked through bash because the
+      # script is tracked without its executable bit.
+      #
+      # ext4-fscrypt.img is a tracked canonical fixture, but the generator
+      # rebuilds it whenever the runner offers sudo, loop devices, and
+      # Adiantum. Restore the committed copy so tests read a known image.
+      - name: Generate ext fixtures
+        run: |
+          bash crates/formats/fs-ext/testdata/gen-fixtures.sh
+          git checkout -- crates/formats/fs-ext/testdata/ext4-fscrypt.img
+      # Other crates' fixture-backed tests skip themselves when their images
+      # are absent; tracked canonical fixtures and fuzz regressions still run.
       - run: cargo test --locked --workspace
+
+  test-windows:
+    name: test (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # fs-ext is excluded: its tests require ext images that only e2fsprogs
+      # can generate, which has no Windows equivalent. It is a portable no_std
+      # parser with no platform-specific code and is covered fully on Linux.
+      - run: cargo test --locked --workspace --exclude fs-ext
 
   macos:
     # The mount backend needs macFUSE, whose cask install is not reliable on

@@ -923,9 +923,8 @@ impl<'n> NtfsFile<'n> {
 }
 
 #[cfg(test)]
-#[path = "file/synthetic.rs"]
 pub(crate) mod synthetic;
 
 #[cfg(test)]
-#[path = "file_tests/mod.rs"]
+#[path = "../file_tests/mod.rs"]
 mod tests;

@@ -911,5 +911,5 @@ pub(crate) fn resolve_kind<R: Read + Seek>(
 }
 
 #[cfg(test)]
-#[path = "traverse_tests/mod.rs"]
+#[path = "../traverse_tests/mod.rs"]
 mod tests;

@@ -49,12 +49,12 @@ enum Commands {
         fsname: String,
     },
 
-    /// Mount a raw filesystem image file (NTFS, FAT, exFAT, ext, APFS, Btrfs,
-    /// `BitLocker`) as a read-only volume.
+    /// Mount a raw, EWF, VHD, or VHDX image (NTFS, FAT, exFAT, ext, APFS,
+    /// Btrfs, `BitLocker`) as a read-only volume.
     MountImage {
-        /// Path to the image file. Must start with the filesystem itself,
-        /// not a partition table; use `--offset` for an image of a whole
-        /// partitioned disk.
+        /// Image path or first EWF segment (`.E01`/`.Ex01`). VHD/VHDX
+        /// differencing parents are resolved automatically. The decoded media
+        /// must start with a filesystem; use `--offset` for a partitioned disk.
         image: PathBuf,
 
         /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
@@ -428,7 +428,7 @@ fn build_registry(
     Ok(registry_with_bitlocker(bitlocker))
 }
 
-/// Mount a raw filesystem image file.
+/// Mount a supported filesystem image container.
 fn handle_mount_image(
     image: &std::path::Path,
     mountpoint: &str,
@@ -438,43 +438,11 @@ fn handle_mount_image(
     bek_file: Option<&std::path::Path>,
     filesystem_root: fsmnt::device::FilesystemRoot,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use fsmnt::device::{
-        DetectedBootSector, FilesystemOpenOptions, PartitionReader, detect_boot_sector_at,
-    };
-    use std::io::{Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(image)
-        .map_err(|e| format!("failed to open image '{}': {e}", image.display()))?;
-    let size = file.metadata()?.len();
-    if offset >= size {
-        return Err(format!(
-            "offset {offset} is past the end of '{}' ({size} bytes)",
-            image.display(),
-        )
-        .into());
-    }
-
-    let detected = detect_boot_sector_at(&mut file, offset)?;
-
-    if detected == DetectedBootSector::MbrPartitioned
-        || detected == DetectedBootSector::GptPartitioned
-    {
-        return Err(format!(
-            "'{}' is a partitioned disk image ({detected:?}), not a filesystem. \
-             Re-run with --offset set to the start of a partition.",
-            image.display(),
-        )
-        .into());
-    }
-
-    file.seek(SeekFrom::Start(0))?;
-    let reader = PartitionReader::new(file, offset, size - offset);
     let drivers = build_registry(recovery_password, bek_file)?;
-    let filesystem = drivers.open_with_options(
-        Box::new(reader),
-        detected,
-        &FilesystemOpenOptions::new().with_root(filesystem_root),
-    )?;
+    let options = fsmnt::ImageOpenOptions::new()
+        .with_offset(offset)
+        .with_filesystem_root(filesystem_root);
+    let opened = fsmnt::open_image_with_options(image, &drivers, options)?;
 
     ensure_unix_mountpoint(mountpoint)?;
 
@@ -488,16 +456,18 @@ fn handle_mount_image(
     );
 
     println!(
-        "Detected {detected:?} at offset {offset} in {}",
-        image.display()
+        "Detected {:?} at offset {offset} in {} image {}",
+        opened.detected,
+        opened.format,
+        image.display(),
     );
     block_on_mount(
-        filesystem,
+        opened.filesystem,
         mountpoint,
-        fs_label(detected),
+        fs_label(opened.detected),
         &volname,
-        fs_label(detected),
-        size - offset,
+        fs_label(opened.detected),
+        opened.size_bytes,
     )
 }
 

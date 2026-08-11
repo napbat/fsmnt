@@ -718,5 +718,5 @@ fn inode_extra_isize(inode_buf: &[u8], inode_size: u16) -> u16 {
 }
 
 #[cfg(test)]
-#[path = "inode_tests/mod.rs"]
+#[path = "../inode_tests/mod.rs"]
 mod tests;

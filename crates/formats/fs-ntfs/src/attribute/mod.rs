@@ -129,7 +129,6 @@ struct NtfsNonResidentAttributeHeader {
     initialized_size: u64,
 }
 
-#[path = "attribute/attribute_type.rs"]
 mod attribute_type;
 
 pub use attribute_type::NtfsAttributeType;
@@ -865,5 +864,5 @@ impl<'n, 'f> Iterator for NtfsAttributesRaw<'n, 'f> {
 impl FusedIterator for NtfsAttributesRaw<'_, '_> {}
 
 #[cfg(test)]
-#[path = "attribute_tests/mod.rs"]
+#[path = "../attribute_tests/mod.rs"]
 mod tests;

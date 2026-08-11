@@ -957,5 +957,5 @@ fn copy_match(
 }
 
 #[cfg(test)]
-#[path = "decompress_tests/mod.rs"]
+#[path = "../decompress_tests/mod.rs"]
 mod tests;
