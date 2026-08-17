@@ -207,3 +207,17 @@ absent; tracked canonical fixtures and fuzz regressions must still run.
 
 The same checks run as git pre-commit hooks via prek. Never commit with
 `--no-verify`.
+
+## Releases
+
+A `v<version>` tag push runs CI (`.github/workflows/ci.yml`), whose `build`
+job compiles `fsmnt` and `fsmnt-proxy-server` for each supported target and
+uploads one archive per target as a workflow artifact. When that CI run is
+green, `.github/workflows/release.yml` (a `workflow_run` consumer, so it only
+acts from the default branch) attaches those artifacts to a GitHub release
+for the tag — which is what `mise use github:napbat/fsmnt` installs. The tag
+must equal `v` + `[workspace.package].version`, so a release bump edits that
+one field, runs `cargo update --workspace` so `Cargo.lock` matches (CI builds
+with `--locked`), and tags the resulting commit. Asset names embed the Rust
+target triple; do not rename them, mise matches on it. See "Releasing" in
+README.md for the step-by-step.

@@ -3,7 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  # A manual run also builds the release archives (see `build`): the way to
+  # prove every platform builds without pushing a tag.
+  workflow_dispatch:
 
 # A newer push to the same branch makes the in-flight run obsolete.
 concurrency:
@@ -110,3 +114,132 @@ jobs:
       # rather than a gate; it stays a local pre-commit hook only.
       - name: Format crates stay no_std
         run: python3 scripts/check_formats_no_std.py
+
+  # Release archives. Runs alongside the checks on every `v*` tag push and on
+  # manual runs; it is skipped for branch pushes and pull requests. Each
+  # target builds natively on a runner of its own architecture — no
+  # cross-linkers to configure — and uploads one archive as a workflow
+  # artifact. release.yml (a `workflow_run` consumer) turns those artifacts
+  # into the GitHub release once this whole run is green, so a tag whose
+  # checks fail never ships. Asset names carry the Rust target triple: mise
+  # matches on it, do not rename them.
+  build:
+    name: build (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write # sign build-provenance attestations
+      attestations: write # store attestations that mise / `gh attestation` verify
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux builds run on 22.04 so the binaries link against glibc 2.35
+        # and run on any distribution at least that new; the macOS runners
+        # are pinned to one release so a macos-latest bump cannot silently
+        # change what the archives are built against.
+        #
+        # There is no windows-arm64 target: dokan-sys only supports x86 and
+        # x86_64 (its build script panics on any other architecture).
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Check that the tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          crate_version="$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          if [ "$GITHUB_REF_NAME" != "v${crate_version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match [workspace.package].version = ${crate_version} in Cargo.toml"
+            exit 1
+          fi
+
+      # Platform build dependencies. Linux needs nothing: fuser is used with
+      # its default (pure-Rust) mount, which talks to fusermount3 at run time
+      # instead of linking libfuse. Windows needs nothing: dokan-sys compiles
+      # the bundled dokany sources with MSVC. macOS is the exception — fuser's
+      # build script resolves macFUSE through pkg-config and links its
+      # libfuse, so the cask must be installed on the builder. Its kernel
+      # extension never loads on a hosted runner, which is fine: only the
+      # headers, pkg-config file, and dylib are needed to link.
+      - name: Install macFUSE (link-time dependency of fuser)
+        if: runner.os == 'macOS'
+        run: |
+          brew install --cask macfuse
+          brew list pkgconf >/dev/null 2>&1 || brew install pkgconf
+          # macFUSE installs under /usr/local regardless of the Homebrew
+          # prefix, which pkgconf on Apple Silicon does not search by default.
+          echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked -p fsmnt -p fsmnt-proxy --bins --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        # Archive layout: a single top-level directory holding both binaries
+        # and the licence files. mise strips that directory on extraction and
+        # puts the executables it finds at the root on PATH, so `fsmnt` and
+        # `fsmnt-proxy-server` are both available from the one install.
+        run: |
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p')"
+          name="fsmnt-v${version}-${TARGET}"
+          exe=""
+          if [ "$RUNNER_OS" = "Windows" ]; then exe=".exe"; fi
+
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/fsmnt${exe}" \
+             "target/${TARGET}/release/fsmnt-proxy-server${exe}" \
+             README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md \
+             "dist/${name}/"
+
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            archive="${name}.zip"
+            7z a -tzip "${archive}" "${name}" >/dev/null
+          else
+            archive="${name}.tar.gz"
+            tar czf "${archive}" "${name}"
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+          fi
+          rm -r "${name}"
+
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "archive=dist/${archive}" >> "$GITHUB_OUTPUT"
+
+      # Signed SLSA provenance for the archive, recorded against this repo.
+      # mise checks it through the GitHub attestations API by default when
+      # installing from a release; `gh attestation verify <archive> --repo
+      # napbat/fsmnt` does the same by hand. Tag builds only — dry runs are
+      # not release material.
+      - name: Attest build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.package.outputs.archive }}
+
+      # One artifact per target, named after the archive; release.yml
+      # downloads them by the `fsmnt-v*` pattern.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/*
+          if-no-files-found: error
