@@ -60,8 +60,16 @@ EXT2_STAGE="$STAGING/ext2"
 build_common_tree "$EXT2_STAGE" "ext2"
 
 dd if=/dev/zero of=ext2.img bs=1K count=512 status=none
+# e2fsprogs 1.47.1 removed `-r 0` in favour of `-E revision=0`, and older
+# releases (Ubuntu 24.04's 1.47.0, i.e. GitHub's ubuntu-latest) reject the
+# extended option. Probe with a dry run and use whichever this mke2fs takes;
+# both yield the same revision-0 layout.
+EXT2_REV0=(-E revision=0)
+if ! mkfs.ext2 -q -n "${EXT2_REV0[@]}" ext2.img >/dev/null 2>&1; then
+    EXT2_REV0=(-r 0)
+fi
 mkfs.ext2 -q \
-    -E revision=0 \
+    "${EXT2_REV0[@]}" \
     -U "11111111-1111-1111-1111-111111111111" \
     -d "$EXT2_STAGE" \
     ext2.img
@@ -127,12 +135,18 @@ make_htree_dir "$EXT4_STAGE"
 # remain block-backed (extents).  mkfs -d with inline_data would
 # convert every small file to inline, breaking tests that depend on
 # block-backed reads.
+# orphan_file and metadata_csum_seed are named explicitly on every ext4 image
+# below. e2fsprogs 1.47 enables both through mke2fs.conf on Debian, but
+# Ubuntu 24.04 ships that file with them removed, and orphan_file allocates
+# an inode at mkfs time: left to the distro default, every populated inode
+# shifts by one and the inode numbers the tests hard-code (hello.txt 20,
+# htree_dir 21, multiblock.bin 523, ...) no longer hold.
 dd if=/dev/zero of=ext4.img bs=1M count=16 status=none
 mkfs.ext4 -q \
     -U "33333333-3333-3333-3333-333333333333" \
     -b 4096 \
     -I 256 \
-    -O extents,64bit,flex_bg,extra_isize,metadata_csum,dir_nlink,dir_index,ea_inode \
+    -O extents,64bit,flex_bg,extra_isize,metadata_csum,metadata_csum_seed,dir_nlink,dir_index,ea_inode,orphan_file \
     -d "$EXT4_STAGE" \
     ext4.img
 # Convert htree_dir to btree index format (mkfs doesn't trigger it on copy)
@@ -1176,7 +1190,7 @@ dd if=/dev/zero of=ext4-quota.img bs=1M count=8 status=none
 mkfs.ext4 -q \
     -U "55555555-5555-5555-5555-555555555555" \
     -L quota \
-    -O quota \
+    -O quota,orphan_file,metadata_csum_seed \
     -E quotatype=usrquota:grpquota:prjquota \
     ext4-quota.img
 
@@ -1332,7 +1346,7 @@ dd if=/dev/zero of=ext4-meta-bg.img bs=1M count=40 status=none
 mkfs.ext4 -q \
     -U "44444444-4444-4444-4444-444444444444" \
     -b 1024 -g 1024 \
-    -O 'meta_bg,^flex_bg,^64bit,^resize_inode,metadata_csum' \
+    -O 'meta_bg,^flex_bg,^64bit,^resize_inode,metadata_csum,metadata_csum_seed,orphan_file' \
     -L meta_bg \
     -d "$EXT4_META_BG_STAGE" \
     ext4-meta-bg.img

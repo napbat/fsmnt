@@ -1,0 +1,102 @@
+name: Release
+
+# Publishes a GitHub release from the archives that CI built. This workflow
+# does no building of its own: `ci.yml` runs on every `v*` tag push, its
+# `build` job produces one archive per target and uploads them as workflow
+# artifacts, and — only when the whole CI run is green (fmt, clippy, tests,
+# and the builds) — this workflow downloads those artifacts and attaches them
+# to a release for the tag. That release is what
+# `mise use github:napbat/fsmnt` installs from (see "Install" in README.md).
+#
+# Cutting a release: bump `[workspace.package].version` in Cargo.toml, run
+# `cargo update --workspace` so Cargo.lock follows, commit, then push a tag
+# named `v<version>` — CI refuses to build a tag that does not match
+# Cargo.toml. Tags with a pre-release suffix (`v0.2.0-rc1`) become GitHub
+# pre-releases, which mise's `latest` skips.
+#
+# The release is created as a draft, the assets are uploaded, and only then is
+# it published, so a half-uploaded release is never visible. If this workflow
+# fails after CI succeeded, re-run it from the Actions tab: it reuses the
+# draft and re-uploads with --clobber.
+#
+# `workflow_run` only fires for the copy of this file on the default branch,
+# so changes here take effect once merged. To dry-run the builds without a
+# tag, run CI manually (`gh workflow run ci.yml --ref <branch>`); its `build`
+# job runs on workflow_dispatch and keeps the archives as artifacts.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write # create the release, upload assets
+  actions: read # download artifacts from the CI run
+
+jobs:
+  release:
+    name: publish release
+    # CI's push trigger is `branches: [main]` plus `tags: [v*]`, so a
+    # successful push run whose head is not `main` is a tag build. Everything
+    # else (main pushes, PRs, manual runs) is not a release.
+    if: >
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Confirm the tag points at the built commit
+        run: |
+          if ! git tag --points-at HEAD | grep -qx "$TAG"; then
+            echo "::error::tag $TAG does not point at $(git rev-parse HEAD); refusing to release CI run ${{ github.event.workflow_run.id }}"
+            exit 1
+          fi
+
+      - name: Download archives from the CI run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          pattern: fsmnt-v*
+          merge-multiple: true
+          path: dist
+
+      - name: Check the archive set
+        # One archive (+ its .sha256) per target in CI's build matrix. A short
+        # set means a build job was skipped or its upload failed; do not ship
+        # a partial release.
+        run: |
+          ls -l dist
+          archives=$(find dist -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)
+          if [ "$archives" -ne 5 ]; then
+            echo "::error::expected 5 archives from CI run ${{ github.event.workflow_run.id }}, found $archives"
+            exit 1
+          fi
+
+      - name: Create the draft release
+        # Idempotent so a re-run of this workflow reuses the existing draft.
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; reusing it"
+            exit 0
+          fi
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" --draft --verify-tag \
+            --title "$TAG" --generate-notes "${prerelease[@]}"
+
+      - name: Upload assets
+        run: gh release upload "$TAG" dist/* --clobber
+
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false
