@@ -60,8 +60,16 @@ EXT2_STAGE="$STAGING/ext2"
 build_common_tree "$EXT2_STAGE" "ext2"
 
 dd if=/dev/zero of=ext2.img bs=1K count=512 status=none
+# e2fsprogs 1.47.1 removed `-r 0` in favour of `-E revision=0`, and older
+# releases (Ubuntu 24.04's 1.47.0, i.e. GitHub's ubuntu-latest) reject the
+# extended option. Probe with a dry run and use whichever this mke2fs takes;
+# both yield the same revision-0 layout.
+EXT2_REV0=(-E revision=0)
+if ! mkfs.ext2 -q -n "${EXT2_REV0[@]}" ext2.img >/dev/null 2>&1; then
+    EXT2_REV0=(-r 0)
+fi
 mkfs.ext2 -q \
-    -E revision=0 \
+    "${EXT2_REV0[@]}" \
     -U "11111111-1111-1111-1111-111111111111" \
     -d "$EXT2_STAGE" \
     ext2.img
