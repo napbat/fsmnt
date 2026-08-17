@@ -56,11 +56,15 @@ mise use github:napbat/fsmnt@0.1.0       # pin a version in this project's mise.
 ```
 
 Or declare it in a `mise.toml` and use it from tasks; mise installs it on
-first use:
+first use. The `[tools]` key is the backend spec, `"github:napbat/fsmnt"`,
+and the value is the version — or give it a short name with an `[alias]`:
 
 ```toml
+[alias]
+fsmnt = "github:napbat/fsmnt"
+
 [tools]
-"github:napbat/fsmnt" = "latest"
+fsmnt = "latest"          # or "0.1.0"; same as "github:napbat/fsmnt" = "latest"
 
 [tasks.mount-evidence]
 description = "Mount the evidence image read-only"
