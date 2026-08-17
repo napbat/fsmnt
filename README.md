@@ -74,6 +74,19 @@ build-provenance attestation that mise verifies by default. The
 [prerequisites](#prerequisites) above still apply at run time — the mount
 backend (FUSE / macFUSE / Dokan) is not bundled.
 
+mise hides releases younger than its
+[`minimum_release_age`](https://mise.jdx.dev/configuration/settings.html#minimum_release_age)
+(default 24 h) from `latest`, so a just-published version resolves only the
+next day. To pick it up immediately, pin the version (`@0.1.0`) or exempt
+this tool from the cooldown — per project:
+
+```toml
+[tools]
+"github:napbat/fsmnt" = { version = "latest", minimum_release_age = "0" }
+```
+
+or once, globally: `mise settings add minimum_release_age_excludes github:napbat/fsmnt`.
+
 ### From source
 
 ```sh
