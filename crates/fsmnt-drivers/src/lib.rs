@@ -66,6 +66,7 @@ mod ext;
 mod fat;
 mod identity;
 mod ntfs;
+mod patched;
 
 pub use apfs::{ApfsDriver, ApfsFilesystem, VolumeSelector};
 pub use bitlocker::BitLockerDriver;
@@ -74,6 +75,7 @@ pub use exfat::{ExFatDriver, ExFatFilesystem};
 pub use ext::{ExtDriver, ExtFilesystem};
 pub use fat::{FatDriver, FatFilesystem};
 pub use ntfs::{NtfsDriver, NtfsFilesystem};
+pub use patched::PatchedReader;
 
 use fsmnt_device::DriverRegistry;
 
