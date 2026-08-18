@@ -10,6 +10,7 @@ fsmnt-device = { workspace = true }
 fsmnt-proxy = { workspace = true }
 libc = { workspace = true }
 linux-raw-sys = { workspace = true, features = ["ioctl"] }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

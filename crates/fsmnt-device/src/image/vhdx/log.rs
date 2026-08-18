@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
+use tracing::debug;
+
 use super::VhdxError;
 use super::format::{Guid, Header, LOG_SECTOR_SIZE, MIB, guid_at, le_u32, le_u64};
 
@@ -109,9 +111,16 @@ pub(super) fn build_overlay(
     for entry in &active {
         append_entry_runs(&log, entry, &mut runs)?;
     }
+    let effective_file_length = file_length.max(head.last_file_offset);
+    debug!(
+        entries = active.len(),
+        runs = runs.len(),
+        effective_file_length,
+        "replayed the VHDX log into an in-memory overlay"
+    );
     Ok(LogOverlay {
         runs,
-        effective_file_length: file_length.max(head.last_file_offset),
+        effective_file_length,
     })
 }
 

@@ -3,6 +3,8 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use tracing::debug;
+
 use super::container::ImageContainer;
 use super::error::ImageOpenError;
 use super::format::ImageFormat;
@@ -22,6 +24,14 @@ impl EwfImageReader {
         let inner =
             ::ewf::EwfReader::open_lazy(path).map_err(|error| ImageOpenError::new(path, error))?;
         let length = inner.total_size();
+        // The remaining segments are discovered by the EWF reader, which
+        // does not report how many it found, so the log names the segment
+        // the set was entered through and the media it decodes to.
+        debug!(
+            first_segment = %path.display(),
+            size_bytes = length,
+            "opened an EWF segment set"
+        );
         Ok(Self { inner, length })
     }
 }

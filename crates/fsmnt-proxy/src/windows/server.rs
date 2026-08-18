@@ -9,6 +9,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::thread;
 
+use tracing::{info, warn};
 use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -122,8 +123,8 @@ impl Write for PipeStream {
 pub fn listen(endpoint: &str) -> io::Result<()> {
     let mut first = true;
 
-    eprintln!("fsmnt-proxy-server: listening on {endpoint}");
-    eprintln!("fsmnt-proxy-server: waiting for connections… (Ctrl+C to stop)");
+    info!(endpoint, "listening for proxy clients");
+    info!("waiting for connections (Ctrl+C to stop)");
 
     loop {
         let pipe_handle = create_pipe_instance(endpoint, first)?;
@@ -131,7 +132,7 @@ pub fn listen(endpoint: &str) -> io::Result<()> {
 
         // Block until a client connects.
         if let Err(e) = connect_pipe(pipe_handle) {
-            eprintln!("fsmnt-proxy-server: ConnectNamedPipe failed: {e}");
+            warn!(error = %e, "could not connect a named-pipe instance");
             unsafe {
                 let _ = CloseHandle(pipe_handle);
             }
@@ -142,11 +143,11 @@ pub fn listen(endpoint: &str) -> io::Result<()> {
         let stream = unsafe { PipeStream::from_raw(pipe_handle) };
 
         thread::spawn(move || {
-            eprintln!("fsmnt-proxy-server: client connected");
+            info!("client connected");
             if let Err(e) = handle_client(&stream) {
-                eprintln!("fsmnt-proxy-server: client error: {e}");
+                warn!(error = %e, "client connection failed");
             }
-            eprintln!("fsmnt-proxy-server: client disconnected");
+            info!("client disconnected");
             // `stream` is dropped here → CloseHandle
         });
     }
@@ -241,9 +242,9 @@ pub fn handle_client(pipe: &PipeStream) -> io::Result<()> {
                 let path_len = usize::from(path_len);
 
                 if flags != 0 {
-                    eprintln!(
-                        "fsmnt-proxy-server: ignoring unsupported flags 0x{flags:08X} \
-                         (flags are not supported on Windows)"
+                    warn!(
+                        flags = %format!("0x{flags:08X}"),
+                        "ignoring open flags requested by the client, flags are not supported on Windows"
                     );
                 }
 

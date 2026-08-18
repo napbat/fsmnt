@@ -20,6 +20,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 use fsmnt_device::DetectedBootSector;
 use fsmnt_parser_core::FS_DETECT_PROBE_SIZE;
+use tracing::debug;
 
 use crate::patched::PatchedReader;
 
@@ -128,14 +129,32 @@ pub(crate) fn find_if_primary_damaged(
     reader: &mut (impl Read + Seek + ?Sized),
     family: Family,
 ) -> io::Result<Option<BootBackup>> {
-    if family.accepts(classify_at(reader, 0)?) {
+    let primary = classify_at(reader, 0)?;
+    if family.accepts(primary) {
         return Ok(None);
     }
-    match family {
+    let backup = match family {
         Family::Fat => fat32_backup(reader),
         Family::ExFat => exfat_backup(reader),
         Family::Ntfs => ntfs_backup(reader),
+    }?;
+    if let Some(found) = &backup {
+        debug!(
+            family = ?family,
+            primary = ?primary,
+            offset = found.source_offset,
+            size_bytes = found.bytes.len(),
+            "sector 0 is not a usable boot sector; standing in the backup copy"
+        );
+    } else {
+        debug!(
+            family = ?family,
+            primary = ?primary,
+            "sector 0 is not a usable boot sector and no backup copy was found; \
+             opening from sector 0 regardless"
+        );
     }
+    Ok(backup)
 }
 
 /// FAT32 keeps the boot sector, `FSInfo` and the third boot sector again at

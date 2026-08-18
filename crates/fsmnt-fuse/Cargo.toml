@@ -11,6 +11,7 @@ ctrlc = { workspace = true }
 fsmnt-core = { workspace = true }
 fuser = { workspace = true }
 libc = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

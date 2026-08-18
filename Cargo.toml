@@ -61,6 +61,19 @@ lzokay = { version = "2", default-features = false, features = ["alloc", "decomp
 tempfile = "3"
 thiserror = { version = "2", default-features = false }
 time = { version = "0.3", default-features = false }
+# Structured diagnostics: libraries emit events, binaries subscribe.
+tracing = { version = "0.1", default-features = false, features = [
+    "std",
+    "attributes",
+] }
+# Subscriber side (binaries only); `tracing-log` also catches fuser's and ewf's `log` records.
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "ansi",
+    "env-filter",
+    "std",
+    "tracing-log",
+] }
 zerocopy = { version = "0.8", default-features = false }
 
 # Windows device access

@@ -19,6 +19,7 @@ use fsmnt_device::{
     HostDriveResult,
 };
 use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
+use tracing::debug;
 
 /// Linux host drive enumerator.
 ///
@@ -66,6 +67,16 @@ impl HostDriveEnumerator for LinuxHostDrives {
             if let Ok(info) = Self::get_drive_info(&id) {
                 drives.push(info);
             }
+        }
+
+        debug!(count = drives.len(), "enumerated physical drives");
+        for drive in &drives {
+            debug!(
+                drive = %drive.id,
+                size_bytes = ?drive.size_bytes,
+                accessible = drive.accessible,
+                "physical drive"
+            );
         }
 
         Ok(drives)

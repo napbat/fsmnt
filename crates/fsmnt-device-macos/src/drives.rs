@@ -26,6 +26,7 @@ use fsmnt_device::{
     HostDriveResult,
 };
 use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
+use tracing::debug;
 
 use crate::iokit;
 
@@ -131,6 +132,17 @@ impl HostDriveEnumerator for MacOsHostDrives {
         }
 
         drives.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+
+        debug!(count = drives.len(), "enumerated physical drives");
+        for drive in &drives {
+            debug!(
+                drive = %drive.id,
+                size_bytes = ?drive.size_bytes,
+                accessible = drive.accessible,
+                "physical drive"
+            );
+        }
+
         Ok(drives)
     }
 

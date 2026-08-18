@@ -14,6 +14,7 @@
 use std::mem::size_of;
 
 use nostdio::{Read, Seek, SeekFrom};
+use tracing::debug;
 
 use crate::partition_reader::PartitionReader;
 use crate::{
@@ -91,11 +92,29 @@ impl<R: Read + Seek> Disk<R> {
     /// detection probe.
     pub fn with_sector_size(mut reader: R, sector_size: u32) -> std::io::Result<Self> {
         let layout = Self::detect_layout(&mut reader, sector_size)?;
-        Ok(Self {
+        let disk = Self {
             reader,
             layout,
             sector_size,
-        })
+        };
+        let table = match &disk.layout {
+            DiskLayout::Gpt {
+                from_backup: false, ..
+            } => "GPT",
+            DiskLayout::Gpt {
+                from_backup: true, ..
+            } => "GPT recovered from the backup header",
+            DiskLayout::Mbr { .. } => "MBR",
+            DiskLayout::Bare(_) => "none, the whole disk is one filesystem",
+            DiskLayout::Unknown => "unknown",
+        };
+        debug!(
+            table,
+            sector_size,
+            entries = disk.partition_count(),
+            "classified the disk layout"
+        );
+        Ok(disk)
     }
 
     /// The sector size in bytes.

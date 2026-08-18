@@ -18,6 +18,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tracing::{debug, trace};
+
 /// Granularity at which a failing read is written off as zeros: one
 /// sector, so a bad-sector error costs 512 bytes, not the whole request.
 const ERROR_ZERO_FILL_GRANULE: u64 = 512;
@@ -126,6 +128,16 @@ enum Substituted {
     Errored,
 }
 
+impl Substituted {
+    /// Phrase naming this reason in a log record.
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Missing => "past the end of the source",
+            Self::Errored => "the source failed to read the sector",
+        }
+    }
+}
+
 /// `Read + Seek` adapter that zero-fills what its source cannot provide.
 ///
 /// The reader presents `length` bytes: reads beyond the source's actual end
@@ -140,6 +152,9 @@ pub struct TolerantReader<R> {
     length: u64,
     position: u64,
     stats: Arc<ReadSubstitutions>,
+    /// Whether this reader has already substituted anything, so the first
+    /// one can be announced. Logging only; nothing else reads it.
+    substituted: bool,
 }
 
 impl<R: Read + Seek> TolerantReader<R> {
@@ -179,6 +194,7 @@ impl<R: Read + Seek> TolerantReader<R> {
             length: declared_length.max(inner_len),
             position: 0,
             stats,
+            substituted: false,
         })
     }
 
@@ -203,6 +219,22 @@ impl<R: Read + Seek> TolerantReader<R> {
     fn zero_fill(&mut self, buf: &mut [u8], count: usize, why: Substituted) -> usize {
         buf[..count].fill(0);
         let end = self.position + count as u64;
+        let reason = why.reason();
+        if !self.substituted {
+            self.substituted = true;
+            debug!(
+                offset = self.position,
+                len = count,
+                reason,
+                "best-effort reads are now serving zeros for bytes the source cannot give"
+            );
+        }
+        trace!(
+            offset = self.position,
+            len = count,
+            reason,
+            "substituted zeros"
+        );
         self.stats.record(why, self.position, end);
         self.position = end;
         count

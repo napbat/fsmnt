@@ -28,6 +28,7 @@ use fsmnt_device::{
 };
 use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
+use tracing::debug;
 
 use crate::adapter::{found, read_at_through, read_up_to};
 use crate::identity;
@@ -255,6 +256,19 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
                 }
             }
         }
+        debug!(
+            replay = match &overlay {
+                Overlay::Clean => "not needed",
+                Overlay::Unreplayed => "declined by the caller",
+                Overlay::Journal(_) => "journal",
+                Overlay::Orphan(_) => "journal and orphan list",
+            },
+            dirty = ext.needs_journal_recovery() || ext.has_orphan_present(),
+            block_size = ext.block_size(),
+            inode_count = ext.inode_count(),
+            size_bytes = ext.size(),
+            "opened an ext volume"
+        );
         Self {
             reader,
             ext,
@@ -303,6 +317,10 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             Self::from_parts(reader, ext, Overlay::Unreplayed)
         };
         fs.salvage = true;
+        debug!(
+            journal_replay,
+            "salvage mode engaged; the root directory need not be listable"
+        );
         fs.notices.push(
             "salvage mode: every in-use inode found by sweeping the inode tables is listed under
              /.fsmnt-salvage as inode-N; the root directory is presented as empty if it cannot
@@ -478,6 +496,10 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     fn salvaged(&mut self) -> &[salvage::SalvagedInode] {
         if self.salvaged.is_none() {
             let found = self.with_reader(|ext, reader| salvage::sweep(ext, reader));
+            debug!(
+                inodes = found.len(),
+                "swept the inode tables for salvageable inodes"
+            );
             self.salvaged = Some(found);
         }
         self.salvaged.as_deref().unwrap_or_default()

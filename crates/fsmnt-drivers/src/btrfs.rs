@@ -15,6 +15,7 @@ use fsmnt_device::{
     DeviceSet, FilesystemDriver, FilesystemMemberDiscovery, FilesystemMemberId,
     FilesystemOpenOptions, FilesystemRoot, reject_unsupported_recovery,
 };
+use tracing::debug;
 
 use crate::identity;
 
@@ -278,7 +279,15 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
         volume
             .initialize()
             .map_err(|error| map_btrfs_error(error, "<bootstrap>"))?;
-        let root = match root {
+        if let Some(recovery) = volume.recovery() {
+            debug!(
+                backup_slot = recovery.backup_slot(),
+                generation = recovery.generation(),
+                backup_chunk_tree = recovery.used_backup_chunk_tree(),
+                "the current Btrfs superblock roots were unusable; bootstrapped from a backup root"
+            );
+        }
+        let entry = match root {
             FilesystemRoot::Default => volume.root(),
             FilesystemRoot::TopLevel => volume.top_level_root(),
             FilesystemRoot::Id(tree_id) => volume.subvolume_root(*tree_id),
@@ -293,7 +302,20 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
             }
         }
         .map_err(|error| map_btrfs_error(error, "<subvolume>"))?;
-        Ok(Self { volume, root })
+        debug!(
+            selector = ?root,
+            tree_id = entry.tree_id(),
+            object_id = entry.object_id(),
+            sector_size = volume.superblock().sector_size(),
+            node_size = volume.superblock().node_size(),
+            devices = volume.superblock().num_devices(),
+            size_bytes = volume.superblock().total_bytes(),
+            "opened a Btrfs volume"
+        );
+        Ok(Self {
+            volume,
+            root: entry,
+        })
     }
 
     /// Access the format parser.

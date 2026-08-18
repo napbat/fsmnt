@@ -13,6 +13,7 @@
 
 use fs_ext::io::{Read, Seek, SeekFrom};
 use fsmnt_core::{FsError, FsResult};
+use tracing::debug;
 
 use crate::patched::PatchedReader;
 
@@ -293,6 +294,14 @@ pub(super) fn patch_from_backup<R: Read + Seek>(
         )));
     };
 
+    debug!(
+        group,
+        offset,
+        block_size = geometry.block_size,
+        blocks_per_group = geometry.blocks_per_group,
+        meta_bg = geometry.is_meta_bg(),
+        "found the ext backup superblock; presenting it where the primary belongs"
+    );
     let mut patched = PatchedReader::new(reader).with_patch(SUPERBLOCK_OFFSET, superblock);
     if !geometry.is_meta_bg() {
         patch_group_descriptors(&mut patched, offset, geometry)?;

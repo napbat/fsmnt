@@ -20,6 +20,7 @@ use fsmnt_device::{
     HostDriveResult, HostVolumeResolver, LogicalVolume, LogicalVolumeId, PhysicalExtent,
 };
 use fsmnt_proxy::{OpenMode, open_with_proxy_fallback};
+use tracing::debug;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
@@ -99,6 +100,16 @@ impl HostDriveEnumerator for WindowsHostDrives {
                 Err(HostDriveError::NotFound(_)) => {}
                 Err(e) => return Err(e),
             }
+        }
+
+        debug!(count = drives.len(), "enumerated physical drives");
+        for drive in &drives {
+            debug!(
+                drive = %drive.id,
+                size_bytes = ?drive.size_bytes,
+                accessible = drive.accessible,
+                "physical drive"
+            );
         }
 
         Ok(drives)
