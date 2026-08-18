@@ -471,3 +471,44 @@ fn ext_replay_failure_points_at_the_no_replay_view() {
         .expect("the on-disk view is unaffected by the broken journal");
     assert!(raw.try_is_dir("/").expect("root should stat"));
 }
+
+/// `read_at` must agree with `read` at every offset, and stop at the end:
+/// the mount backends read files in chunks through it, so a mismatch is a
+/// corrupted copy and an over-read is a hang or an OOM on a lying size.
+fn assert_positioned_reads_match(fs: &mut dyn TargetFilesystem, path: &str) {
+    let whole = fs.read(path).expect("whole-file read");
+    assert!(!whole.is_empty(), "{path} should have content");
+    let len = whole.len();
+    for (offset, want) in [(0, 7), (1, len - 1), (len / 2, 3), (len - 1, 16), (len, 4)] {
+        let mut buffer = vec![0xEE_u8; want];
+        let got = fs
+            .read_at(path, offset as u64, &mut buffer)
+            .unwrap_or_else(|e| panic!("read_at({offset}, {want}) failed: {e}"));
+        let expected = &whole[offset.min(len)..(offset + want).min(len)];
+        assert_eq!(got, expected.len(), "count at offset {offset}");
+        assert_eq!(&buffer[..got], expected, "bytes at offset {offset}");
+    }
+}
+
+#[test]
+fn positioned_reads_agree_with_whole_file_reads() {
+    if let Some(image) = fixture("fs-exfat", "testfs1") {
+        let (_, mut fs) = open(image);
+        let file = fs
+            .read_dir("/")
+            .expect("root")
+            .into_iter()
+            .find(|e| !e.metadata.is_dir && e.metadata.size > 32)
+            .expect("a file with content");
+        assert_positioned_reads_match(fs.as_mut(), &file.name);
+    } else {
+        eprintln!("skipping exFAT: fs-exfat/testdata/testfs1 not generated");
+    }
+    if let Some(image) = fixture("fs-ext", "ext4.img") {
+        let (_, mut fs) = open(image);
+        assert_positioned_reads_match(fs.as_mut(), "/hello.txt");
+        assert_positioned_reads_match(fs.as_mut(), "/multiblock.bin");
+    } else {
+        eprintln!("skipping ext: fs-ext/testdata/ext4.img not generated");
+    }
+}

@@ -47,19 +47,87 @@ pub enum ImageLayoutKind {
     Bare(DetectedBootSector),
     /// Neither a partition table nor a recognized filesystem at offset 0.
     Unknown,
+    /// **Synthetic**: no table was read; the entries were reconstructed by
+    /// scanning the media for filesystem starts (see
+    /// [`LayoutOrigin::Scan`]).
+    Scanned,
+}
+
+/// Where an [`ImageLayout`]'s entries came from — the provenance a listing
+/// or a mount must state, because a table read from the media, a table
+/// recovered from its backup copy, and a table *made up* from a scan are
+/// three different levels of evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutOrigin {
+    /// Read from the partition table at the front of the media: the GPT
+    /// header at LBA 1 or the MBR at LBA 0.
+    Table,
+    /// Read from the GPT backup header in the last sector of the media
+    /// because the primary at LBA 1 was wiped or invalid. The entries are
+    /// the disk's own; the front of the media is what is damaged.
+    BackupTable,
+    /// Reconstructed by scanning the media for filesystem starts with the
+    /// given stride, ignoring any partition table. Synthetic: the ordinals
+    /// hold only for the same image scanned with the same stride, sizes are
+    /// what each filesystem claims for itself, and there are no partition
+    /// names or type GUIDs.
+    Scan {
+        /// Distance between the candidate positions the scan tested.
+        stride: u64,
+    },
+    /// The image holds no table; its single entry is the whole image.
+    None,
 }
 
 /// Sector-size and other choices for enumerating an image's layout.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ImageLayoutOptions {
     sector_size: Option<u32>,
+    scan: bool,
+    scan_stride: u64,
 }
 
 impl ImageLayoutOptions {
     /// Enumerate with automatic sector-size selection.
     #[must_use]
     pub const fn new() -> Self {
-        Self { sector_size: None }
+        Self {
+            sector_size: None,
+            scan: false,
+            scan_stride: crate::scan::DEFAULT_STRIDE,
+        }
+    }
+
+    /// Ignore any partition table and reconstruct the layout by scanning
+    /// the media for filesystem starts (the same search as `fsmnt scan`).
+    ///
+    /// The result is marked [`LayoutOrigin::Scan`] and
+    /// [`ImageLayoutKind::Scanned`] so nothing downstream mistakes it for a
+    /// table the media carried.
+    #[must_use]
+    pub const fn with_scan(mut self, scan: bool) -> Self {
+        self.scan = scan;
+        self
+    }
+
+    /// Distance between candidate positions when scanning; see
+    /// [`ScanOptions::with_stride`](crate::ScanOptions::with_stride).
+    #[must_use]
+    pub const fn with_scan_stride(mut self, stride: u64) -> Self {
+        self.scan_stride = stride;
+        self
+    }
+
+    /// Whether the layout is to be reconstructed by scanning.
+    #[must_use]
+    pub const fn scan(&self) -> bool {
+        self.scan
+    }
+
+    /// The scan stride in bytes.
+    #[must_use]
+    pub const fn scan_stride(&self) -> u64 {
+        self.scan_stride
     }
 
     /// Read the partition table in sectors of `sector_size` bytes.
@@ -146,10 +214,9 @@ pub struct ImageLayout {
     /// supplied: 512-byte sectors found no partition table and 4096-byte
     /// sectors found a GPT.
     pub sector_size_auto_detected: bool,
-    /// Whether the GPT was read from the backup header in the last sector
-    /// because the primary at LBA 1 was wiped or invalid. The partitions are
-    /// the same; the front of the media is what is damaged.
-    pub gpt_from_backup: bool,
+    /// Where the entries came from: the media's own table, its backup copy,
+    /// or a synthetic reconstruction from a scan.
+    pub origin: LayoutOrigin,
     /// Length of the decoded media in bytes.
     pub size_bytes: u64,
     /// Partition table found at the start of the decoded media.
@@ -181,6 +248,9 @@ pub(crate) struct LocatedImagePartition {
     pub(crate) declared_bytes: u64,
     /// Bytes of that extent the decoded media actually carries.
     pub(crate) available_bytes: u64,
+    /// Where the table this partition came from was read from, or `None`
+    /// for a caller-supplied byte offset.
+    pub(crate) origin: Option<LayoutOrigin>,
 }
 
 /// List the partitions inside a raw, EWF, VHD, or VHDX disk image.
@@ -239,6 +309,9 @@ pub(crate) fn read_image_layout(
     path: &Path,
     options: ImageLayoutOptions,
 ) -> Result<ImageLayoutView, OpenImageError> {
+    if options.scan {
+        return layout_from_scan(path, options);
+    }
     if let Some(sector_size) = options.sector_size {
         return layout_at_sector_size(path, sector_size, false);
     }
@@ -260,7 +333,7 @@ pub(crate) fn read_image_layout(
 /// filtered out for being GPT-protective.
 fn describes_the_media(view: &ImageLayoutView) -> bool {
     match view.layout.kind {
-        ImageLayoutKind::Gpt | ImageLayoutKind::Bare(_) => true,
+        ImageLayoutKind::Gpt | ImageLayoutKind::Bare(_) | ImageLayoutKind::Scanned => true,
         ImageLayoutKind::Mbr => !view.layout.partitions.is_empty(),
         ImageLayoutKind::Unknown => false,
     }
@@ -282,13 +355,13 @@ fn layout_at_sector_size(
         })?;
     let sector_size = disk.sector_size();
 
-    let gpt_from_backup = matches!(
-        disk.layout(),
+    let origin = match disk.layout() {
         DiskLayout::Gpt {
-            from_backup: true,
-            ..
-        }
-    );
+            from_backup: true, ..
+        } => LayoutOrigin::BackupTable,
+        DiskLayout::Gpt { .. } | DiskLayout::Mbr { .. } => LayoutOrigin::Table,
+        DiskLayout::Bare(_) | DiskLayout::Unknown => LayoutOrigin::None,
+    };
     let (kind, entries) = match disk.layout().clone() {
         DiskLayout::Gpt { .. } => (ImageLayoutKind::Gpt, gpt_entries(&mut disk)),
         DiskLayout::Mbr { .. } => (ImageLayoutKind::Mbr, mbr_entries(&disk)),
@@ -322,7 +395,7 @@ fn layout_at_sector_size(
             format,
             sector_size,
             sector_size_auto_detected: auto_detected,
-            gpt_from_backup,
+            origin,
             size_bytes,
             kind,
             partitions,
@@ -336,6 +409,77 @@ fn missing_bytes(offset: u64, size_bytes: u64, image_size: u64) -> u64 {
         .saturating_add(size_bytes)
         .saturating_sub(image_size)
         .min(size_bytes)
+}
+
+/// Reconstruct a layout by scanning the media for filesystem starts.
+///
+/// Every mountable scan hit (see [`crate::mountable_hits`]) becomes one
+/// entry, in scan order: its offset is the filesystem start, its size is
+/// what the filesystem claims for itself (or the rest of the image when the
+/// format does not say), its type is the detected filesystem, and it has no
+/// name. An ext filesystem found only through a backup superblock is listed
+/// too — at the start the copy implies — so `--partition` on it produces
+/// the "primary damaged, retry with `--backup-superblock`" guidance rather
+/// than nothing.
+fn layout_from_scan(
+    path: &Path,
+    options: ImageLayoutOptions,
+) -> Result<ImageLayoutView, OpenImageError> {
+    let stride = options.scan_stride;
+    let hits =
+        crate::scan::scan_image_with_options(path, crate::ScanOptions::new().with_stride(stride))
+            .map_err(|source| OpenImageError::Scan {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let image = ImageReader::open(path)?;
+    let format = image.format();
+    let size_bytes = image.len();
+    let sector_size = options.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE);
+
+    let partitions = crate::mountable_hits(&hits)
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, hit)| {
+            let offset = hit.mount_offset().unwrap_or(hit.offset);
+            let rest = size_bytes.saturating_sub(offset);
+            let claimed = hit.size_bytes.unwrap_or(rest);
+            let (type_name, detected) = match hit.kind {
+                crate::ScanHitKind::Filesystem(detected) => {
+                    (Some(format!("{detected:?} (scan)")), Some(detected))
+                }
+                crate::ScanHitKind::ExtBackupSuperblock { group, .. } => (
+                    Some(format!(
+                        "Ext (scan; primary damaged, backup at group {group})"
+                    )),
+                    Some(DetectedBootSector::Unknown),
+                ),
+                crate::ScanHitKind::PartitionTable(_) => (None, None),
+            };
+            ImagePartition {
+                ordinal,
+                offset,
+                size_bytes: claimed,
+                missing_bytes: missing_bytes(offset, claimed, size_bytes),
+                type_name,
+                name: None,
+                detected,
+            }
+        })
+        .collect();
+
+    Ok(ImageLayoutView {
+        image,
+        layout: ImageLayout {
+            format,
+            sector_size,
+            sector_size_auto_detected: false,
+            origin: LayoutOrigin::Scan { stride },
+            size_bytes,
+            kind: ImageLayoutKind::Scanned,
+            partitions,
+        },
+    })
 }
 
 /// Resolve `partition` to its extent, reusing the enumeration ordinals.
@@ -370,6 +514,7 @@ pub(crate) fn locate_image_partition(
         offset: selected.offset,
         declared_bytes: selected.size_bytes,
         available_bytes: selected.available_bytes(),
+        origin: Some(layout.origin),
     })
 }
 

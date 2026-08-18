@@ -21,7 +21,7 @@ use fsmnt_core::{
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
 
-use crate::adapter::{found, read_up_to};
+use crate::adapter::{found, read_at_through, read_up_to};
 use crate::boot_backup;
 use crate::identity;
 
@@ -148,6 +148,26 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
         read_up_to(length, |buffer| {
             file.read(&mut self.reader, buffer)
                 .map_err(|e| map_exfat_error(e, path))
+        })
+    }
+
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let Some(entry) = self.entry_at(path)? else {
+            return Err(FsError::NotAFile(path.to_string()));
+        };
+        if entry.is_directory() {
+            return Err(FsError::NotAFile(path.to_string()));
+        }
+        let mut file = fs_exfat::ExFatFile::new(
+            &self.exfat,
+            &mut self.reader,
+            entry.first_cluster(),
+            entry.data_length(),
+            entry.no_fat_chain(),
+        )
+        .map_err(|e| map_exfat_error(e, path))?;
+        read_at_through(&mut file, &mut self.reader, offset, buffer, |e| {
+            map_exfat_error(e, path)
         })
     }
 

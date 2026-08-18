@@ -20,7 +20,7 @@ use fsmnt_device::{
 };
 
 use crate::ext_backup;
-use crate::image_layout::{self, ImageLayoutOptions};
+use crate::image_layout::{self, ImageLayoutOptions, LayoutOrigin};
 use crate::truncation;
 
 /// A filesystem opened from a decoded disk-image container, ready to mount.
@@ -59,6 +59,12 @@ pub struct OpenedImage {
     /// [`ImageOpenOptions::with_best_effort_reads`], and shared with the
     /// reader so a caller can report them after the mount ends.
     pub substitutions: Option<Arc<ReadSubstitutions>>,
+    /// Where the partition ordinal was resolved, when one was used: the
+    /// image's own table, its backup GPT, or a **synthetic** table
+    /// reconstructed from a scan ([`LayoutOrigin::Scan`]). `None` when the
+    /// filesystem was addressed by byte offset. Library callers that record
+    /// how a volume was located should keep this alongside the mount.
+    pub layout_origin: Option<LayoutOrigin>,
 }
 
 /// Failure to decode an image or open a filesystem within its virtual media.
@@ -99,6 +105,15 @@ pub enum OpenImageError {
         /// Underlying seek or read failure.
         #[source]
         source: std::io::Error,
+    },
+    /// Reconstructing the layout by scanning the media failed part-way.
+    #[error("failed to scan {path:?} for filesystems: {source}")]
+    Scan {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// The scan failure.
+        #[source]
+        source: crate::ScanError,
     },
     /// The requested partition ordinal is not present in the image.
     #[error(
@@ -200,6 +215,7 @@ pub struct ImageOpenOptions {
     offset: u64,
     partition: Option<usize>,
     sector_size: Option<u32>,
+    scan_stride: Option<u64>,
     best_effort_reads: bool,
     filesystem: FilesystemOpenOptions,
 }
@@ -213,9 +229,22 @@ impl ImageOpenOptions {
             offset: 0,
             partition: None,
             sector_size: None,
+            scan_stride: None,
             best_effort_reads: false,
             filesystem: FilesystemOpenOptions::new(),
         }
+    }
+
+    /// Resolve [`with_partition`](Self::with_partition) against a
+    /// **synthetic** table reconstructed by scanning the media every
+    /// `stride` bytes for filesystem starts, instead of the partition table
+    /// at the front of the image (see [`LayoutOrigin::Scan`]). The ordinal
+    /// then means "the N-th filesystem the scan finds", which holds only for
+    /// this image at this stride.
+    #[must_use]
+    pub const fn with_scan(mut self, stride: u64) -> Self {
+        self.scan_stride = Some(stride);
+        self
     }
 
     /// Zero-fill what the image cannot provide instead of failing the read:
@@ -313,6 +342,13 @@ impl ImageOpenOptions {
         self.sector_size
     }
 
+    /// The stride of the media scan a partition ordinal is resolved against,
+    /// or `None` when the image's own partition table is used.
+    #[must_use]
+    pub const fn scan_stride(&self) -> Option<u64> {
+        self.scan_stride
+    }
+
     /// Whether reads the image cannot satisfy are zero-filled rather than
     /// failed.
     #[must_use]
@@ -380,6 +416,7 @@ pub fn open_image_with_options(
         offset,
         partition,
         sector_size,
+        scan_stride,
         best_effort_reads,
         filesystem,
     } = options;
@@ -388,10 +425,14 @@ pub fn open_image_with_options(
         offset,
         declared_bytes,
         available_bytes,
+        origin: layout_origin,
     } = if let Some(partition) = partition {
         let mut layout_options = ImageLayoutOptions::new();
         if let Some(sector_size) = sector_size {
             layout_options = layout_options.with_sector_size(sector_size);
+        }
+        if let Some(stride) = scan_stride {
+            layout_options = layout_options.with_scan(true).with_scan_stride(stride);
         }
         image_layout::locate_image_partition(path, partition, layout_options)?
     } else {
@@ -465,6 +506,7 @@ pub fn open_image_with_options(
         truncated_by,
         format,
         substitutions,
+        layout_origin,
     })
 }
 
@@ -492,6 +534,7 @@ fn open_image_tail(
         offset,
         declared_bytes: available_bytes,
         available_bytes,
+        origin: None,
     })
 }
 

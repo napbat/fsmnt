@@ -305,6 +305,35 @@ impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
             .map_err(|e| map_apfs_error(e, path))
     }
 
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let obj_id = self.navigate(path)?;
+        let inode = self
+            .volume
+            .inode(&mut self.reader, obj_id)
+            .map_err(|e| map_apfs_error(e, path))?
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
+        if inode.file_type() != FileType::Regular {
+            return Err(FsError::NotAFile(path.to_string()));
+        }
+        let xattrs = Xattr::list(self.volume.catalog(), &mut self.reader, obj_id)
+            .map_err(|e| map_apfs_error(e, path))?;
+        if xattrs.iter().any(|x| x.name == DECMPFS_XATTR) {
+            return Err(FsError::Filesystem(format!(
+                "'{path}' uses decmpfs transparent compression, which is not supported"
+            )));
+        }
+        let size = Self::data_stream_size(&inode)?;
+        let file = File::open(
+            self.volume.catalog(),
+            &mut self.reader,
+            inode.private_id,
+            size,
+        )
+        .map_err(|e| map_apfs_error(e, path))?;
+        file.read_at(&mut self.reader, self.block_size, offset, buffer)
+            .map_err(|e| map_apfs_error(e, path))
+    }
+
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
         found(self.navigate(path))
     }

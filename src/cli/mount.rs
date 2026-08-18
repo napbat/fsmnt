@@ -38,6 +38,9 @@ pub(crate) struct MountImageOptions<'a> {
     pub(crate) mountpoint: &'a str,
     /// Partition ordinal to mount, as listed by `fsmnt partitions IMAGE`.
     pub(crate) partition: Option<usize>,
+    /// When set, resolve the ordinal against a synthetic table reconstructed
+    /// by scanning the media with this stride, not the image's own table.
+    pub(crate) scan_stride: Option<u64>,
     /// Offset of the filesystem; used when no partition is selected. A
     /// sector count here is resolved against `sector_size`.
     pub(crate) offset: SizeExpr,
@@ -68,6 +71,9 @@ pub(crate) fn handle_mount_image(
     if let Some(sector_size) = options.sector_size {
         open_options = open_options.with_sector_size(sector_size);
     }
+    if let Some(stride) = options.scan_stride {
+        open_options = open_options.with_scan(stride);
+    }
     let open_options = match options.partition {
         Some(partition) => open_options.with_partition(partition),
         None => open_options.with_offset(options.offset.resolve(sector_size(options.sector_size))?),
@@ -92,6 +98,22 @@ pub(crate) fn handle_mount_image(
         opened.format,
         image.display(),
     );
+    // Say what the partition ordinal was resolved against whenever that was
+    // not simply the table at the front of the image — the provenance of an
+    // offset matters as much as the offset.
+    match opened.layout_origin {
+        Some(fsmnt::LayoutOrigin::Scan { stride }) => eprintln!(
+            "notice: partition {} is an entry of a SYNTHETIC table reconstructed by scanning the \
+             media every {stride} bytes — no partition table was read from the image, and the \
+             number is valid only for this image at this stride",
+            options.partition.unwrap_or_default()
+        ),
+        Some(fsmnt::LayoutOrigin::BackupTable) => eprintln!(
+            "notice: the partition table was recovered from the GPT backup header in the last \
+             sector; the primary at the front of the image is damaged"
+        ),
+        Some(fsmnt::LayoutOrigin::Table | fsmnt::LayoutOrigin::None) | None => {}
+    }
     warn_if_truncated(opened.truncated_by, opened.size_bytes, "image");
     block_on_mount(
         opened.filesystem,

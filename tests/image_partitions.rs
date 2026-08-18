@@ -16,9 +16,9 @@ use fsmnt::device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, GptPartitionEntry, ImageFormat,
 };
 use fsmnt::{
-    FsEntry, FsError, FsMetadata, FsResult, ImageLayoutKind, ImageOpenOptions, OpenImageError,
-    TargetFilesystem, image_layout, image_layout_with_sector_size, open_image,
-    open_image_with_options,
+    FsEntry, FsError, FsMetadata, FsResult, ImageLayoutKind, ImageLayoutOptions, ImageOpenOptions,
+    LayoutOrigin, OpenImageError, TargetFilesystem, image_layout, image_layout_with_options,
+    image_layout_with_sector_size, open_image, open_image_with_options,
 };
 
 const SECTOR_SIZE: usize = 512;
@@ -499,8 +499,9 @@ fn a_wiped_front_gpt_is_read_from_its_backup_header() {
 
     let layout = image_layout(&path).expect("enumerate the wiped-front image");
     assert!(matches!(layout.kind, ImageLayoutKind::Gpt));
-    assert!(
-        layout.gpt_from_backup,
+    assert_eq!(
+        layout.origin,
+        LayoutOrigin::BackupTable,
         "the table must come from the backup"
     );
     assert!(!layout.sector_size_auto_detected);
@@ -516,9 +517,75 @@ fn a_wiped_front_gpt_is_read_from_its_backup_header() {
     let intact = gpt_disk_with_backup(256);
     let (_directory, intact_path) = image_file(&intact);
     let intact_layout = image_layout(&intact_path).expect("enumerate the intact image");
-    assert!(!intact_layout.gpt_from_backup);
+    assert_eq!(intact_layout.origin, LayoutOrigin::Table);
     assert_eq!(
         intact_layout.partitions[0].offset,
         layout.partitions[0].offset
     );
+}
+
+#[test]
+fn a_layout_reconstructed_by_scanning_is_marked_synthetic_and_mountable() {
+    let (_directory, path) = image_file(&mbr_partitioned_media());
+
+    // The MBR is ignored on purpose: the NTFS volume is found by scanning.
+    // Its start is not 4 KiB-aligned in this synthetic media, so the finer
+    // stride is what a real user would reach for after a default scan came
+    // up empty.
+    let options = ImageLayoutOptions::new()
+        .with_scan(true)
+        .with_scan_stride(512);
+    let layout = image_layout_with_options(&path, options).expect("reconstruct by scanning");
+
+    assert!(matches!(layout.kind, ImageLayoutKind::Scanned));
+    assert_eq!(
+        layout.origin,
+        LayoutOrigin::Scan { stride: 512 },
+        "a scan-built table must declare its provenance"
+    );
+    let ntfs = layout
+        .partitions
+        .iter()
+        .find(|p| p.detected == Some(DetectedBootSector::Ntfs))
+        .expect("the NTFS volume is found without the table");
+    assert_eq!(ntfs.offset, ntfs_offset() as u64);
+    assert!(ntfs.name.is_none(), "a scan has no partition names");
+    assert!(
+        ntfs.type_name.as_deref().unwrap_or("").contains("scan"),
+        "the type column says where it came from: {:?}",
+        ntfs.type_name
+    );
+
+    // The same ordinal mounts through ImageOpenOptions::with_scan, and the
+    // opened image carries the provenance for the caller.
+    let opened = open_image_with_options(
+        &path,
+        &registry(),
+        ImageOpenOptions::new()
+            .with_partition(ntfs.ordinal)
+            .with_scan(512),
+    )
+    .expect("mount by synthetic ordinal");
+    assert_eq!(opened.detected, DetectedBootSector::Ntfs);
+    assert_eq!(opened.offset, ntfs_offset() as u64);
+    assert_eq!(
+        opened.layout_origin,
+        Some(LayoutOrigin::Scan { stride: 512 })
+    );
+
+    // Whereas the table-based path says so too — differently.
+    let by_table = open_image_with_options(
+        &path,
+        &registry(),
+        ImageOpenOptions::new().with_partition(1),
+    )
+    .expect("mount by table ordinal");
+    assert_eq!(by_table.layout_origin, Some(LayoutOrigin::Table));
+    let by_offset = open_image_with_options(
+        &path,
+        &registry(),
+        ImageOpenOptions::new().with_offset(ntfs_offset() as u64),
+    )
+    .expect("mount by offset");
+    assert_eq!(by_offset.layout_origin, None);
 }

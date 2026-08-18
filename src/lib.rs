@@ -121,15 +121,15 @@ mod truncation;
 pub use backend::{is_mounted, mount, unmount};
 pub use fstab_mount::open_device_partition_with_fstab;
 pub use image_layout::{
-    ImageLayout, ImageLayoutKind, ImageLayoutOptions, ImagePartition, image_layout,
+    ImageLayout, ImageLayoutKind, ImageLayoutOptions, ImagePartition, LayoutOrigin, image_layout,
     image_layout_with_options, image_layout_with_sector_size,
 };
 pub use open_image::{
     ImageOpenOptions, OpenImageError, OpenedImage, open_image, open_image_with_options,
 };
 pub use scan::{
-    DEFAULT_STRIDE, ExtBackupSuperblock, ScanError, ScanHit, ScanHitKind, ScanOptions, scan_image,
-    scan_image_with_options,
+    DEFAULT_STRIDE, ExtBackupSuperblock, ScanError, ScanHit, ScanHitKind, ScanOptions,
+    mountable_hits, scan_image, scan_image_with_options,
 };
 pub use truncation::missing_filesystem_bytes;
 

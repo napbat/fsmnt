@@ -17,7 +17,7 @@ use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::iter::FsTryIterator;
 
-use crate::adapter::{found, found_and, read_up_to};
+use crate::adapter::{found, found_and, read_at_through, read_up_to};
 use crate::boot_backup;
 use crate::identity;
 
@@ -167,6 +167,21 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
             data_value
                 .read(&mut self.reader, buffer)
                 .map_err(|e| map_fat_error(e, path))
+        })
+    }
+
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let normalized = normalize_path(path);
+        let file = self
+            .fat
+            .open(&mut self.reader, &normalized)
+            .map_err(|e| map_fat_error(e, path))?;
+        if file.is_directory() {
+            return Err(FsError::NotAFile(path.to_string()));
+        }
+        let mut data_value = file.data().map_err(|e| map_fat_error(e, path))?;
+        read_at_through(&mut data_value, &mut self.reader, offset, buffer, |e| {
+            map_fat_error(e, path)
         })
     }
 

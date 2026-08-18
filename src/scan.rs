@@ -102,6 +102,39 @@ pub struct ScanHit {
     pub backup_superblocks: Vec<ExtBackupSuperblock>,
 }
 
+impl ScanHit {
+    /// The offset `mount-image --offset` would take for this hit, if it is
+    /// mountable at all.
+    ///
+    /// A partition table is not mountable, and a stray backup superblock is
+    /// mountable only at the filesystem start it implies — never at its own
+    /// offset, which the ext driver refuses on purpose.
+    #[must_use]
+    pub const fn mount_offset(&self) -> Option<u64> {
+        match self.kind {
+            ScanHitKind::Filesystem(_) => Some(self.offset),
+            ScanHitKind::ExtBackupSuperblock {
+                filesystem_start, ..
+            } => filesystem_start,
+            ScanHitKind::PartitionTable(_) => None,
+        }
+    }
+}
+
+/// The hits a scan numbers for `mount-image --scanned N`: every hit with a
+/// [`mount_offset`](ScanHit::mount_offset), in scan order.
+///
+/// The number is **synthetic** — it comes from this scan of this image with
+/// these options, not from any partition table on the media — so it holds
+/// only for the same image scanned with the same stride. It is a convenience
+/// over pasting the offset, not an identity of the volume.
+#[must_use]
+pub fn mountable_hits(hits: &[ScanHit]) -> Vec<&ScanHit> {
+    hits.iter()
+        .filter(|hit| hit.mount_offset().is_some())
+        .collect()
+}
+
 /// The kind of structure a [`ScanHit`] identifies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanHitKind {

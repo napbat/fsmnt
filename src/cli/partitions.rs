@@ -51,9 +51,16 @@ pub(crate) fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
 pub(crate) fn handle_partitions(
     target: &str,
     sector_size: Option<u32>,
+    scan_stride: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if is_image_target(target) {
-        image_partitions(Path::new(target), sector_size)
+        image_partitions(Path::new(target), sector_size, scan_stride)
+    } else if scan_stride.is_some() {
+        Err(format!(
+            "--scan reconstructs a table from an image file; {target} is a drive ID — image the \
+             drive first, or use `fsmnt scan` on an image"
+        )
+        .into())
     } else {
         drive_partitions(target, sector_size)
     }
@@ -73,12 +80,16 @@ pub(super) fn is_image_target(target: &str) -> bool {
 fn image_partitions(
     image: &Path,
     sector_size: Option<u32>,
+    scan_stride: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use fsmnt::{ImageLayoutKind, ImageLayoutOptions};
+    use fsmnt::{ImageLayoutKind, ImageLayoutOptions, LayoutOrigin};
 
     let mut options = ImageLayoutOptions::new();
     if let Some(sector_size) = sector_size {
         options = options.with_sector_size(sector_size);
+    }
+    if let Some(stride) = scan_stride {
+        options = options.with_scan(true).with_scan_stride(stride);
     }
     let layout = fsmnt::image_layout_with_options(image, options)?;
     let detected_note = if layout.sector_size_auto_detected {
@@ -95,8 +106,12 @@ fn image_partitions(
     );
 
     match layout.kind {
+        ImageLayoutKind::Scanned => {
+            print_scanned_layout(image, &layout);
+            return Ok(());
+        }
         ImageLayoutKind::Gpt => {
-            if layout.gpt_from_backup {
+            if layout.origin == LayoutOrigin::BackupTable {
                 println!(
                     "GPT partition table (recovered from the backup header in the last sector; \
                      the primary header at the front of the image is damaged)"
@@ -160,6 +175,53 @@ fn image_partitions(
         );
     }
     Ok(())
+}
+
+/// Print a layout reconstructed from a scan, saying loudly that it is
+/// synthetic: nothing about it was read from a partition table.
+fn print_scanned_layout(image: &Path, layout: &fsmnt::ImageLayout) {
+    use fsmnt::LayoutOrigin;
+
+    let stride = match layout.origin {
+        LayoutOrigin::Scan { stride } => stride,
+        _ => fsmnt::DEFAULT_STRIDE,
+    };
+    println!(
+        "SYNTHETIC partition table — reconstructed by scanning the media every {stride} \
+         bytes for filesystem starts. No table was read from the image: sizes are what \
+         each filesystem claims for itself, there are no names or type GUIDs, and the \
+         numbers hold only for this image scanned with this stride."
+    );
+    println!(
+        "{:>4}  {:<40} {:>12} {:>14}  FILESYSTEM",
+        "#", "TYPE (from scan)", "SIZE", "OFFSET"
+    );
+    for partition in &layout.partitions {
+        println!(
+            "{:>4}  {:<40} {:>12} {:>14}  {}",
+            partition.ordinal,
+            partition.type_name.as_deref().unwrap_or("Unknown"),
+            format_size(partition.size_bytes),
+            partition.offset,
+            filesystem_column(partition),
+        );
+    }
+    if layout.partitions.is_empty() {
+        println!(
+            "(the scan found no filesystems; a start off a {stride}-byte boundary needs --stride 512)"
+        );
+    } else {
+        let stride_flag = if stride == fsmnt::DEFAULT_STRIDE {
+            String::new()
+        } else {
+            format!(" --stride {stride}")
+        };
+        println!(
+            "\nMount one with: fsmnt mount-image {} <MOUNTPOINT> --scan{stride_flag} \
+             --partition <#>   (synthetic numbering — from this scan, not from the image)",
+            image.display()
+        );
+    }
 }
 
 /// Column text for a partition's detected filesystem.

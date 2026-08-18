@@ -181,6 +181,7 @@ fn partitions_accepts_a_drive_id_or_an_image_path() {
         let Commands::Partitions {
             target: parsed,
             sector_size,
+            ..
         } = cli.command
         else {
             panic!("wrong command");

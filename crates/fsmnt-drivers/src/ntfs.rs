@@ -16,7 +16,7 @@ use fsmnt_core::{
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 
-use crate::adapter::found;
+use crate::adapter::{found, read_at_through};
 use crate::boot_backup;
 use crate::identity;
 use fsmnt_parser_core::iter::FsTryIterator;
@@ -179,6 +179,27 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
             .map_err(|e| FsError::Io(io::Error::other(e.to_string())))?;
 
         Ok(buffer)
+    }
+
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let record = self.navigate_to_record(path)?;
+        let file = self
+            .ntfs
+            .file(&mut self.reader, record)
+            .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
+        let data_attr = file
+            .data(&mut self.reader, "")
+            .ok_or_else(|| FsError::NotAFile(path.to_string()))?
+            .map_err(|e| FsError::Filesystem(format!("failed to get data attribute: {e}")))?;
+        let data_attr = data_attr
+            .to_attribute()
+            .map_err(|e| FsError::Filesystem(format!("failed to convert attribute: {e}")))?;
+        let mut data_value = data_attr
+            .value(&mut self.reader)
+            .map_err(|e| FsError::Filesystem(format!("failed to get attribute value: {e}")))?;
+        read_at_through(&mut data_value, &mut self.reader, offset, buffer, |e| {
+            FsError::Io(io::Error::other(e.to_string()))
+        })
     }
 
     // `open` is deliberately left at the trait default (read into a

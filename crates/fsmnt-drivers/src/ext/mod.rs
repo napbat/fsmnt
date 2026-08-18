@@ -29,7 +29,7 @@ use fsmnt_device::{
 use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
 
-use crate::adapter::{found, read_up_to};
+use crate::adapter::{found, read_at_through, read_up_to};
 use crate::identity;
 
 /// Root inode number for ext2/ext3/ext4.
@@ -525,6 +525,25 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
             read_up_to(inode.size(), |buffer| {
                 file.read(reader, buffer)
                     .map_err(|e| map_ext_error(e, path))
+            })
+        })
+    }
+
+    fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let target = self.resolve(path)?;
+        let Some(inum) = target.inode() else {
+            return Err(FsError::NotAFile(path.to_string()));
+        };
+        self.with_reader(|ext, reader| -> FsResult<usize> {
+            let inode = ext
+                .inode(reader, inum)
+                .map_err(|e| map_ext_error(e, path))?;
+            if !inode.is_regular_file() {
+                return Err(FsError::NotAFile(path.to_string()));
+            }
+            let mut file = inode.open_file().map_err(|e| map_ext_error(e, path))?;
+            read_at_through(&mut file, reader, offset, buffer, |e| {
+                map_ext_error(e, path)
             })
         })
     }

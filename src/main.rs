@@ -149,6 +149,19 @@ enum Commands {
         #[arg(long, conflicts_with = "offset")]
         partition: Option<usize>,
 
+        /// Resolve `--partition` against a SYNTHETIC table reconstructed by
+        /// scanning the media for filesystem starts (`fsmnt partitions IMAGE
+        /// --scan` shows it), ignoring any partition table the image
+        /// carries. The ordinal is then "the N-th filesystem the scan
+        /// finds" — valid only for this image with the same `--stride`.
+        #[arg(long, requires = "partition", conflicts_with = "offset")]
+        scan: bool,
+
+        /// Distance in bytes between the positions `--scan` tests (a
+        /// filesystem that starts off a 4 KiB boundary needs 512).
+        #[arg(long, value_name = "BYTES", requires = "scan", default_value_t = fsmnt::DEFAULT_STRIDE)]
+        stride: u64,
+
         /// Offset of the filesystem within the image, for media no partition
         /// table describes: bytes (`270532608`), a binary or decimal
         /// multiple (`258MiB`, `1M`, `270MB`), or sectors of
@@ -205,6 +218,18 @@ enum Commands {
         /// 4096; without this, 512 is tried first and 4096 second.
         #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
         sector_size: Option<u32>,
+
+        /// Ignore the image's partition table and print a SYNTHETIC one
+        /// reconstructed by scanning the media for filesystem starts. Its
+        /// numbering is what `mount-image --scan --partition N` uses.
+        /// Images only.
+        #[arg(long)]
+        scan: bool,
+
+        /// Distance in bytes between the positions `--scan` tests (a
+        /// filesystem that starts off a 4 KiB boundary needs 512).
+        #[arg(long, value_name = "BYTES", requires = "scan", default_value_t = fsmnt::DEFAULT_STRIDE)]
+        stride: u64,
     },
 
     /// Search an image for filesystems, wherever they sit.
@@ -357,6 +382,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             image,
             mountpoint,
             partition,
+            scan,
+            stride,
             offset,
             sector_size,
             volname,
@@ -368,6 +395,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             image: &image,
             mountpoint: &mountpoint,
             partition,
+            scan_stride: scan.then_some(stride),
             offset,
             sector_size,
             volname: volname.as_deref(),
@@ -381,7 +409,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Partitions {
             target,
             sector_size,
-        } => cli::handle_partitions(&target, sector_size),
+            scan,
+            stride,
+        } => cli::handle_partitions(&target, sector_size, scan.then_some(stride)),
         Commands::Scan {
             image,
             stride,

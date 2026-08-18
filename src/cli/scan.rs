@@ -47,13 +47,26 @@ pub(crate) fn handle_scan(
         return Ok(());
     }
 
+    // The `#` column is the SYNTHETIC ordinal `mount-image --scan --partition`
+    // takes: the position among mountable hits, in scan order — the same
+    // numbering `partitions --scan` prints. It exists only for this image at
+    // this stride; partition tables get no number because they are not
+    // mountable.
     println!(
-        "\n{:>14} {:>14}  {:<22} {:>12}  NOTE",
-        "OFFSET", "SECTOR", "TYPE", "SIZE"
+        "\n{:>4}  {:>14} {:>14}  {:<22} {:>12}  NOTE",
+        "#", "OFFSET", "SECTOR", "TYPE", "SIZE"
     );
+    let mut ordinal = 0_usize;
     for hit in &hits {
+        let number = if hit.mount_offset().is_some() {
+            let shown = ordinal.to_string();
+            ordinal += 1;
+            shown
+        } else {
+            "-".to_string()
+        };
         println!(
-            "{:>14} {:>14}  {:<22} {:>12}  {}",
+            "{number:>4}  {:>14} {:>14}  {:<22} {:>12}  {}",
             hit.offset,
             sector_column(hit.offset, sector_size),
             type_column(hit),
@@ -62,29 +75,21 @@ pub(crate) fn handle_scan(
         );
     }
 
-    if let Some(first) = hits.iter().find(|hit| mountable_offset(hit).is_some()) {
-        let offset = mountable_offset(first).unwrap_or(first.offset);
+    if let Some(first) = hits.iter().find(|hit| hit.mount_offset().is_some()) {
+        let offset = first.mount_offset().unwrap_or(first.offset);
+        let stride_flag = if options.stride == fsmnt::DEFAULT_STRIDE {
+            String::new()
+        } else {
+            format!(" --stride {}", options.stride)
+        };
         println!(
-            "\nMount one with: fsmnt mount-image {} <MOUNTPOINT> --offset {offset}",
+            "\nMount one with: fsmnt mount-image {0} <MOUNTPOINT> --offset {offset}\n\
+             or by its # above:  fsmnt mount-image {0} <MOUNTPOINT> --scan{stride_flag} \
+             --partition <#>   (# is synthetic — from this scan, not from the image)",
             image.display(),
         );
     }
     Ok(())
-}
-
-/// The offset in this hit that `mount-image --offset` would take, if any.
-///
-/// A partition table is not mountable, and a stray backup superblock is
-/// mountable only at the filesystem start it implies — never at its own
-/// offset, which the ext driver refuses on purpose.
-fn mountable_offset(hit: &ScanHit) -> Option<u64> {
-    match hit.kind {
-        ScanHitKind::Filesystem(_) => Some(hit.offset),
-        ScanHitKind::ExtBackupSuperblock {
-            filesystem_start, ..
-        } => filesystem_start,
-        ScanHitKind::PartitionTable(_) => None,
-    }
 }
 
 /// The offset expressed in sectors, or `-` when it is not a whole number of
@@ -149,7 +154,7 @@ fn backups_note(hit: &ScanHit) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{backups_note, mountable_offset, sector_column, type_column};
+    use super::{backups_note, sector_column, type_column};
     use fsmnt::device::DetectedBootSector;
     use fsmnt::{ExtBackupSuperblock, ScanHit, ScanHitKind};
 
@@ -187,14 +192,14 @@ mod tests {
 
     #[test]
     fn only_filesystems_and_implied_starts_are_mountable() {
-        assert_eq!(mountable_offset(&ext_hit(512, &[])), Some(512));
+        assert_eq!(ext_hit(512, &[]).mount_offset(), Some(512));
         let table = ScanHit {
             offset: 0,
             kind: ScanHitKind::PartitionTable(DetectedBootSector::GptPartitioned),
             size_bytes: None,
             backup_superblocks: Vec::new(),
         };
-        assert_eq!(mountable_offset(&table), None);
+        assert_eq!(table.mount_offset(), None);
         assert_eq!(type_column(&table), "GptPartitioned");
 
         let orphan = ScanHit {
@@ -207,7 +212,7 @@ mod tests {
             backup_superblocks: Vec::new(),
         };
         assert_eq!(
-            mountable_offset(&orphan),
+            orphan.mount_offset(),
             Some(1024),
             "a lone backup points at where its filesystem began, not at itself"
         );
