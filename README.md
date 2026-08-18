@@ -433,14 +433,14 @@ warn: best-effort reads: 8 MB of the media that was read was not there and came 
 
 On that 7.7 GB vendor image the sweep recovers 48,433 inodes and 539 MB of
 file data out of a volume whose primary superblock, group descriptor table
-and root directory were all in the 448 MiB nobody acquired. The other three
-flags are not optional here: the primary metadata is absent by construction,
-so `--backup-superblock` names a copy that survived, `--salvage` reaches the
-files the lost directory tree pointed at, and `--best-effort-reads` turns
-reads into the head into counted zeros — without it the ext driver's own look
-at the primary superblock fails the open, saying which bytes are absent.
-Bytes served for the absent head are counted apart from a short dump and a
-bad sector, because "never acquired" is a different fact from "damaged".
+and root directory were all in the 448 MiB nobody acquired. Two of the flags
+are not optional here: the primary metadata is absent by construction, so
+`--backup-superblock` names a copy that survived, and `--salvage` reaches the
+files the lost directory tree pointed at. `--best-effort-reads` is a choice:
+without it a read into the absent head fails and says which bytes are absent;
+with it those bytes are served as zeros and counted apart from a short dump
+and a bad sector, because "never acquired" is a different fact from
+"damaged".
 
 Such a filesystem is listed by `partitions --scan` but carries no `#`: there
 is no extent on this medium to hand `--partition`, so the row is unnumbered
@@ -655,8 +655,9 @@ ignoring the request. They combine with `--partition`, `--offset` and
 
 ### File-based encryption (fscrypt / Android FBE)
 
-fscrypt is Linux's per-file encryption — what Android calls FBE, and what
-its `/data` has used since Android 10. It encrypts file *contents* and the
+fscrypt is Linux's per-file encryption — what Android calls FBE: introduced
+in Android 7, required for new devices since Android 10, and shared by ext4,
+f2fs and UBIFS. It encrypts file *contents* and the
 *names* inside encrypted directories, and nothing else: the tree, the
 sizes, the timestamps and the block layout are all plaintext, and the
 master keys are deliberately not on the volume.

@@ -336,10 +336,9 @@ impl ImageOpenOptions {
     /// [`with_best_effort_reads`](Self::with_best_effort_reads) is on, which
     /// serves them as zeros counted in
     /// [`ReadSubstitutions::absent_bytes`](fsmnt_device::ReadSubstitutions::absent_bytes).
-    /// In practice that means best-effort reads too, not just a backup
-    /// group: the ext driver looks at the primary superblock at byte 1024
-    /// even when it has been told to take its metadata from a copy, and
-    /// byte 1024 is one of the bytes a slice like this does not carry.
+    /// The ext driver itself copes either way: opening through a backup
+    /// treats an unreadable primary as merely absent, and salvage skips the
+    /// groups it cannot read.
     ///
     /// Mutually exclusive with a non-zero [`with_offset`](Self::with_offset),
     /// with [`with_partition`](Self::with_partition), and with

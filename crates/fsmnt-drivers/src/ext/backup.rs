@@ -277,13 +277,28 @@ pub(super) fn patch_from_backup<R: Read + Seek>(
         ));
     }
     let limit = reader.seek(SeekFrom::End(0)).map_err(FsError::from)?;
-    let hint = Geometry::parse(&read_at(&mut reader, SUPERBLOCK_OFFSET, SUPERBLOCK_LEN)?);
+    // The primary is a hint, not a requirement: on a medium that begins
+    // inside the filesystem the bytes at 1024 are absent, and the whole
+    // point of opening through a backup is that the primary may be gone.
+    let hint = read_at(&mut reader, SUPERBLOCK_OFFSET, SUPERBLOCK_LEN)
+        .ok()
+        .and_then(|buffer| Geometry::parse(&buffer));
 
     let mut found = None;
     for offset in candidate_offsets(group, hint, limit) {
-        if let Some(backup) = read_backup_at(&mut reader, offset, group)? {
-            found = Some((offset, backup));
-            break;
+        // A candidate that cannot be read is simply not where the copy is:
+        // on a medium that begins inside the filesystem the low candidates
+        // are absent, and on damaged media one bad sector must not end the
+        // search for a copy that lies further on.
+        match read_backup_at(&mut reader, offset, group) {
+            Ok(Some(backup)) => {
+                found = Some((offset, backup));
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                debug!(offset, group, %error, "a candidate backup superblock offset could not be read");
+            }
         }
     }
     let Some((offset, (geometry, superblock))) = found else {
