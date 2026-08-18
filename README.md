@@ -30,6 +30,30 @@ source.
 Partition tables (GPT and MBR) and bare unpartitioned filesystems are both
 handled, and filesystem type is auto-detected from the boot sector.
 
+## Read-only guarantees
+
+fsmnt never writes to a source. Images and devices are opened read-only,
+and the volume is presented write-protected (Dokan `WRITE_PROTECT`, FUSE
+`ro`); the parsers have no write paths at all. Two points that matter for
+evidence handling:
+
+- **Journals are never replayed onto the source.** If an ext volume has a
+  dirty journal (`INCOMPAT_RECOVER`) or pending orphans
+  (`RO_COMPAT_ORPHAN_PRESENT`), the recovery is computed into an
+  in-memory overlay and reads are served through it; the image bytes —
+  including the free space that deleted-record carving depends on — are
+  untouched. This is the "recovered" view; pass `--no-journal-replay` to
+  see the on-disk state exactly as it sits (the equivalent of SQLite's
+  `immutable=1`), for instance to compare against a carving tool. NTFS,
+  FAT, exFAT, APFS and Btrfs have no replay step. BitLocker decrypts in
+  memory only.
+- **A mount only succeeds when the volume is usable.** Detection refuses
+  ext *backup* superblocks (they carry their block-group number, primaries
+  carry 0), and the ext driver reads the root directory before it reports
+  success — so an offset that merely lands on a superblock copy partway
+  into a partition fails with a message naming the backup's group instead
+  of mounting an empty volume that could be misread as "no data".
+
 ## Prerequisites
 
 - **Linux** — a FUSE implementation (`fuse3` and its user-space tools).
@@ -180,7 +204,9 @@ organized; an unsupported one is rejected with an error rather than ignored.
 | `role:ROLE`    | by volume role, e.g. `role:data`         | APFS         |
 
 The single-volume formats (NTFS, FAT, exFAT, ext, BitLocker) take `default`
-only.
+only; any other selector is rejected at open time with
+`filesystem driver "ext" does not support root selector …`, so `--fs-root`
+is effectively a Btrfs/APFS option (its `--help` says so).
 
 ### BitLocker
 
