@@ -6,59 +6,83 @@
 //! make the two impossible to compare. The only difference is the trailing
 //! `VOLUME` column, which exists because a drive has an operating system
 //! over it and an image does not.
+//!
+//! Each handler reads the medium once into a typed report
+//! ([`PartitionsDocument`], [`DrivesDocument`]) and then renders it — as the
+//! table below, or as the JSON that report already is. The columns are
+//! formatting over the same numbers a program receives, so the two can never
+//! disagree about what was found.
 
 use std::path::Path;
 
-use fsmnt::{ImageLayout, LayoutKind, LayoutOrigin, LayoutPartition};
+use fsmnt::{LayoutKind, LayoutOrigin, LayoutPartition};
 
+use super::json::{
+    self, DriveEntry, DrivesDocument, Output, PartitionEntry, PartitionsDocument, VolumeEntry,
+};
 use super::source::{Source, resolve};
 use super::{format_media_size, format_size};
 use crate::PartitionsArgs;
 
 /// List physical drives.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-pub(crate) fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_drives(output: Output) -> Result<(), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
     use fsmnt::device::HostDriveEnumerator;
 
-    let drives = HostDrives::enumerate_drives()?;
-    if drives.is_empty() {
-        println!("No drives found.");
-        return Ok(());
-    }
-
-    println!(
-        "{:<10} {:>12}  {:<10} {:<28} ACCESS",
-        "ID", "SIZE", "BUS", "MODEL"
-    );
-    for d in drives {
-        let size = d
-            .size_bytes
-            .map_or_else(|| "unknown".to_string(), format_size);
-        let bus = d
-            .bus_type
-            .map_or_else(|| "-".to_string(), |b| b.to_string());
-        let model = d.model.as_deref().unwrap_or("-");
-        let access = if d.accessible {
-            "ok".to_string()
-        } else {
-            format!(
-                "inaccessible ({})",
-                d.access_error.as_deref().unwrap_or("unknown"),
-            )
-        };
-        println!(
-            "{:<10} {size:>12}  {bus:<10} {model:<28} {access}",
-            d.id.to_string()
-        );
+    let document = DrivesDocument::new(&HostDrives::enumerate_drives()?);
+    match output {
+        Output::Json => json::print_document(&document),
+        Output::Human => print_drives(&document),
     }
     Ok(())
 }
 
 /// Physical drives cannot be enumerated on this platform.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-pub(crate) fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_drives(_output: Output) -> Result<(), Box<dyn std::error::Error>> {
     Err(super::NO_DRIVE_SUPPORT.into())
+}
+
+/// Print the drives as a table.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn print_drives(document: &DrivesDocument) {
+    if document.drives.is_empty() {
+        println!("No drives found.");
+        return;
+    }
+
+    println!(
+        "{:<10} {:>12}  {:<10} {:<28} ACCESS",
+        "ID", "SIZE", "BUS", "MODEL"
+    );
+    for drive in &document.drives {
+        println!("{}", drive_row(drive));
+    }
+}
+
+/// One line of the drive table.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn drive_row(drive: &DriveEntry) -> String {
+    let size = drive
+        .size_bytes
+        .map_or_else(|| "unknown".to_string(), format_size);
+    let bus = drive
+        .bus
+        .map_or_else(|| "-".to_string(), |bus| bus.to_string());
+    let model = drive.model.as_deref().unwrap_or("-");
+    let access = if drive.accessible {
+        "ok".to_string()
+    } else {
+        format!(
+            "inaccessible ({})",
+            drive.access_error.as_deref().unwrap_or("unknown"),
+        )
+    };
+    format!(
+        "{:<10} {size:>12}  {bus:<10} {model:<28} {access}",
+        drive.id
+    )
 }
 
 /// List the partitions of a drive or a disk image.
@@ -67,17 +91,27 @@ pub(crate) fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Returns an error if the source is a directory, cannot be resolved, or
 /// its layout cannot be read.
-pub(crate) fn handle_partitions(args: &PartitionsArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_partitions(
+    args: &PartitionsArgs,
+    output: Output,
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = resolve(&args.source, args.source_kind())?;
-    match &source {
-        Source::Directory(path) => Err(format!(
-            "{} is a directory; this command takes a disk image or a drive",
-            path.display()
-        )
-        .into()),
-        Source::Image(path) => image_partitions(args, &source, path),
-        Source::Drive(drive) => drive_partitions(args, &source, drive),
+    let document = match &source {
+        Source::Directory(path) => {
+            return Err(format!(
+                "{} is a directory; this command takes a disk image or a drive",
+                path.display()
+            )
+            .into());
+        }
+        Source::Image(path) => image_partitions(args, &source, path)?,
+        Source::Drive(drive) => drive_partitions(args, &source, drive)?,
+    };
+    match output {
+        Output::Json => json::print_document(&document),
+        Output::Human => print_listing(&source, &document),
     }
+    Ok(())
 }
 
 /// One line of the partition table, already formatted.
@@ -111,34 +145,12 @@ struct Widths {
     filesystem: Option<usize>,
 }
 
-/// Everything the printer needs, whatever medium it came from.
-struct Listing<'a> {
-    /// The source, for the header line and the mount hint.
-    source: &'a Source,
-    /// Container format, for an image; drives have none.
-    format: Option<String>,
-    /// Length of the medium, 0 when unknown.
-    size_bytes: u64,
-    /// Sector size the table was read in.
-    sector_size: u32,
-    /// Whether that sector size was inferred rather than stated.
-    sector_size_auto_detected: bool,
-    /// Where the entries came from.
-    origin: LayoutOrigin,
-    /// The table kind, or the lack of a table.
-    kind: LayoutKind,
-    /// The entries themselves.
-    rows: Vec<PartitionRow>,
-    /// Whether a `VOLUME` column is to be printed.
-    volumes: bool,
-}
-
-/// List the partitions inside a disk image.
+/// Enumerate the partitions inside a disk image.
 fn image_partitions(
     args: &PartitionsArgs,
     source: &Source,
     image: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<PartitionsDocument, Box<dyn std::error::Error>> {
     use fsmnt::ImageLayoutOptions;
 
     let mut options = ImageLayoutOptions::new();
@@ -148,32 +160,17 @@ fn image_partitions(
     if args.scan {
         options = options.with_scan(true).with_scan_stride(args.stride);
     }
-    let layout: ImageLayout = fsmnt::image_layout_with_options(image, options)?;
-    print_listing(&Listing {
-        source,
-        format: Some(layout.format.to_string()),
-        size_bytes: layout.size_bytes,
-        sector_size: layout.sector_size,
-        sector_size_auto_detected: layout.sector_size_auto_detected,
-        origin: layout.origin,
-        kind: layout.kind.clone(),
-        rows: layout
-            .partitions
-            .iter()
-            .map(|partition| row(partition, None))
-            .collect(),
-        volumes: false,
-    });
-    Ok(())
+    let layout = fsmnt::image_layout_with_options(image, options)?;
+    Ok(PartitionsDocument::from_image(source, &layout))
 }
 
-/// List the partitions on a physical drive.
+/// Enumerate the partitions on a physical drive.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn drive_partitions(
     args: &PartitionsArgs,
     source: &Source,
     drive: &fsmnt::device::HostDriveId,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<PartitionsDocument, Box<dyn std::error::Error>> {
     use fsmnt::device::HostDriveEnumerator;
     use fsmnt::{DriveLayoutOptions, HostDrives};
 
@@ -188,22 +185,12 @@ fn drive_partitions(
     let model = HostDrives::get_drive_info(drive)
         .ok()
         .and_then(|info| info.model);
-    print_listing(&Listing {
+    Ok(PartitionsDocument::from_drive(
         source,
-        format: model,
-        size_bytes: layout.size_bytes,
-        sector_size: layout.sector_size,
-        sector_size_auto_detected: layout.sector_size_auto_detected,
-        origin: layout.origin,
-        kind: layout.kind.clone(),
-        rows: layout
-            .partitions
-            .iter()
-            .map(|partition| row(partition, Some(logical_volumes(drive, partition))))
-            .collect(),
-        volumes: true,
-    });
-    Ok(())
+        model,
+        &layout,
+        |partition| logical_volumes(drive, partition),
+    ))
 }
 
 /// Physical drives cannot be enumerated on this platform.
@@ -212,18 +199,22 @@ fn drive_partitions(
     _args: &PartitionsArgs,
     _source: &Source,
     _drive: &fsmnt::device::HostDriveId,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<PartitionsDocument, Box<dyn std::error::Error>> {
     Err(super::NO_DRIVE_SUPPORT.into())
 }
 
-/// The operating-system logical volumes backed by one partition, as the
-/// `VOLUME` column shows them.
+/// The operating-system logical volumes backed by one partition.
 ///
 /// A failure here is not a failure of the listing: volume discovery needs
 /// privileges and services the partition table does not, and the table is
-/// still worth printing without it.
+/// still worth printing without it. That is why it is `None` rather than an
+/// empty list — "nobody could look" and "nothing is there" are different
+/// answers, and the JSON keeps them apart.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-fn logical_volumes(drive: &fsmnt::device::HostDriveId, partition: &LayoutPartition) -> String {
+fn logical_volumes(
+    drive: &fsmnt::device::HostDriveId,
+    partition: &LayoutPartition,
+) -> Option<Vec<VolumeEntry>> {
     use fsmnt::HostDrives;
     use fsmnt::device::{HostVolumeResolver, PhysicalExtent};
 
@@ -237,32 +228,26 @@ fn logical_volumes(drive: &fsmnt::device::HostDriveId, partition: &LayoutPartiti
                 error = %error,
                 "could not resolve the logical volumes over a partition"
             );
-            return "-".to_string();
+            return None;
         }
     };
-    if volumes.is_empty() {
-        return "-".to_string();
-    }
-    volumes
-        .iter()
-        .map(|volume| {
-            let mounts: Vec<String> = volume
-                .mount_points()
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect();
-            if mounts.is_empty() {
-                volume.id().to_string()
-            } else {
-                format!("{} ({})", volume.id(), mounts.join(", "))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+    Some(
+        volumes
+            .iter()
+            .map(|volume| VolumeEntry {
+                id: volume.id().to_string(),
+                mount_points: volume
+                    .mount_points()
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+            })
+            .collect(),
+    )
 }
 
-/// Turn one layout entry into a printable row.
-fn row(partition: &LayoutPartition, volume: Option<String>) -> PartitionRow {
+/// Turn one listed entry into a printable row.
+fn row(partition: &PartitionEntry) -> PartitionRow {
     PartitionRow {
         // An entry with no ordinal is listed but not selectable: `-` is the
         // same placeholder `fsmnt scan` uses for a row no `--partition` can
@@ -275,30 +260,33 @@ fn row(partition: &LayoutPartition, volume: Option<String>) -> PartitionRow {
             .type_name
             .clone()
             .unwrap_or_else(|| "Unknown".to_string()),
-        size: format_media_size(partition.size_bytes),
+        size: format_media_size(partition.size_bytes.unwrap_or_default()),
         offset: partition.offset.to_string(),
         filesystem: filesystem_column(partition),
-        volume,
+        volume: partition
+            .volumes
+            .as_ref()
+            .map(|volumes| volume_column(volumes)),
     }
 }
 
 /// Print the header, the table, and how to mount one of its entries.
-fn print_listing(listing: &Listing<'_>) {
-    print_header(listing);
-    match &listing.kind {
+fn print_listing(source: &Source, listing: &PartitionsDocument) {
+    print_header(source, listing);
+    match &listing.table {
         LayoutKind::Bare(detected) => {
             println!(
                 "No partition table; the whole {} is {detected:?}",
-                listing.source.describe()
+                source.describe()
             );
-            println!("Mount it with: fsmnt mount {} <MOUNTPOINT>", listing.source);
+            println!("Mount it with: fsmnt mount {source} <MOUNTPOINT>");
             return;
         }
         LayoutKind::Unknown => {
             println!(
                 "Unrecognized layout: no partition table and no known filesystem at the start of \
                  the {}.",
-                listing.source.describe()
+                source.describe()
             );
             return;
         }
@@ -307,7 +295,7 @@ fn print_listing(listing: &Listing<'_>) {
                 println!(
                     "GPT partition table (recovered from the backup header in the last sector; \
                      the primary header at the front of the {} is damaged)",
-                    listing.source.describe()
+                    source.describe()
                 );
             } else {
                 println!("GPT partition table");
@@ -319,38 +307,37 @@ fn print_listing(listing: &Listing<'_>) {
              filesystem starts. No table was read from the {}: sizes are what each filesystem \
              claims for itself, there are no names or type GUIDs, and the numbers hold only for \
              this {} scanned with this stride.",
-            scan_stride(listing.origin),
-            listing.source.describe(),
-            listing.source.describe(),
+            scan_stride(listing),
+            source.describe(),
+            source.describe(),
         ),
     }
 
-    let type_header = if matches!(listing.kind, LayoutKind::Scanned) {
+    let type_header = if matches!(listing.table, LayoutKind::Scanned) {
         "TYPE (from scan)"
     } else {
         "TYPE"
     };
-    print_table(listing, type_header);
-    print_footer(listing);
+    print_table(source, listing, type_header);
+    print_footer(source, listing);
 }
 
 /// The identity line: what the source is, how long, and in which sectors it
 /// was read.
-fn print_header(listing: &Listing<'_>) {
+fn print_header(source: &Source, listing: &PartitionsDocument) {
     let detected = if listing.sector_size_auto_detected {
         " (auto-detected)"
     } else {
         ""
     };
-    let what = match (&listing.format, listing.source) {
-        (Some(format), Source::Image(_)) => format!("{format} image"),
-        (Some(model), _) => format!("drive ({model})"),
-        (None, source) => source.describe().to_string(),
+    let what = match (listing.format, listing.model.as_deref()) {
+        (Some(format), _) => format!("{format} image"),
+        (None, Some(model)) => format!("drive ({model})"),
+        (None, None) => source.describe().to_string(),
     };
     println!(
-        "{}: {what}, {}, sector size {}{detected}",
-        listing.source,
-        format_media_size(listing.size_bytes),
+        "{source}: {what}, {}, sector size {}{detected}",
+        format_media_size(listing.size_bytes.unwrap_or_default()),
         listing.sector_size,
     );
 }
@@ -359,7 +346,7 @@ fn print_header(listing: &Listing<'_>) {
 ///
 /// The header is measured and laid out as one more row, so a column can
 /// never come out narrower than its own title.
-fn print_table(listing: &Listing<'_>, type_header: &str) {
+fn print_table(source: &Source, listing: &PartitionsDocument, type_header: &str) {
     let header = PartitionRow {
         ordinal: "#".to_string(),
         name: Some("NAME".to_string()),
@@ -369,23 +356,22 @@ fn print_table(listing: &Listing<'_>, type_header: &str) {
         filesystem: "FILESYSTEM".to_string(),
         volume: Some("VOLUME".to_string()),
     };
-    let measured = || std::iter::once(&header).chain(&listing.rows);
+    let rows: Vec<PartitionRow> = listing.partitions.iter().map(row).collect();
+    let measured = || std::iter::once(&header).chain(&rows);
     let widths = Widths {
-        name: listing
-            .rows
+        name: rows
             .iter()
             .any(|row| row.name.is_some())
             .then(|| column_width(measured().map(|row| row.name.as_deref()))),
         type_name: column_width(measured().map(|row| Some(row.type_name.as_str()))),
         // Only the last column is left unpadded, so FILESYSTEM needs a width
         // whenever VOLUME follows it.
-        filesystem: listing
-            .volumes
+        filesystem: matches!(source, Source::Drive(_))
             .then(|| column_width(measured().map(|row| Some(row.filesystem.as_str())))),
     };
 
     println!("{}", format_row(&header, &widths));
-    for row in &listing.rows {
+    for row in &rows {
         println!("{}", format_row(row, &widths));
     }
 }
@@ -412,11 +398,11 @@ fn format_row(row: &PartitionRow, widths: &Widths) -> String {
 }
 
 /// How to mount one of the entries just listed.
-fn print_footer(listing: &Listing<'_>) {
-    let synthetic = matches!(listing.kind, LayoutKind::Scanned);
-    if listing.rows.is_empty() {
+fn print_footer(source: &Source, listing: &PartitionsDocument) {
+    let synthetic = matches!(listing.table, LayoutKind::Scanned);
+    if listing.partitions.is_empty() {
         if synthetic {
-            let stride = scan_stride(listing.origin);
+            let stride = scan_stride(listing);
             println!(
                 "(the scan found no filesystems; a start off a {stride}-byte boundary needs \
                  --stride 512)"
@@ -428,28 +414,19 @@ fn print_footer(listing: &Listing<'_>) {
     }
     if synthetic {
         println!(
-            "\nMount one with: fsmnt mount {} <MOUNTPOINT> --scan{} --partition <#>   (synthetic \
-             numbering — from this scan, not from the {})",
-            listing.source,
-            stride_flag(scan_stride(listing.origin)),
-            listing.source.describe(),
+            "\nMount one with: fsmnt mount {source} <MOUNTPOINT> --scan{} --partition <#>   \
+             (synthetic numbering — from this scan, not from the {})",
+            stride_flag(scan_stride(listing)),
+            source.describe(),
         );
     } else {
-        println!(
-            "\nMount one with: fsmnt mount {} <MOUNTPOINT> --partition <#>",
-            listing.source
-        );
+        println!("\nMount one with: fsmnt mount {source} <MOUNTPOINT> --partition <#>");
     }
 }
 
 /// The stride a scanned layout was built with.
-fn scan_stride(origin: LayoutOrigin) -> u64 {
-    match origin {
-        LayoutOrigin::Scan { stride } => stride,
-        LayoutOrigin::Table | LayoutOrigin::BackupTable | LayoutOrigin::None => {
-            fsmnt::DEFAULT_STRIDE
-        }
-    }
+fn scan_stride(listing: &PartitionsDocument) -> u64 {
+    listing.scan_stride.unwrap_or(fsmnt::DEFAULT_STRIDE)
 }
 
 /// The `--stride` a hint has to repeat, or nothing when it is the default.
@@ -482,18 +459,34 @@ fn detected_label(detected: Option<fsmnt::device::DetectedBootSector>) -> String
 /// that was captured from it. Saying "unreadable" for an extent the
 /// acquisition never reached invites a hunt for corruption; saying it is
 /// past the end of the medium says what happened.
-fn filesystem_column(partition: &LayoutPartition) -> String {
-    // A declared length of 0 means "unknown, running to the end of the
-    // medium", not an extent the medium stops short of.
-    if partition.size_bytes > 0 && partition.is_beyond_end() {
+fn filesystem_column(partition: &PartitionEntry) -> String {
+    if partition.beyond_end {
         return "beyond end of media".to_string();
     }
-    let detected = detected_label(partition.detected);
-    if partition.is_truncated() {
+    let detected = detected_label(partition.filesystem);
+    if partition.truncated {
         return format!(
             "{detected}  TRUNCATED ({} missing)",
             format_size(partition.missing_bytes)
         );
     }
     detected
+}
+
+/// Column text for the operating-system volumes over a partition.
+fn volume_column(volumes: &[VolumeEntry]) -> String {
+    if volumes.is_empty() {
+        return "-".to_string();
+    }
+    volumes
+        .iter()
+        .map(|volume| {
+            if volume.mount_points.is_empty() {
+                volume.id.clone()
+            } else {
+                format!("{} ({})", volume.id, volume.mount_points.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

@@ -4,13 +4,31 @@
 //! forensic situation, so both are searched the same way and produce the
 //! same table; only the identity line at the top differs, because an image
 //! has a container format and a drive has a model.
+//!
+//! Every hit becomes one [`ScanHitEntry`] — offsets and numbers, the note
+//! the table prints, and the argument list that opens it — which is then
+//! rendered as the table below or as JSON. The `NOTE` column and the JSON
+//! `note` are therefore the same sentence, and the mount command a person
+//! reads is the same list a program receives.
 
-use fsmnt::{ScanHit, ScanHitKind, ScanOptions};
+use fsmnt::device::DetectedBootSector;
+use fsmnt::{ImageFormat, ScanHit, ScanHitKind, ScanOptions};
 
 use super::format_media_size;
+use super::json::{self, BackupSuperblockEntry, Output, ScanDocument, ScanHitEntry, media_size};
 use super::size::DEFAULT_SECTOR_SIZE;
 use super::source::{Source, resolve};
 use crate::ScanArgs;
+
+/// What the medium is, for the line above the table and for the document.
+struct Medium {
+    /// Length in bytes, when anything established one.
+    size_bytes: Option<u64>,
+    /// Container format, for an image.
+    format: Option<ImageFormat>,
+    /// Model, for a drive.
+    model: Option<String>,
+}
 
 /// Search a drive or a disk image for filesystem starts and print the
 /// candidate offsets.
@@ -19,9 +37,12 @@ use crate::ScanArgs;
 ///
 /// Returns an error if the source is a directory, cannot be resolved, or
 /// cannot be read to the end.
-pub(crate) fn handle_scan(args: &ScanArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_scan(
+    args: &ScanArgs,
+    output: Output,
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = resolve(&args.source, args.source_kind())?;
-    let hits = match &source {
+    let (medium, hits) = match &source {
         Source::Directory(path) => {
             return Err(format!(
                 "{} is a directory; this command takes a disk image or a drive",
@@ -29,26 +50,43 @@ pub(crate) fn handle_scan(args: &ScanArgs) -> Result<(), Box<dyn std::error::Err
             )
             .into());
         }
-        Source::Image(path) => {
-            let reader = fsmnt::ImageReader::open(path)?;
-            println!(
-                "{}: {} image, {}",
-                path.display(),
-                reader.format(),
-                format_media_size(reader.len()),
-            );
-            drop(reader);
-            tracing::info!(
-                "scanning {source} every {} bytes for filesystem starts",
-                args.stride
-            );
-            fsmnt::scan_image_with_options(path, ScanOptions::new().with_stride(args.stride))?
-        }
-        Source::Drive(drive) => scan_drive(args, &source, drive)?,
+        Source::Image(path) => scan_image(args, &source, path, output)?,
+        Source::Drive(drive) => scan_drive(args, &source, drive, output)?,
     };
 
-    print_hits(args, &source, &hits);
+    let sector_size = args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE);
+    let document = ScanDocument::new(
+        &source,
+        args.stride,
+        sector_size,
+        medium.size_bytes,
+        medium.format,
+        hit_entries(&hits, sector_size),
+    );
+    match output {
+        Output::Json => json::print_document(&document),
+        Output::Human => print_hits(&source, &document),
+    }
     Ok(())
+}
+
+/// Scan a disk image.
+fn scan_image(
+    args: &ScanArgs,
+    source: &Source,
+    path: &std::path::Path,
+    output: Output,
+) -> Result<(Medium, Vec<ScanHit>), Box<dyn std::error::Error>> {
+    let reader = fsmnt::ImageReader::open(path)?;
+    let medium = Medium {
+        size_bytes: media_size(reader.len()),
+        format: Some(reader.format()),
+        model: None,
+    };
+    drop(reader);
+    announce(source, &medium, args.stride, output);
+    let hits = fsmnt::scan_image_with_options(path, ScanOptions::new().with_stride(args.stride))?;
+    Ok((medium, hits))
 }
 
 /// Scan a physical drive, announcing it the way an image announces itself.
@@ -57,28 +95,20 @@ fn scan_drive(
     args: &ScanArgs,
     source: &Source,
     drive: &fsmnt::device::HostDriveId,
-) -> Result<Vec<ScanHit>, Box<dyn std::error::Error>> {
+    output: Output,
+) -> Result<(Medium, Vec<ScanHit>), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
     use fsmnt::device::HostDriveEnumerator;
 
     let info = HostDrives::get_drive_info(drive).ok();
-    let model = info
-        .as_ref()
-        .and_then(|info| info.model.as_deref())
-        .unwrap_or("unknown model");
-    let size = info
-        .as_ref()
-        .and_then(|info| info.size_bytes)
-        .map_or_else(|| "unknown".to_string(), format_media_size);
-    println!("{drive}: drive ({model}), {size}");
-    tracing::info!(
-        "scanning {source} every {} bytes for filesystem starts",
-        args.stride
-    );
-    Ok(fsmnt::scan_drive::<HostDrives>(
-        drive,
-        ScanOptions::new().with_stride(args.stride),
-    )?)
+    let medium = Medium {
+        size_bytes: info.as_ref().and_then(|info| info.size_bytes),
+        format: None,
+        model: info.and_then(|info| info.model),
+    };
+    announce(source, &medium, args.stride, output);
+    let hits = fsmnt::scan_drive::<HostDrives>(drive, ScanOptions::new().with_stride(args.stride))?;
+    Ok((medium, hits))
 }
 
 /// Physical drives cannot be scanned on this platform.
@@ -87,64 +117,194 @@ fn scan_drive(
     _args: &ScanArgs,
     _source: &Source,
     _drive: &fsmnt::device::HostDriveId,
-) -> Result<Vec<ScanHit>, Box<dyn std::error::Error>> {
+    _output: Output,
+) -> Result<(Medium, Vec<ScanHit>), Box<dyn std::error::Error>> {
     Err(super::NO_DRIVE_SUPPORT.into())
 }
 
-/// Print what the scan found, and the two ways to mount one of them.
-fn print_hits(args: &ScanArgs, source: &Source, hits: &[ScanHit]) {
-    let sector_size = args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE);
-    if hits.is_empty() {
-        println!(
-            "\nNo filesystems found. A filesystem whose start is not aligned to {} bytes needs a \
-             finer scan: --stride 512.",
-            args.stride
-        );
-        return;
+/// Say what is about to be read, before a scan that may take a while.
+///
+/// The identity line is the command's product, so it is printed only for a
+/// person: a JSON reader gets the same facts as fields of the one document,
+/// once the scan is done.
+fn announce(source: &Source, medium: &Medium, stride: u64, output: Output) {
+    if output == Output::Human {
+        let size = medium
+            .size_bytes
+            .map_or_else(|| "unknown".to_string(), format_media_size);
+        match medium.format {
+            Some(format) => println!("{source}: {format} image, {size}"),
+            None => println!(
+                "{source}: drive ({}), {size}",
+                medium.model.as_deref().unwrap_or("unknown model"),
+            ),
+        }
     }
+    tracing::info!("scanning {source} every {stride} bytes for filesystem starts");
+}
 
+/// Number and describe every hit, in scan order.
+fn hit_entries(hits: &[ScanHit], sector_size: u32) -> Vec<ScanHitEntry> {
     // The `#` column is the SYNTHETIC ordinal `fsmnt mount --scan
     // --partition` takes: the position among mountable hits, in scan order —
     // the same numbering `partitions --scan` prints. It exists only for this
     // medium at this stride; partition tables get no number because they are
     // not mountable.
+    let mut ordinal = 0_usize;
+    hits.iter()
+        .map(|hit| {
+            let number = hit.mount_offset().is_some().then(|| {
+                let shown = ordinal;
+                ordinal += 1;
+                shown
+            });
+            hit_entry(hit, number, sector_size)
+        })
+        .collect()
+}
+
+/// Everything one hit has to say.
+fn hit_entry(hit: &ScanHit, ordinal: Option<usize>, sector_size: u32) -> ScanHitEntry {
+    let (group, filesystem_start, start_before_medium) = match hit.kind {
+        ScanHitKind::ExtBackupSuperblock {
+            group,
+            filesystem_start,
+            start_before_medium,
+        } => (Some(group), filesystem_start, start_before_medium),
+        ScanHitKind::Filesystem(_)
+        | ScanHitKind::PartitionTable(_)
+        | ScanHitKind::ExtPrimaryCopies { .. } => (None, None, None),
+    };
+    let (copies, last_offset) = match hit.kind {
+        ScanHitKind::ExtPrimaryCopies {
+            copies,
+            last_offset,
+        } => (Some(copies), Some(last_offset)),
+        ScanHitKind::Filesystem(_)
+        | ScanHitKind::PartitionTable(_)
+        | ScanHitKind::ExtBackupSuperblock { .. } => (None, None),
+    };
+    ScanHitEntry {
+        offset: hit.offset,
+        sector: sector(hit.offset, sector_size),
+        kind: hit_kind(hit),
+        filesystem: Some(hit_filesystem(hit)),
+        size_bytes: hit.size_bytes,
+        mount_offset: hit.mount_offset(),
+        ordinal,
+        backup_superblocks: BackupSuperblockEntry::all(hit),
+        group,
+        filesystem_start,
+        start_before_medium,
+        copies,
+        last_offset,
+        note: note_column(hit),
+        mount_command: mount_command(hit),
+    }
+}
+
+/// The wire name for what a hit is.
+const fn hit_kind(hit: &ScanHit) -> &'static str {
+    match hit.kind {
+        ScanHitKind::Filesystem(_) => "filesystem",
+        ScanHitKind::PartitionTable(_) => "partition_table",
+        ScanHitKind::ExtBackupSuperblock { .. } => "ext_backup_superblock",
+        ScanHitKind::ExtPrimaryCopies { .. } => "ext_primary_copies",
+    }
+}
+
+/// The format a hit is evidence of.
+///
+/// A superblock is not a filesystem, but it is evidence of one and of which
+/// kind, so the ext hits name `ext` rather than nothing.
+const fn hit_filesystem(hit: &ScanHit) -> DetectedBootSector {
+    match hit.kind {
+        ScanHitKind::Filesystem(detected) | ScanHitKind::PartitionTable(detected) => detected,
+        ScanHitKind::ExtBackupSuperblock { .. } | ScanHitKind::ExtPrimaryCopies { .. } => {
+            DetectedBootSector::Ext
+        }
+    }
+}
+
+/// The offset in sectors, when it is a whole number of them.
+fn sector(offset: u64, sector_size: u32) -> Option<u64> {
+    let sector_size = u64::from(sector_size);
+    if sector_size == 0 || !offset.is_multiple_of(sector_size) {
+        return None;
+    }
+    Some(offset / sector_size)
+}
+
+/// The arguments a mount of this hit takes, appended to
+/// `fsmnt mount SOURCE MOUNTPOINT`.
+///
+/// The same command the notes below spell out in prose, as a list nobody has
+/// to re-quote: `None` where there is no way in at all, which is exactly
+/// where the table prints no `#` and no suggestion either.
+fn mount_command(hit: &ScanHit) -> Option<Vec<String>> {
+    if let Some(offset) = hit.mount_offset() {
+        let mut command = vec!["--offset".to_string(), offset.to_string()];
+        // A start whose own descriptor table does not verify is only openable
+        // through the backup that named it as a start, which is what the note
+        // for that row says too.
+        if let ScanHitKind::ExtPrimaryCopies { .. } = hit.kind
+            && let Some(group) = hit.backup_superblock_group()
+        {
+            command.push("--backup-superblock".to_string());
+            command.push(group.to_string());
+        }
+        return Some(command);
+    }
+    Some(head_absent_flags(
+        hit.head_absent()?,
+        hit.backup_superblock_group()?,
+    ))
+}
+
+/// Print what the scan found, and the two ways to mount one of them.
+fn print_hits(source: &Source, document: &ScanDocument) {
+    if document.hits.is_empty() {
+        println!(
+            "\nNo filesystems found. A filesystem whose start is not aligned to {} bytes needs a \
+             finer scan: --stride 512.",
+            document.stride
+        );
+        return;
+    }
+
     println!(
         "\n{:>4}  {:>14} {:>14}  {:<22} {:>12}  NOTE",
         "#", "OFFSET", "SECTOR", "TYPE", "SIZE"
     );
-    let mut ordinal = 0_usize;
-    for hit in hits {
-        let number = if hit.mount_offset().is_some() {
-            let shown = ordinal.to_string();
-            ordinal += 1;
-            shown
-        } else {
-            "-".to_string()
-        };
+    for hit in &document.hits {
         println!(
-            "{number:>4}  {:>14} {:>14}  {:<22} {:>12}  {}",
+            "{:>4}  {:>14} {:>14}  {:<22} {:>12}  {}",
+            hit.ordinal
+                .map_or_else(|| "-".to_string(), |ordinal| ordinal.to_string()),
             hit.offset,
-            sector_column(hit.offset, sector_size),
+            hit.sector
+                .map_or_else(|| "-".to_string(), |sector| format!("{sector}s")),
             type_column(hit),
             hit.size_bytes
                 .map_or_else(|| "-".to_string(), format_media_size),
-            note_column(hit),
+            hit.note,
         );
     }
 
     // A filesystem this medium begins *inside* has no offset here to mount
     // at, so it never gets a `#` — but it is mountable, and the command
     // that does it is worth spelling out in full.
-    let begins_inside = hits
+    let begins_inside = document
+        .hits
         .iter()
-        .find_map(|hit| Some((hit, hit.head_absent()?, hit.backup_superblock_group()?)));
+        .find(|hit| hit.start_before_medium.is_some() && hit.mount_command.is_some());
 
-    let Some(first) = hits.iter().find(|hit| hit.mount_offset().is_some()) else {
-        if let Some((_, before, group)) = begins_inside {
+    let Some(first) = document.hits.iter().find(|hit| hit.mount_offset.is_some()) else {
+        if let Some(hit) = begins_inside {
             println!(
                 "\nNo row above is the start of a filesystem, but this medium is a slice of one. \
                  Mount it with:\n  fsmnt mount {source} <MOUNTPOINT> {}",
-                head_absent_flags(before, group),
+                command_line(hit),
             );
             return;
         }
@@ -154,15 +314,15 @@ fn print_hits(args: &ScanArgs, source: &Source, hits: &[ScanHit]) {
         println!(
             "\nNothing found is mountable: no row above is the start of a filesystem. A start \
              that is not aligned to {} bytes needs a finer scan: --stride 512.",
-            args.stride
+            document.stride
         );
         return;
     };
-    let offset = first.mount_offset().unwrap_or(first.offset);
-    let stride_flag = if args.stride == fsmnt::DEFAULT_STRIDE {
+    let offset = first.mount_offset.unwrap_or(first.offset);
+    let stride_flag = if document.stride == fsmnt::DEFAULT_STRIDE {
         String::new()
     } else {
-        format!(" --stride {}", args.stride)
+        format!(" --stride {}", document.stride)
     };
     println!(
         "\nMount one with: fsmnt mount {source} <MOUNTPOINT> --offset {offset}\n\
@@ -170,41 +330,39 @@ fn print_hits(args: &ScanArgs, source: &Source, hits: &[ScanHit]) {
          --partition <#>   (# is synthetic — from this scan, not from the {})",
         source.describe(),
     );
-    if let Some((_, before, group)) = begins_inside {
+    if let Some(hit) = begins_inside {
         println!(
             "\nOne row above has no #: its filesystem starts before this medium. Mount that one \
              with:\n  fsmnt mount {source} <MOUNTPOINT> {}",
-            head_absent_flags(before, group),
+            command_line(hit),
         );
     }
 }
 
-/// The offset expressed in sectors, or `-` when it is not a whole number of
-/// them.
-fn sector_column(offset: u64, sector_size: u32) -> String {
-    let sector_size = u64::from(sector_size);
-    if sector_size == 0 || !offset.is_multiple_of(sector_size) {
-        return "-".to_string();
-    }
-    format!("{}s", offset / sector_size)
+/// A hit's mount arguments as a person would type them.
+fn command_line(hit: &ScanHitEntry) -> String {
+    hit.mount_command
+        .as_ref()
+        .map(|command| command.join(" "))
+        .unwrap_or_default()
 }
 
 /// The type column: the detected filesystem, or what a lone superblock is.
-fn type_column(hit: &ScanHit) -> String {
+fn type_column(hit: &ScanHitEntry) -> String {
     match hit.kind {
-        ScanHitKind::Filesystem(detected) | ScanHitKind::PartitionTable(detected) => {
-            format!("{detected:?}")
-        }
-        ScanHitKind::ExtBackupSuperblock { .. } => "Ext (backup only)".to_string(),
+        "ext_backup_superblock" => "Ext (backup only)".to_string(),
         // Copies of a primary that nothing corroborates are just copies;
         // once a backup names the offset as a start, the same bytes become a
         // filesystem whose descriptor table is broken.
-        ScanHitKind::ExtPrimaryCopies { .. } => if hit.mount_offset().is_some() {
+        "ext_primary_copies" => if hit.mount_offset.is_some() {
             "Ext (table damaged)"
         } else {
             "Ext (superblock copies)"
         }
         .to_string(),
+        _ => hit
+            .filesystem
+            .map_or_else(|| "-".to_string(), |detected| format!("{detected:?}")),
     }
 }
 
@@ -260,7 +418,8 @@ fn orphan_backup_note(
             head_absent_flags(
                 before,
                 hit.backup_superblock_group().unwrap_or(u32::from(group))
-            ),
+            )
+            .join(" "),
         ),
         (None, None) => write!(note, "; its filesystem starts before this medium"),
     };
@@ -276,8 +435,15 @@ fn orphan_backup_note(
 /// root directory usually lived in the absent head, and every read that
 /// reaches into it has to come back as counted zeros for the sweep to get
 /// past it.
-fn head_absent_flags(before: u64, group: u32) -> String {
-    format!("--offset -{before} --backup-superblock {group} --salvage --best-effort-reads")
+fn head_absent_flags(before: u64, group: u32) -> Vec<String> {
+    vec![
+        "--offset".to_string(),
+        format!("-{before}"),
+        "--backup-superblock".to_string(),
+        group.to_string(),
+        "--salvage".to_string(),
+        "--best-effort-reads".to_string(),
+    ]
 }
 
 /// What a run of unconfirmed primary superblocks says.
@@ -343,7 +509,9 @@ fn group_list(hit: &ScanHit) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{backups_note, note_column, sector_column, type_column};
+    use super::{
+        DEFAULT_SECTOR_SIZE, backups_note, hit_entries, hit_entry, note_column, sector, type_column,
+    };
     use fsmnt::device::DetectedBootSector;
     use fsmnt::{ExtBackupSuperblock, ScanHit, ScanHitKind};
 
@@ -363,11 +531,21 @@ mod tests {
         }
     }
 
+    /// The type column of a hit, read off the entry the document carries.
+    fn type_of(hit: &ScanHit) -> String {
+        type_column(&hit_entry(hit, None, DEFAULT_SECTOR_SIZE))
+    }
+
+    /// The mount command a hit offers, as a list.
+    fn command_of(hit: &ScanHit) -> Option<Vec<String>> {
+        hit_entry(hit, None, DEFAULT_SECTOR_SIZE).mount_command
+    }
+
     #[test]
     fn offsets_are_also_shown_in_sectors_when_they_divide_evenly() {
-        assert_eq!(sector_column(270_532_608, 512), "528384s");
-        assert_eq!(sector_column(0, 512), "0s");
-        assert_eq!(sector_column(270_533_632, 4096), "-");
+        assert_eq!(sector(270_532_608, 512), Some(528_384));
+        assert_eq!(sector(0, 512), Some(0));
+        assert_eq!(sector(270_533_632, 4096), None);
     }
 
     #[test]
@@ -393,7 +571,8 @@ mod tests {
             backup_superblocks: Vec::new(),
         };
         assert_eq!(table.mount_offset(), None);
-        assert_eq!(type_column(&table), "GptPartitioned");
+        assert_eq!(type_of(&table), "GptPartitioned");
+        assert_eq!(command_of(&table), None, "a table is not a filesystem");
 
         let orphan = ScanHit {
             offset: 8192,
@@ -410,10 +589,14 @@ mod tests {
             Some(1024),
             "a lone backup points at where its filesystem began, not at itself"
         );
-        assert_eq!(type_column(&orphan), "Ext (backup only)");
+        assert_eq!(type_of(&orphan), "Ext (backup only)");
         assert_eq!(
             note_column(&orphan),
             "backup superblock of group 3; filesystem start would be at 1024"
+        );
+        assert_eq!(
+            command_of(&orphan),
+            Some(vec!["--offset".to_string(), "1024".to_string()]),
         );
     }
 
@@ -445,12 +628,28 @@ mod tests {
             "but the distance back to its start is known, and that is the way in"
         );
         assert_eq!(orphan.backup_superblock_group(), Some(5));
-        assert_eq!(type_column(&orphan), "Ext (backup only)");
+        assert_eq!(type_of(&orphan), "Ext (backup only)");
         assert_eq!(
             note_column(&orphan),
             "backup superblock of group 5, corroborated by groups 7, 9, 25, 27; the filesystem \
              starts 469762048 bytes before this medium — the image begins inside it; mount with \
              --offset -469762048 --backup-superblock 5 --salvage --best-effort-reads"
+        );
+        let command = command_of(&orphan).expect("the way in is a command");
+        assert_eq!(
+            command,
+            [
+                "--offset",
+                "-469762048",
+                "--backup-superblock",
+                "5",
+                "--salvage",
+                "--best-effort-reads",
+            ],
+        );
+        assert!(
+            note_column(&orphan).ends_with(&command.join(" ")),
+            "the note and the argument list are the same command"
         );
     }
 
@@ -466,12 +665,13 @@ mod tests {
             backup_superblocks: Vec::new(),
         };
         assert_eq!(copies.mount_offset(), None);
-        assert_eq!(type_column(&copies), "Ext (superblock copies)");
+        assert_eq!(type_of(&copies), "Ext (superblock copies)");
         assert_eq!(
             note_column(&copies),
             "50 copies of a primary superblock between 3424641024 and 3428098048, none with the \
              filesystem a start has behind it — journal writes inside one, not starts"
         );
+        assert_eq!(command_of(&copies), None);
 
         let single = ScanHit {
             offset: 4096,
@@ -501,11 +701,87 @@ mod tests {
             backup_superblocks: backups(&[(1_048_576, 1), (3_145_728, 3)]),
         };
         assert_eq!(damaged.mount_offset(), Some(4096));
-        assert_eq!(type_column(&damaged), "Ext (table damaged)");
+        assert_eq!(type_of(&damaged), "Ext (table damaged)");
         assert_eq!(
             note_column(&damaged),
             "primary superblock whose descriptor table does not verify, but backups at groups \
              1, 3 name this offset as the start; mount with --offset 4096 --backup-superblock 1"
+        );
+        assert_eq!(
+            command_of(&damaged),
+            Some(vec![
+                "--offset".to_string(),
+                "4096".to_string(),
+                "--backup-superblock".to_string(),
+                "1".to_string(),
+            ]),
+            "the note's command and the argument list say the same thing"
+        );
+    }
+
+    #[test]
+    fn the_ordinal_counts_mountable_hits_in_scan_order() {
+        let hits = vec![
+            ScanHit {
+                offset: 0,
+                kind: ScanHitKind::PartitionTable(DetectedBootSector::GptPartitioned),
+                size_bytes: None,
+                backup_superblocks: Vec::new(),
+            },
+            ext_hit(270_532_608, &[(1024, 1)]),
+            ScanHit {
+                offset: 201_325_568,
+                kind: ScanHitKind::ExtBackupSuperblock {
+                    group: 5,
+                    filesystem_start: None,
+                    start_before_medium: Some(469_762_048),
+                },
+                size_bytes: None,
+                backup_superblocks: Vec::new(),
+            },
+            ext_hit(903_872_512, &[]),
+        ];
+
+        let entries = hit_entries(&hits, DEFAULT_SECTOR_SIZE);
+        let ordinals: Vec<Option<usize>> = entries.iter().map(|entry| entry.ordinal).collect();
+        assert_eq!(
+            ordinals,
+            [None, Some(0), None, Some(1)],
+            "only a hit with an offset to mount at is numbered, and the numbers do not skip"
+        );
+        assert_eq!(entries[1].kind, "filesystem");
+        assert_eq!(entries[1].sector, Some(528_384));
+        assert_eq!(entries[2].kind, "ext_backup_superblock");
+        assert_eq!(entries[2].group, Some(5));
+        assert_eq!(entries[2].start_before_medium, Some(469_762_048));
+        assert_eq!(entries[0].backup_superblocks.len(), 0);
+        assert_eq!(entries[1].backup_superblocks.len(), 1);
+        assert_eq!(entries[1].backup_superblocks[0].group, 1);
+    }
+
+    #[test]
+    fn a_hit_serializes_with_the_numbers_and_the_note_the_table_prints() {
+        let hits = vec![ext_hit(270_532_608, &[(1024, 1), (2048, 3)])];
+        let entries = hit_entries(&hits, DEFAULT_SECTOR_SIZE);
+        let value = serde_json::to_value(&entries[0]).expect("a hit serializes");
+
+        assert_eq!(value["offset"], 270_532_608_u64);
+        assert_eq!(value["sector"], 528_384_u64);
+        assert_eq!(value["kind"], "filesystem");
+        assert_eq!(value["filesystem"], "ext");
+        assert_eq!(value["size_bytes"], 4096);
+        assert_eq!(value["mount_offset"], 270_532_608_u64);
+        assert_eq!(value["ordinal"], 0);
+        assert_eq!(value["group"], serde_json::Value::Null);
+        assert_eq!(value["copies"], serde_json::Value::Null);
+        assert_eq!(value["note"], "2 backup superblocks (groups 1, 3)");
+        assert_eq!(
+            value["backup_superblocks"],
+            serde_json::json!([{"offset": 1024, "group": 1}, {"offset": 2048, "group": 3}]),
+        );
+        assert_eq!(
+            value["mount_command"],
+            serde_json::json!(["--offset", "270532608"]),
         );
     }
 }

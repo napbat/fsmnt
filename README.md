@@ -766,6 +766,7 @@ info: mounting ntfs volume at Z:
 | `-vv` | plus every operation a mounted volume serves (`trace`) |
 | `-q` | warnings and errors only |
 | `--log-file PATH` | append the same lines to `PATH` as well, without colour |
+| `--json` | speak to a program: JSON on stdout, one JSON object per event on stderr (below) |
 | `FSMNT_LOG` | `tracing` `EnvFilter` directives (`debug`, `fsmnt_device=trace,info`); overrides `-v`/`-q` |
 
 The flags are global: `fsmnt -v partitions disk.bin` and
@@ -774,6 +775,102 @@ stderr is a terminal, and never in the log file. `--log-file` survives
 `--detach`, so a mount that failed in the background can still say why.
 `fuser` and `ewf` report through the `log` crate; those records arrive in the
 same stream under the same filter.
+
+### Machine-readable output (`--json`)
+
+`--json` says the same things to a program. It is global like the flags
+above — `fsmnt --json partitions disk.bin` and
+`fsmnt partitions disk.bin --json` are the same command — and it changes the
+format of both streams, never what is found:
+
+- **stdout carries JSON only.** No tables, no hints, no prose. `drives`,
+  `partitions`, `scan` and `unmount` print exactly one document; `mount`
+  prints one event per line as it happens (NDJSON).
+- **stderr carries one JSON object per event**, keyed by `level`, with the
+  message and any fields flattened alongside it. `-v`/`-q`/`FSMNT_LOG` still
+  choose how much is said. `--log-file` keeps its plain-text format: a log
+  file is read by a person afterwards.
+- **The exit code is unchanged** (0 or 1), and a failure is a stderr line
+  with `"level":"ERROR"`. Nothing about it reaches stdout, so stdout is
+  always either empty or one valid JSON value.
+
+```console
+$ fsmnt --json partitions disk.bin 2>/dev/null
+{
+  "schema": 1,
+  "kind": "partitions",
+  "source": { "kind": "image", "path": "disk.bin", "id": null },
+  "format": "raw",
+  "model": null,
+  "size_bytes": 32768,
+  "sector_size": 512,
+  "sector_size_auto_detected": false,
+  "table": "mbr",
+  "origin": "table",
+  "scan_stride": null,
+  "bare_filesystem": null,
+  "partitions": [
+    {
+      "ordinal": 1,
+      "name": null,
+      "type": "NTFS/HPFS/exFAT",
+      "offset": 8192,
+      "size_bytes": 24576,
+      "missing_bytes": 0,
+      "available_bytes": 24576,
+      "filesystem": "ntfs",
+      "beyond_end": false,
+      "truncated": false,
+      "head_absent": null,
+      "volumes": null
+    }
+  ]
+}
+```
+
+`mount` reports its lifecycle instead, one line at a time — the volume is
+open, the volume is live, the volume is gone:
+
+```console
+$ fsmnt --json mount disk.bin Z: --partition 1 2>/dev/null
+{"schema":1,"event":"opened","source":{"kind":"image","path":"disk.bin","id":null},"filesystem":"ntfs","volname":"disk","fsname":"ntfs","offset":8192,"partition":1,"size_bytes":24576,"layout_origin":"table","truncated_by":null,"head_absent":null,"notices":[]}
+{"schema":1,"event":"mounted","mountpoint":"Z:","pid":76532}
+{"schema":1,"event":"unmounted","mountpoint":"Z:","best_effort":null}
+```
+
+`mounted` is the line to wait for: the volume is readable from that point,
+and `pid` is the process holding it — the background one under `--detach`,
+where the foreground command prints that single line and exits. `notices`
+repeats in-band what the driver warned about on stderr (a backup superblock
+standing in for the primary, a degraded open), because a program deciding
+whether to trust a mount should not have to correlate two streams to find
+out. `best_effort` counts what `--best-effort-reads` had to serve as zeros,
+split into `missing_bytes`, `absent_bytes`, `errored_bytes` and
+`read_errors`, and is `null` when that mode was off and every byte served
+was real.
+
+`scan` gives each hit a `mount_command`: the arguments to append to
+`fsmnt mount SOURCE MOUNTPOINT`, as a list nobody has to re-quote, and
+`null` where there is no way in at all. It is the same command the `NOTE`
+column spells out in prose, so a person and a program are told to do the
+same thing:
+
+```json
+{"offset":201326592,"kind":"ext_backup_superblock","filesystem":"ext","ordinal":null,
+ "group":5,"start_before_medium":469762048,
+ "note":"backup superblock of group 5, corroborated by groups 7, 9, 25, 27; …",
+ "mount_command":["--offset","-469762048","--backup-superblock","5","--salvage","--best-effort-reads"]}
+```
+
+**The promise.** Every document and every event carries `"schema": 1`. That
+integer is bumped only when a field changes meaning or disappears; adding a
+field is not a break, so a reader must ignore keys it does not know. Numbers
+are JSON numbers — byte counts, offsets and ordinals, never `1.5 GB` —
+enumerations are lowercase (`ntfs`, `gpt`, `backup_table`), and anything
+unknown, absent or inapplicable is `null` rather than a missing key: an
+ordinal a person sees as `-` is `null`, a size the medium would not state is
+`null`, and a drive-only field is `null` for an image. Keys never appear
+anywhere in it — not `--fscrypt-key` values, not `BitLocker` passwords.
 
 ### Unmounting
 

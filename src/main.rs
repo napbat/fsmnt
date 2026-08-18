@@ -8,6 +8,11 @@
 //! *where the bytes are* does not change with what is holding them. Which
 //! options a source kind accepts is checked after it is resolved, in
 //! [`cli::mount`], rather than encoded as a separate subcommand per kind.
+//!
+//! Who is reading is one global flag, not a separate command tree:
+//! `--json` ([`cli::logging::LogOptions`]) turns every handler's output into
+//! the documents in [`cli::json`], and is carried to them as a
+//! [`cli::json::Output`] rather than consulted anywhere below the CLI.
 
 mod cli;
 
@@ -423,8 +428,10 @@ impl Commands {
 /// Returning the error from `main` would print its `Debug` form, which hides
 /// the guidance the error messages carry (which partition to pick, which
 /// credential is missing) behind a struct dump. It goes out as an `error!`
-/// event so it lands in `--log-file` alongside everything else — except when
-/// the subscriber is what failed, which nothing but stderr can report.
+/// event so it lands in `--log-file` alongside everything else — and, under
+/// `--json`, as one more stderr object keyed by `level`, which is why
+/// nothing about a failure ever reaches stdout — except when the subscriber
+/// is what failed, which nothing but stderr can report.
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     if let Err(error) = cli::logging::init(&cli.log) {
@@ -442,21 +449,30 @@ fn main() -> std::process::ExitCode {
 
 /// Dispatch the parsed command line to its handler.
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let output = cli::json::Output::new(cli.log.json);
+
     // `--detach`: hand the whole command to a background process and wait
     // here only until its volume is live.
     if let Some(mountpoint) = cli.command.detached_mountpoint() {
         let pid = cli::detach::spawn(mountpoint)?;
-        println!(
-            "Volume mounted at {mountpoint} (pid {pid}); run 'fsmnt unmount {mountpoint}' to unmount."
-        );
+        // The background process has no console, so this is the only place
+        // the volume can be announced — and the pid it carries is the one
+        // holding the mount, not this process, which is about to exit.
+        if output.is_json() {
+            cli::json::print_event(&cli::json::MountedEvent::new(mountpoint, pid));
+        } else {
+            println!(
+                "Volume mounted at {mountpoint} (pid {pid}); run 'fsmnt unmount {mountpoint}' to unmount."
+            );
+        }
         return Ok(());
     }
 
     match cli.command {
-        Commands::Drives => cli::handle_drives(),
-        Commands::Partitions(args) => cli::handle_partitions(&args),
-        Commands::Scan(args) => cli::handle_scan(&args),
-        Commands::Mount(args) => cli::handle_mount(&args),
-        Commands::Unmount { mountpoint } => cli::handle_unmount(&mountpoint),
+        Commands::Drives => cli::handle_drives(output),
+        Commands::Partitions(args) => cli::handle_partitions(&args, output),
+        Commands::Scan(args) => cli::handle_scan(&args, output),
+        Commands::Mount(args) => cli::handle_mount(&args, output),
+        Commands::Unmount { mountpoint } => cli::handle_unmount(&mountpoint, output),
     }
 }
