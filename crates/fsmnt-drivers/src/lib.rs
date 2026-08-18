@@ -65,6 +65,7 @@ mod btrfs;
 mod exfat;
 mod ext;
 mod fat;
+mod fscrypt;
 mod identity;
 mod ntfs;
 mod patched;

@@ -12,6 +12,7 @@
 mod cli;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
@@ -61,6 +62,32 @@ struct FilesystemMountOptions {
     #[arg(long)]
     salvage: bool,
 
+    /// fscrypt master key to unlock encrypted files and filenames with.
+    /// Repeatable; applies to every fscrypt-capable filesystem the drivers
+    /// support (today ext4, which is what Android's file-based encryption
+    /// runs on).
+    ///
+    /// Spelled `<HEX>` or `v2:<HEX>` for a v2 key (16–64 bytes as 32–128
+    /// hex digits), `v1:<DESCRIPTOR>:<HEX>` for a v1 key (the descriptor is
+    /// the 16 hex digits the policy stores; the key must be 64 bytes), or
+    /// `@<PATH>` in place of `<HEX>` in either form to read the raw key
+    /// bytes from a file. A v2 key needs no identifier: the kernel derives
+    /// it from the key, and so does fsmnt.
+    ///
+    /// These are the raw fscrypt master keys, not a PIN, password or
+    /// keystore blob. On Android they are the `key` bytes vold keeps
+    /// unwrapped in the kernel keyring — read from a live rooted device
+    /// with `keyctl` / `fscryptctl`, or reconstructed from
+    /// `/data/unencrypted/key` plus `/data/misc/vold/user_keys` where the
+    /// wrapping keymaster is software. Keys bound to a TEE or `StrongBox`
+    /// cannot be recovered from an image at all.
+    ///
+    /// Mounting without them still works: the volume opens, encrypted
+    /// names appear in the kernel's no-key form, and the mount reports
+    /// which key identifiers it is asking for.
+    #[arg(long, value_name = "SPEC", value_parser = fsmnt::device::FscryptKeySpec::from_str)]
+    fscrypt_key: Vec<fsmnt::device::FscryptKeySpec>,
+
     /// Keep reading when the source cannot deliver a sector: bytes past the
     /// end of a truncated image (up to the partition's declared extent) and
     /// sectors that fail with an I/O error are served as zeros instead of
@@ -84,6 +111,7 @@ impl FilesystemMountOptions {
             .with_journal_replay(!self.no_journal_replay)
             .with_ext_backup_superblock(self.backup_superblock)
             .with_salvage(self.salvage)
+            .with_fscrypt_keys(self.fscrypt_key.clone())
     }
 }
 

@@ -23,7 +23,7 @@ required, and nothing is ever written back to the source.
 | NTFS         | NTFS 3.x, as used from Windows 2000 through Windows 11           |
 | FAT12/16/32  |                                                                  |
 | exFAT        |                                                                  |
-| ext2/3/4     | optional fscrypt decryption and fs-verity; journal and orphan replay applied as overlays, never to the source |
+| ext2/3/4     | fscrypt decryption with `--fscrypt-key` (Android FBE) and fs-verity; journal and orphan replay applied as overlays, never to the source |
 | APFS         | containers with multiple volumes, selectable by name, role, or index |
 | Btrfs        | subvolumes, single/DUP/RAID0/1/1C3/1C4/10/5/6 profiles, zlib/LZO/Zstd compression, seed devices |
 | BitLocker    | unlocks to the NTFS volume inside (recovery password or `.BEK`)  |
@@ -263,6 +263,7 @@ disk.bin is a disk image` — rather than being quietly ignored.
 | `--fstab [PATH]` | – | ✓ | ✓ |
 | `--recovery-password`, `--bek-file` | – | ✓ | ✓ |
 | `--fs-root`, `--no-journal-replay`, `--backup-superblock`, `--salvage`, `--best-effort-reads` | – | ✓ | ✓ |
+| `--fscrypt-key SPEC` | – | ✓ | ✓ |
 | `--volname NAME`, `--fsname NAME` | ✓ | ✓ | ✓ |
 | `--detach` | ✓ | ✓ | ✓ |
 
@@ -602,6 +603,87 @@ served alongside it as usual.
 Both flags are ext-only; another driver rejects them rather than quietly
 ignoring the request. They combine with `--partition`, `--offset` and
 `--no-journal-replay`.
+
+### File-based encryption (fscrypt / Android FBE)
+
+fscrypt is Linux's per-file encryption — what Android calls FBE, and what
+its `/data` has used since Android 10. It encrypts file *contents* and the
+*names* inside encrypted directories, and nothing else: the tree, the
+sizes, the timestamps and the block layout are all plaintext, and the
+master keys are deliberately not on the volume.
+
+So a `/data` image mounts perfectly well with no keys at all — and that is
+the trap. Without them you get:
+
+- names in the kernel's no-key form, `base64url(fscrypt_nokey_name)` —
+  byte-for-byte what a kernel `readdir()` shows on a keyless mount, e.g.
+  `AAAAAAAAAAArjx7aAMADDNHGcN-v-GWz`;
+- an error on every read of an encrypted file, naming the key it wants;
+- and, before the volume appears, a census of the keys the volume is
+  asking for:
+
+```text
+warn: filesystem uses fscrypt (file-based encryption); no keys registered — encrypted
+      names appear in the kernel's no-key form and encrypted files cannot be read
+warn: fscrypt key identifier 3ea377eeb5b5b06a8dbf7d48fa2c5bc6: v2, AES-256-XTS/AES-256-CTS,
+      PAD_16 — NOT registered; e.g. /data/data, /media/0, /system_ce/0 (+41 more)
+```
+
+The census walks three levels down from the mounted root (bounded, and
+never fatal), which is where Android puts its policies — `data/<pkg>`,
+`user_de/0`, `system_ce/0`, `media/0`, `misc_ce/0`, `vendor_ce/0`. Each
+line names one distinct policy: its key, its ciphers, its flags
+(`IV_INO_LBLK_64`, `DIRECT_KEY`, casefold, sub-block data units), whether
+a supplied key covers it, and where it applies.
+
+`--fscrypt-key SPEC` supplies a master key, and repeats:
+
+```sh
+fsmnt mount data.img Z: --fscrypt-key @user0-ce.key
+fsmnt mount data.img Z: --fscrypt-key 4f2a…8c --fscrypt-key @user10-ce.key
+fsmnt mount data.img Z: --fscrypt-key v1:aabbccddeeff0011:@legacy-de.key
+```
+
+| spec | meaning |
+|---|---|
+| `<HEX>` or `v2:<HEX>` | a v2 master key, 16–64 bytes as 32–128 hex digits |
+| `v1:<DESCRIPTOR>:<HEX>` | a v1 master key; `DESCRIPTOR` is the 16 hex digits the policy stores, and the key must be 64 bytes |
+| `@<PATH>` | in place of `<HEX>` in either form: read the raw key bytes from a file |
+
+A v2 key needs no identifier — the kernel derives the 16-byte identifier
+from the key itself (HKDF-SHA512), and so does fsmnt, which is how the
+census can tell you whether what you supplied is what the volume wants. A
+v1 policy stores an operator-chosen descriptor instead, so a v1 key has to
+be told which one it answers to. Keys never appear in a log line: only
+their lengths, and the descriptors and identifiers the volume already
+stores in the clear.
+
+The workspace's own fscrypt fixture makes the whole loop runnable — its
+master keys are SHA-512 of fixed labels:
+
+```sh
+python3 -c 'import hashlib,sys; sys.stdout.buffer.write(hashlib.sha512(b"tracium-fscrypt-v2-fixture").digest())' > v2.key
+fsmnt mount crates/formats/fs-ext/testdata/ext4-fscrypt.img Z: --fscrypt-key @v2.key
+# warn: fscrypt key identifier 3ea377eeb5b5b06a8dbf7d48fa2c5bc6: v2, AES-256-XTS/AES-256-CTS,
+#       PAD_16 — registered; e.g. /v2_dir
+cat Z:\v2_dir\hello.txt   # "v2 hello"
+```
+
+Frankly: these are the raw master keys, not a PIN or a password. On
+Android they are the bytes vold hands the kernel keyring, recoverable
+from a live rooted device (`keyctl`, `fscryptctl`) or from
+`/data/unencrypted/key` plus `/data/misc/vold/user_keys` **only where the
+wrapping keymaster is software**. Android 12+ binds those keys to the
+TEE or StrongBox, and a TEE-wrapped key cannot be unwrapped from the
+image alone — no amount of offline work on the dump will produce it. Where
+a device-side unwrap service exists, the underlying parser supports
+handing it wrapped blobs; fsmnt's command line does not expose that path.
+
+fscrypt is not an ext4 feature but a VFS one — f2fs, UBIFS and Ceph store
+the same policies — so `--fscrypt-key` is written against fscrypt rather
+than against ext. Today ext2/3/4 is the fscrypt-capable driver fsmnt
+ships, and a key handed to any other driver is ignored rather than
+refused, so one key set can be passed to a whole-device mount.
 
 ### BitLocker
 

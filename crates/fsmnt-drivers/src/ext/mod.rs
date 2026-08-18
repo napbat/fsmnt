@@ -15,6 +15,7 @@
 
 mod backup;
 mod dir;
+mod fscrypt;
 mod salvage;
 
 use std::io;
@@ -25,6 +26,7 @@ use fs_ext::{Ext, ExtError, ExtTimestamp, JournalReplay, OrphanReplay, OverlayRe
 use fsmnt_core::{FsEntry, FsError, FsMetadata, FsResult, TargetFilesystem};
 use fsmnt_device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
+    FscryptKeySpec,
 };
 use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
@@ -179,6 +181,20 @@ fn map_ext_error(e: ExtError, path: &str) -> FsError {
         ExtError::EncryptedInode { inode } => {
             FsError::Filesystem(format!("inode {inode} is encrypted"))
         }
+        // The one error an operator can actually do something about: it
+        // names the master key the volume wants, so the message says which
+        // one and how to hand it over. The mount backends turn this into
+        // EIO for the caller and `warn!` the text, which is where it is
+        // read.
+        ExtError::MissingFscryptKey {
+            inode,
+            policy_kind,
+            key_ref,
+        } => FsError::Filesystem(crate::fscrypt::missing_key_message(
+            inode,
+            &policy_kind,
+            &key_ref,
+        )),
         ExtError::UnsupportedEaInode { inode } => {
             FsError::Filesystem(format!("inode {inode} uses EA inode references"))
         }
@@ -215,21 +231,92 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// Returns an error if the superblock cannot be parsed, if recovery is
     /// required but no journal is present, or if the post-recovery strict
     /// open still fails (e.g. an unsupported incompatible feature flag).
-    pub fn new(mut reader: R) -> FsResult<Self> {
-        let mut fs = match Ext::new(&mut reader) {
-            Ok(ext) => Self::from_parts(reader, ext, Overlay::Clean),
-            Err(ExtError::NeedsRecovery | ExtError::OrphanRecoveryRequired) => {
-                Self::recover(reader)?
+    pub fn new(reader: R) -> FsResult<Self> {
+        Self::opened(reader, true, false, &[])
+    }
+
+    /// Open an ext volume as [`Self::new`] does, registering `keys` as
+    /// fscrypt master keys before any read happens.
+    ///
+    /// Without them an fscrypt volume still opens: the names inside
+    /// encrypted directories then present in the kernel's no-key form and
+    /// encrypted file contents cannot be read. Which keys the volume is
+    /// asking for is reported through [`TargetFilesystem::notices`] either
+    /// way.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same failures as [`Self::new`], plus a failure naming
+    /// the key (by its position in `keys`) when one is not a length fscrypt
+    /// accepts.
+    pub fn new_with_fscrypt_keys(reader: R, keys: &[FscryptKeySpec]) -> FsResult<Self> {
+        Self::opened(reader, true, false, keys)
+    }
+
+    /// The one open path: choose the view, register the keys, and describe
+    /// what was done.
+    ///
+    /// Each public constructor is one point in this space; keeping them a
+    /// single function is what guarantees that every way of opening a
+    /// volume registers the operator's fscrypt keys and reports the same
+    /// encryption census.
+    fn opened(
+        mut reader: R,
+        journal_replay: bool,
+        salvage: bool,
+        keys: &[FscryptKeySpec],
+    ) -> FsResult<Self> {
+        let mut fs = if journal_replay {
+            match Ext::new(&mut reader) {
+                Ok(ext) => Self::from_parts(reader, ext, Overlay::Clean, keys)?,
+                Err(ExtError::NeedsRecovery | ExtError::OrphanRecoveryRequired) => {
+                    Self::recover(reader, keys)?
+                }
+                Err(e) => return Err(map_ext_error(e, "<open>")),
             }
-            Err(e) => return Err(map_ext_error(e, "<open>")),
+        } else {
+            let ext = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<open>"))?;
+            Self::from_parts(reader, ext, Overlay::Unreplayed, keys)?
         };
-        fs.check_root_directory()?;
+        if salvage {
+            fs.salvage = true;
+            debug!(
+                journal_replay,
+                "salvage mode engaged; the root directory need not be listable"
+            );
+            fs.notices.push(
+                "salvage mode: every in-use inode found by sweeping the inode tables is listed
+                 under /.fsmnt-salvage as inode-N; the root directory is presented as empty if it
+                 cannot be listed"
+                    .to_string(),
+            );
+        } else {
+            fs.check_root_directory()?;
+        }
+        fs.report_fscrypt();
         Ok(fs)
     }
 
+    /// Say what this volume's encryption asks for, if it has any.
+    ///
+    /// Runs after the view is settled so the census reads through whatever
+    /// overlay is serving the mount, and never fails: an encrypted volume
+    /// is still mountable when the census cannot read part of the tree.
+    fn report_fscrypt(&mut self) {
+        let found = self.with_reader(fscrypt::notices);
+        self.notices.extend(found);
+    }
+
     /// Assemble a handle in the default (non-salvage) view, noting how the
-    /// volume's dirty state (if any) is being presented.
-    fn from_parts(reader: R, ext: Ext, overlay: Overlay) -> Self {
+    /// volume's dirty state (if any) is being presented, and registering
+    /// the operator's fscrypt master keys.
+    fn from_parts(
+        reader: R,
+        mut ext: Ext,
+        overlay: Overlay,
+        keys: &[FscryptKeySpec],
+    ) -> FsResult<Self> {
+        fscrypt::register_keys(&mut ext, keys)?;
         let mut notices = Vec::new();
         match &overlay {
             Overlay::Clean => {}
@@ -269,14 +356,14 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             size_bytes = ext.size(),
             "opened an ext volume"
         );
-        Self {
+        Ok(Self {
             reader,
             ext,
             overlay,
             salvage: false,
             salvaged: None,
             notices,
-        }
+        })
     }
 
     /// Open an ext2/ext3/ext4 volume in **salvage** mode: recover what the
@@ -303,31 +390,8 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     ///
     /// Returns an error if the superblock or group descriptors cannot be
     /// parsed, or if requested replay fails.
-    pub fn new_salvaging(mut reader: R, journal_replay: bool) -> FsResult<Self> {
-        let mut fs = if journal_replay {
-            match Ext::new(&mut reader) {
-                Ok(ext) => Self::from_parts(reader, ext, Overlay::Clean),
-                Err(ExtError::NeedsRecovery | ExtError::OrphanRecoveryRequired) => {
-                    Self::recover(reader)?
-                }
-                Err(e) => return Err(map_ext_error(e, "<open>")),
-            }
-        } else {
-            let ext = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<open>"))?;
-            Self::from_parts(reader, ext, Overlay::Unreplayed)
-        };
-        fs.salvage = true;
-        debug!(
-            journal_replay,
-            "salvage mode engaged; the root directory need not be listable"
-        );
-        fs.notices.push(
-            "salvage mode: every in-use inode found by sweeping the inode tables is listed under
-             /.fsmnt-salvage as inode-N; the root directory is presented as empty if it cannot
-             be listed"
-                .to_string(),
-        );
-        Ok(fs)
+    pub fn new_salvaging(reader: R, journal_replay: bool) -> FsResult<Self> {
+        Self::opened(reader, journal_replay, true, &[])
     }
 
     /// Open an ext2/ext3/ext4 volume from `reader` **without** journal or
@@ -345,11 +409,8 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     ///
     /// Returns an error if the superblock, feature flags, or group
     /// descriptors are invalid, or if the root directory is unusable.
-    pub fn new_without_replay(mut reader: R) -> FsResult<Self> {
-        let ext = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<open>"))?;
-        let mut fs = Self::from_parts(reader, ext, Overlay::Unreplayed);
-        fs.check_root_directory()?;
-        Ok(fs)
+    pub fn new_without_replay(reader: R) -> FsResult<Self> {
+        Self::opened(reader, false, false, &[])
     }
 
     /// Fail the open unless the root directory (inode 2) is a directory
@@ -406,7 +467,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
 
     /// Run journal (and, if still needed, orphan) replay, then strict-open
     /// through the resulting overlay.
-    fn recover(mut reader: R) -> FsResult<Self> {
+    fn recover(mut reader: R, keys: &[FscryptKeySpec]) -> FsResult<Self> {
         let lenient = Ext::open_lenient(&mut reader).map_err(|e| map_replay_error(&e, "open"))?;
         let journal = JournalReplay::build(&lenient, &mut reader)
             .map_err(|e| map_replay_error(&e, "journal replay"))?;
@@ -417,7 +478,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         };
 
         match strict_attempt {
-            Ok(ext) => Ok(Self::from_parts(reader, ext, Overlay::Journal(journal))),
+            Ok(ext) => Self::from_parts(reader, ext, Overlay::Journal(journal), keys),
             Err(ExtError::OrphanRecoveryRequired) => {
                 // Parse a lenient Ext through the journal overlay so the
                 // orphan stage consumes the post-journal metadata snapshot.
@@ -433,7 +494,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
                     Ext::new(&mut or)
                         .map_err(|e| map_replay_error(&e, "reopening after orphan replay"))?
                 };
-                Ok(Self::from_parts(reader, ext, Overlay::Orphan(orphan)))
+                Self::from_parts(reader, ext, Overlay::Orphan(orphan), keys)
             }
             Err(e) => Err(map_replay_error(&e, "reopening after journal replay")),
         }
@@ -721,37 +782,21 @@ impl FilesystemDriver for ExtDriver {
         }
         let replay = options.journal_replay();
         let salvage = options.salvage();
+        let keys = options.fscrypt_keys();
         match options.ext_backup_superblock() {
             Some(group) => {
-                let mut fs = open_view(backup::patch_from_backup(reader, group)?, replay, salvage)?;
+                let patched = backup::patch_from_backup(reader, group)?;
+                let mut fs = ExtFilesystem::opened(patched, replay, salvage, keys)?;
                 fs.notices.push(format!(
                     "opened through the backup superblock (and group descriptors) of block group
                      {group}; the primary copies at the start of the volume were not used"
                 ));
                 Ok(Box::new(fs))
             }
-            None => Ok(Box::new(open_view(reader, replay, salvage)?)),
+            None => Ok(Box::new(ExtFilesystem::opened(
+                reader, replay, salvage, keys,
+            )?)),
         }
-    }
-}
-
-/// Open `reader` in the view the flags describe.
-///
-/// # Errors
-///
-/// Returns whatever the selected constructor reports.
-fn open_view<R: Read + Seek + Send + 'static>(
-    reader: R,
-    journal_replay: bool,
-    salvage: bool,
-) -> FsResult<ExtFilesystem<R>> {
-    if salvage {
-        return ExtFilesystem::new_salvaging(reader, journal_replay);
-    }
-    if journal_replay {
-        ExtFilesystem::new(reader)
-    } else {
-        ExtFilesystem::new_without_replay(reader)
     }
 }
 

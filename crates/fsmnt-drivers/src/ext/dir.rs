@@ -6,10 +6,12 @@
 
 use std::path::PathBuf;
 
-use fs_ext::Ext;
 use fs_ext::io::{Read, Seek};
+use fs_ext::{Ext, ExtError};
 use fsmnt_core::{FsEntry, FsEntryFlags, FsMetadata, FsResult};
 use fsmnt_parser_core::iter::FsTryIterator;
+use fsmnt_parser_core::traverse::{EntryKind, FsDirectory};
+use tracing::debug;
 
 use super::{Reader, map_ext_error, ts_to_utc};
 
@@ -85,20 +87,7 @@ pub(super) fn list<R: Read + Seek>(
     // adapter: read_dir("C:\\Windows") reports "C:\\Windows\\foo".
     let parent_path = PathBuf::from(path);
 
-    let mut raw: Vec<(Vec<u8>, u32, u8)> = Vec::new();
-    {
-        let mut dir = ext.directory_at(inum);
-        let mut iter = dir
-            .raw_entries(reader)
-            .map_err(|e| map_ext_error(e, path))?;
-        while let Some(entry) = iter.try_next(reader).map_err(|e| map_ext_error(e, path))? {
-            let name_bytes = entry.name_bytes();
-            if name_bytes == b"." || name_bytes == b".." {
-                continue;
-            }
-            raw.push((name_bytes.to_vec(), entry.inode_number(), entry.file_type()));
-        }
-    }
+    let raw = names(ext, reader, inum, path)?;
 
     let mut entries = Vec::with_capacity(raw.len());
     for (name_bytes, entry_inum, file_type) in raw {
@@ -114,4 +103,115 @@ pub(super) fn list<R: Read + Seek>(
         });
     }
     Ok(entries)
+}
+
+/// The `(name, inode, file_type)` triple of every entry in `inum`.
+///
+/// Structural by preference: `raw_entries` never reads a child inode, so a
+/// parse failure is the only thing that can abort the listing. An
+/// fscrypt-encrypted directory is the exception, because there the bytes
+/// are only a name once decrypted:
+///
+/// * with the master key registered, the decrypting iterator yields the
+///   plaintext names — the whole point of supplying a key;
+/// * without it, entries present as `base64url(fscrypt_nokey_name)`, the
+///   same stable ASCII a kernel `readdir()` returns for a volume mounted
+///   with no key. The raw ciphertext is not a name in any encoding and
+///   would reach the mount as a run of replacement characters.
+fn names<R: Read + Seek>(
+    ext: &Ext,
+    reader: &mut Reader<'_, R>,
+    inum: u32,
+    path: &str,
+) -> FsResult<Vec<(Vec<u8>, u32, u8)>> {
+    let encrypted = ext
+        .inode(reader, inum)
+        .is_ok_and(|inode| inode.is_encrypted());
+    if encrypted {
+        match decrypted_names(ext, reader, inum) {
+            Ok(entries) => return Ok(entries),
+            Err(ExtError::MissingFscryptKey { key_ref, .. }) => {
+                debug!(
+                    inode = inum,
+                    %path,
+                    %key_ref,
+                    "listing an encrypted directory in the kernel's no-key form"
+                );
+            }
+            Err(e) => return Err(map_ext_error(e, path)),
+        }
+    }
+    structural_names(ext, reader, inum, path, encrypted)
+}
+
+/// Entry names as the on-disk dirents carry them, in the kernel's no-key
+/// presentation form when the directory is encrypted.
+fn structural_names<R: Read + Seek>(
+    ext: &Ext,
+    reader: &mut Reader<'_, R>,
+    inum: u32,
+    path: &str,
+    encrypted: bool,
+) -> FsResult<Vec<(Vec<u8>, u32, u8)>> {
+    let mut raw = Vec::new();
+    let mut dir = ext.directory_at(inum);
+    let mut iter = dir
+        .raw_entries(reader)
+        .map_err(|e| map_ext_error(e, path))?;
+    while let Some(entry) = iter.try_next(reader).map_err(|e| map_ext_error(e, path))? {
+        let name_bytes = entry.name_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let name = if encrypted {
+            entry.name_nokey_encoded()
+        } else {
+            name_bytes.to_vec()
+        };
+        raw.push((name, entry.inode_number(), entry.file_type()));
+    }
+    Ok(raw)
+}
+
+/// Entry names decrypted with a registered fscrypt master key.
+///
+/// # Errors
+///
+/// Returns `ExtError::MissingFscryptKey` when no registered key covers this
+/// directory's policy, which is the caller's cue to fall back to the no-key
+/// presentation.
+fn decrypted_names<R: Read + Seek>(
+    ext: &Ext,
+    reader: &mut Reader<'_, R>,
+    inum: u32,
+) -> Result<Vec<(Vec<u8>, u32, u8)>, ExtError> {
+    let mut named = Vec::new();
+    let mut dir = ext.directory_at(inum);
+    let mut iter = dir.entries(reader)?;
+    while let Some(entry) = iter.try_next(reader)? {
+        let name = entry.name_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        named.push((name.to_vec(), entry.inode_number(), file_type(entry.kind())));
+    }
+    Ok(named)
+}
+
+/// The dirent `file_type` byte a resolved [`EntryKind`] corresponds to.
+///
+/// The decrypting iterator resolves the kind instead of passing the byte
+/// through, so this puts it back into the form [`describe`] wants as its
+/// fallback. Values are `EXT4_FT_*` from `fs/ext4/ext4.h`.
+const fn file_type(kind: EntryKind) -> u8 {
+    match kind {
+        EntryKind::File => 1,
+        EntryKind::Directory => EXT4_FT_DIR,
+        EntryKind::CharDevice => 3,
+        EntryKind::BlockDevice => 4,
+        EntryKind::Fifo => 5,
+        EntryKind::Socket => 6,
+        EntryKind::Symlink => EXT4_FT_SYMLINK,
+        EntryKind::Other => 0,
+    }
 }

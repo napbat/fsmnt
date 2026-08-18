@@ -85,6 +85,11 @@ pub(super) fn check_options(
             ),
             ("--salvage", args.filesystem.salvage, MEDIA),
             (
+                "--fscrypt-key",
+                !args.filesystem.fscrypt_key.is_empty(),
+                MEDIA,
+            ),
+            (
                 "--best-effort-reads",
                 args.filesystem.best_effort_reads,
                 MEDIA,

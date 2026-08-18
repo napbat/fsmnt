@@ -14,6 +14,11 @@ fsmnt-parser-core = { workspace = true, features = ["std"] }
 nostdio = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# `Zeroizing` for the fscrypt master keys `FilesystemOpenOptions` carries.
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

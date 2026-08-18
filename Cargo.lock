@@ -704,6 +704,7 @@ dependencies = [
  "fsmnt-fuse",
  "fsmnt-proxy",
  "fsmnt-testkit",
+ "sha2",
  "tempfile",
  "thiserror",
  "tracing",
@@ -731,8 +732,10 @@ dependencies = [
  "fsmnt-core",
  "fsmnt-parser-core",
  "nostdio",
+ "tempfile",
  "thiserror",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

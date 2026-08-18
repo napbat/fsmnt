@@ -12,7 +12,7 @@ use std::fmt;
 use std::str::FromStr;
 use tracing::debug;
 
-use crate::{DetectedBootSector, DeviceMember, DeviceSet};
+use crate::{DetectedBootSector, DeviceMember, DeviceSet, FscryptKeySpec};
 
 /// Combined reader bound required by filesystem drivers.
 ///
@@ -109,17 +109,22 @@ fn invalid_root_selector(value: &str) -> FilesystemRootParseError {
 }
 
 /// Options applied while a filesystem driver opens its source.
+///
+/// `Debug` is safe to log: the only secret here is the fscrypt key
+/// material, and [`FscryptKeySpec`] redacts its own.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilesystemOpenOptions {
     root: FilesystemRoot,
     journal_replay: bool,
     ext_backup_superblock: Option<u32>,
     salvage: bool,
+    fscrypt_keys: Vec<FscryptKeySpec>,
 }
 
 impl FilesystemOpenOptions {
     /// Create options using the driver's default filesystem root, with
-    /// journal replay enabled, from the primary metadata, without salvage.
+    /// journal replay enabled, from the primary metadata, without salvage,
+    /// and with no fscrypt master keys.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -127,6 +132,7 @@ impl FilesystemOpenOptions {
             journal_replay: true,
             ext_backup_superblock: None,
             salvage: false,
+            fscrypt_keys: Vec::new(),
         }
     }
 
@@ -207,6 +213,30 @@ impl FilesystemOpenOptions {
     #[must_use]
     pub const fn salvage(&self) -> bool {
         self.salvage
+    }
+
+    /// Supply the fscrypt master keys a driver should register before it
+    /// serves reads.
+    ///
+    /// fscrypt (Linux file-based encryption, used by ext4, f2fs, UBIFS and
+    /// Ceph, and what Android calls FBE) leaves a volume openable without
+    /// its keys. What the keys change is whether the names inside encrypted
+    /// directories read as plaintext instead of the kernel's no-key form,
+    /// and whether encrypted file contents can be read at all. Drivers for
+    /// formats that have no fscrypt ignore the keys rather than refusing
+    /// the open: an operator mounting a whole device hands the same key set
+    /// to every partition.
+    #[must_use]
+    pub fn with_fscrypt_keys(mut self, keys: Vec<FscryptKeySpec>) -> Self {
+        self.fscrypt_keys = keys;
+        self
+    }
+
+    /// The fscrypt master keys to register, in the order they were given —
+    /// which is the order a driver's error messages number them by.
+    #[must_use]
+    pub fn fscrypt_keys(&self) -> &[FscryptKeySpec] {
+        &self.fscrypt_keys
     }
 }
 
@@ -390,8 +420,11 @@ pub trait FilesystemDriver: Send + Sync {
     /// [`FilesystemOpenOptions::journal_replay`]: a driver that never
     /// replays a journal already presents the on-disk state, so declining
     /// replay changes nothing. Drivers that do replay (ext) override this
-    /// method to honour it. The recovery options that select *different*
-    /// metadata — [`FilesystemOpenOptions::ext_backup_superblock`] and
+    /// method to honour it. [`FilesystemOpenOptions::fscrypt_keys`] is
+    /// ignored for the same reason: a format with no fscrypt has nothing to
+    /// unlock, and one key set is meant to cover every partition of a
+    /// device. The recovery options that select *different* metadata —
+    /// [`FilesystemOpenOptions::ext_backup_superblock`] and
     /// [`FilesystemOpenOptions::salvage`] — are rejected rather than
     /// ignored, so a user never mistakes a plain mount for a recovered one.
     ///
