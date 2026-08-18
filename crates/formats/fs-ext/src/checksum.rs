@@ -12,35 +12,16 @@ pub enum ChecksumState {
     Invalid,
 }
 
-/// Compute the kernel's raw `__crc32c_le(crc, data)`.
+/// The two raw accumulations every ext4 checksum is built from: the kernel's
+/// `__crc32c_le`, and the CRC-16 (reflected polynomial 0xA001, initial value
+/// `0xFFFF`, no final XOR) that `ext4_group_desc_csum` in `fs/ext4/super.c`
+/// still uses on the legacy `GDT_CSUM` path.
 ///
-/// The `crc32c` crate's `crc32c_append(x, data)` returns
-/// `!accumulate(!x, data)`. To get the raw accumulation:
-/// `accumulate(crc, data) = !crc32c_append(!crc, data)`.
-pub(crate) fn ext4_crc32c(crc: u32, data: &[u8]) -> u32 {
-    !crc32c::crc32c_append(!crc, data)
-}
-
-/// CRC16 variant used by ext4's legacy `GDT_CSUM` group-descriptor checksum.
-///
-/// Polynomial: reflected 0xA001 (i.e. the ANSI CRC16 "X25" style ext4 inherits
-/// from the kernel). Initial value `0xFFFF`, no final XOR. See
-/// `ext4_group_desc_csum` in `fs/ext4/super.c`.
-pub(crate) fn ext4_crc16(crc: u16, data: &[u8]) -> u16 {
-    const POLY: u16 = 0xA001;
-    let mut crc = crc;
-    for &byte in data {
-        crc ^= u16::from(byte);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ POLY;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc
-}
+/// They live in `fsmnt-parser-core` because boot-sector scanning needs the
+/// same arithmetic to tell a filesystem start from a superblock copy, and
+/// that crate is the one both layers can share — a second implementation
+/// here would be a second thing to get wrong.
+pub(crate) use fsmnt_parser_core::{ext4_crc16, ext4_crc32c};
 
 /// Compute the CRC32C checksum seed from the filesystem UUID.
 ///
@@ -124,7 +105,13 @@ pub(crate) fn compute_group_descriptor_csum_crc32c(seed: u32, group: u32, desc_b
 
 /// Compute the legacy `GDT_CSUM` CRC16 for a group descriptor.
 ///
-/// Input is `crc16(0xFFFF, sb.s_uuid || le32(group) || desc_with_csum_zeroed)`.
+/// Input is `crc16(0xFFFF, sb.s_uuid || le32(group) || desc_without_csum)`.
+///
+/// The two branches of `ext4_group_desc_csum` are not symmetric: the
+/// `METADATA_CSUM` path feeds a zeroed stand-in where `bg_checksum` sits,
+/// while this one steps over the field and feeds nothing in its place.
+/// Zeroing it here instead yields a checksum no filesystem carries — a real
+/// `GDT_CSUM` volume verifies only against the skipping form.
 pub(crate) fn compute_group_descriptor_csum_crc16(
     uuid: &[u8; 16],
     group: u32,
@@ -134,7 +121,6 @@ pub(crate) fn compute_group_descriptor_csum_crc16(
     let mut crc = ext4_crc16(0xFFFF, uuid);
     crc = ext4_crc16(crc, &group.to_le_bytes());
     crc = ext4_crc16(crc, &desc_buf[..0x1E]);
-    crc = ext4_crc16(crc, &[0u8; 2]);
     if desc_buf.len() > 0x20 {
         crc = ext4_crc16(crc, &desc_buf[0x20..]);
     }

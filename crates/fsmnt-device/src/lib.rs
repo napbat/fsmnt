@@ -58,10 +58,10 @@ pub use driver::{
 pub use fsmnt_parser_core::boot_sector::{
     BOOT_SECTOR_SIZE, BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_MAGIC,
     BTRFS_SUPERBLOCK_PROBE_SIZE, BootSectorDiagnosis, BootSectorHeader, BootSectorUnknownReason,
-    DetectedBootSector, DosBpb, ExFatBootSector, ExtBackupSuperblock, ExtSuperblockInfo,
-    FS_DETECT_PROBE_SIZE, Fat16Ebpb, Fat32Ebpb, FilesystemType, NtfsEbpb, ParseError,
-    ParsedBootSector, diagnose_boot_sector, ext_backup_superblock_group,
-    ext_backup_superblock_info, ext_superblock_info, is_btrfs_primary_superblock,
+    DetectedBootSector, DosBpb, ExFatBootSector, ExtBackupSuperblock, ExtStartCheck,
+    ExtSuperblockInfo, FS_DETECT_PROBE_SIZE, Fat16Ebpb, Fat32Ebpb, FilesystemType, NtfsEbpb,
+    ParseError, ParsedBootSector, diagnose_boot_sector, ext_backup_superblock_group,
+    ext_backup_superblock_info, ext_start_check, ext_superblock_info, is_btrfs_primary_superblock,
     parse_boot_sector,
 };
 pub use fsmnt_parser_core::partition::{

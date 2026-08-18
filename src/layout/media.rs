@@ -84,6 +84,10 @@ pub(crate) fn media_layout<R: Read + Seek>(
 /// An ext filesystem found only through a backup superblock is listed too —
 /// at the start the copy implies — so selecting it produces the "primary
 /// damaged, retry with `--backup-superblock`" guidance rather than nothing.
+/// So is a start whose superblock survived but whose group descriptor table
+/// no longer verifies, once a backup superblock names that offset as its
+/// filesystem's start; without that corroboration the copies are not
+/// mountable and never reach this list.
 pub(crate) fn layout_from_hits(hits: &[ScanHit], size_bytes: Option<u64>) -> Vec<LayoutPartition> {
     crate::mountable_hits(hits)
         .into_iter()
@@ -103,6 +107,15 @@ pub(crate) fn layout_from_hits(hits: &[ScanHit], size_bytes: Option<u64>) -> Vec
                         "Ext (scan; primary damaged, backup at group {group})"
                     )),
                     Some(DetectedBootSector::Unknown),
+                ),
+                ScanHitKind::ExtPrimaryCopies { .. } => (
+                    Some(format!(
+                        "Ext (scan; descriptor table damaged, backup at group {})",
+                        hit.backup_superblocks
+                            .first()
+                            .map_or(0, |backup| backup.group)
+                    )),
+                    Some(DetectedBootSector::Ext),
                 ),
                 ScanHitKind::PartitionTable(_) => (None, None),
             };

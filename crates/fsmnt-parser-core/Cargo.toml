@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+crc32c = { workspace = true }
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

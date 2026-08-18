@@ -51,8 +51,8 @@ mod ext;
 
 use ext::probe_ext;
 pub use ext::{
-    ExtBackupSuperblock, ExtSuperblockInfo, ext_backup_superblock_group,
-    ext_backup_superblock_info, ext_superblock_info,
+    ExtBackupSuperblock, ExtStartCheck, ExtSuperblockInfo, ext_backup_superblock_group,
+    ext_backup_superblock_info, ext_start_check, ext_superblock_info, ext4_crc16, ext4_crc32c,
 };
 
 fn read_u16_le(buf: &[u8], off: usize) -> u16 {

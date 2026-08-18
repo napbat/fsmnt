@@ -25,6 +25,15 @@
 //!   Ext superblocks are exempt: a superblock inside another filesystem's
 //!   claimed extent is evidence that the extent is wrong, which is exactly
 //!   what a scan is for.
+//! - **Evidence is corroborated before it is called a filesystem.** A
+//!   magic number is a few bytes and a scan of a large medium meets plenty
+//!   of them by chance, or in file data that once *was* filesystem metadata.
+//!   So an ext primary superblock counts as a start only when the group
+//!   descriptor table that must follow it is there (see
+//!   [`ext_start_check`]), and a `55 AA` counts as a partition table only
+//!   when its four entries describe extents a partitioner could have written
+//!   (see [`Mbr::is_plausible_table`]). What fails those tests is still
+//!   reported — as what it actually is, folded into one line.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -33,9 +42,9 @@ use tracing::debug;
 
 use fsmnt_device::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
-    FS_DETECT_PROBE_SIZE, HostDriveEnumerator, HostDriveError, HostDriveId, ImageOpenError,
-    ImageReader, ParsedBootSector, SectorReader, ext_superblock_info, is_btrfs_primary_superblock,
-    parse_boot_sector,
+    ExtStartCheck, FS_DETECT_PROBE_SIZE, HostDriveEnumerator, HostDriveError, HostDriveId,
+    ImageOpenError, ImageReader, Mbr, ParsedBootSector, SectorReader, ext_start_check,
+    ext_superblock_info, is_btrfs_primary_superblock, parse_boot_sector,
 };
 
 /// Default distance between candidate positions.
@@ -113,14 +122,19 @@ impl ScanHit {
     ///
     /// A partition table is not mountable, and a stray backup superblock is
     /// mountable only at the filesystem start it implies — never at its own
-    /// offset, which the ext driver refuses on purpose.
+    /// offset, which the ext driver refuses on purpose. Superblock copies
+    /// that no backup corroborates are not mountable either: nothing says a
+    /// filesystem begins where they sit.
     #[must_use]
-    pub const fn mount_offset(&self) -> Option<u64> {
+    pub fn mount_offset(&self) -> Option<u64> {
         match self.kind {
             ScanHitKind::Filesystem(_) => Some(self.offset),
             ScanHitKind::ExtBackupSuperblock {
                 filesystem_start, ..
             } => filesystem_start,
+            ScanHitKind::ExtPrimaryCopies { .. } => {
+                (!self.backup_superblocks.is_empty()).then_some(self.offset)
+            }
             ScanHitKind::PartitionTable(_) => None,
         }
     }
@@ -133,6 +147,11 @@ impl ScanHit {
 /// these options, not from any partition table on it — so it holds only for
 /// the same medium scanned with the same stride. It is a convenience over
 /// pasting the offset, not an identity of the volume.
+///
+/// Evidence a scan cannot act on is deliberately absent: a partition table,
+/// a backup superblock whose filesystem starts before this medium, and a
+/// superblock copy nothing corroborates all appear in the hit list and none
+/// of them gets a number, because there is no offset to hand a mount.
 #[must_use]
 pub fn mountable_hits(hits: &[ScanHit]) -> Vec<&ScanHit> {
     hits.iter()
@@ -147,14 +166,35 @@ pub enum ScanHitKind {
     Filesystem(DetectedBootSector),
     /// A partition table, which describes filesystems rather than being one.
     PartitionTable(DetectedBootSector),
-    /// An ext backup superblock whose primary was not found by this scan.
+    /// Backup superblock(s) of an ext filesystem whose primary this scan did
+    /// not confirm.
+    ///
+    /// [`ScanHit::offset`] is the first copy; the other copies of the same
+    /// filesystem that agree on the start are in
+    /// [`ScanHit::backup_superblocks`].
     ExtBackupSuperblock {
-        /// Block group the copy belongs to.
+        /// Block group the first copy belongs to.
         group: u16,
         /// Offset its filesystem would have started at, or `None` when that
-        /// would fall before the start of the media (so the copy cannot
-        /// belong to a filesystem inside this image).
+        /// would fall before the start of the media.
         filesystem_start: Option<u64>,
+        /// Bytes by which the implied start precedes the medium — the medium
+        /// is a slice that begins inside the filesystem. `Some` exactly when
+        /// `filesystem_start` is `None`.
+        start_before_medium: Option<u64>,
+    },
+    /// Copies of an ext primary superblock (group 0) that are NOT followed by
+    /// their group descriptor table: block 0 journalled inside a filesystem,
+    /// or a start whose table is damaged.
+    ///
+    /// [`ScanHit::offset`] is the first, `last_offset` the last, `copies` how
+    /// many. Backups that name `offset` as their filesystem's start land in
+    /// [`ScanHit::backup_superblocks`], and only then is the hit mountable.
+    ExtPrimaryCopies {
+        /// How many copies were folded into this one hit.
+        copies: usize,
+        /// Offset of the last copy, so the run's extent is on record.
+        last_offset: u64,
     },
 }
 
@@ -418,6 +458,12 @@ fn read_chunk(
 #[derive(Default)]
 struct ScanState {
     hits: Vec<ScanHit>,
+    /// The ext filesystem UUID behind each hit, in step with `hits`.
+    ///
+    /// A `ScanHit` carries no identity of its own, and identity is what
+    /// decides whether a superblock copy belongs to a filesystem already
+    /// found or announces a different one.
+    uuids: Vec<Option<[u8; 16]>>,
     /// End of the furthest extent claimed by a filesystem already reported.
     covered_end: u64,
     /// Offsets of ext superblock copies already recorded, so a stride that
@@ -428,15 +474,13 @@ struct ScanState {
 impl ScanState {
     /// Test one candidate position against every probe.
     fn classify(&mut self, chunk: &[u8], offset: usize, position: u64) {
-        let window = chunk
-            .get(offset..)
-            .map(|rest| &rest[..rest.len().min(FS_DETECT_PROBE_SIZE)]);
-        let Some(window) = window else {
+        let Some(tail) = chunk.get(offset..) else {
             return;
         };
+        let window = &tail[..tail.len().min(FS_DETECT_PROBE_SIZE)];
 
         if let Some(detected) = detect(chunk, offset, window) {
-            self.record_detected(position, detected, window);
+            self.record_detected(position, detected, window, tail);
         }
 
         // An ext superblock lies 1024 bytes into its filesystem, so a copy
@@ -457,29 +501,113 @@ impl ScanState {
     }
 
     /// Record a filesystem or partition table found at `position`.
-    fn record_detected(&mut self, position: u64, detected: DetectedBootSector, window: &[u8]) {
+    ///
+    /// `window` is the detection prefix; `tail` runs from `position` to the
+    /// end of the chunk, which reaches past the group descriptor table of
+    /// even a 64 KiB-block ext filesystem.
+    fn record_detected(
+        &mut self,
+        position: u64,
+        detected: DetectedBootSector,
+        window: &[u8],
+        tail: &[u8],
+    ) {
         let is_ext = detected == DetectedBootSector::Ext;
         if position < self.covered_end && !is_ext {
             return;
         }
+        if detected.is_partition_table() && !is_plausible_partition_table(window) {
+            debug!(
+                offset = position,
+                ?detected,
+                "skipped a boot signature whose four entries are not a partition table"
+            );
+            return;
+        }
         let size_bytes = declared_size(detected, window);
+        // A copy of a superblock sits *inside* the filesystem it describes,
+        // so its declared size still marks bytes that are file data rather
+        // than filesystem starts — the suppression is right either way.
         if let Some(size) = size_bytes {
             self.covered_end = self.covered_end.max(position.saturating_add(size));
         }
         if is_ext {
             self.seen_superblocks.push(position.saturating_add(LEAD_IN));
+            let uuid = ext_superblock_info(window).map(|info| info.uuid);
+            if ext_start_check(tail) == ExtStartCheck::Unconfirmed {
+                self.record_primary_copy(position, size_bytes, uuid);
+                return;
+            }
+            self.push_hit(
+                ScanHit {
+                    offset: position,
+                    kind: ScanHitKind::Filesystem(detected),
+                    size_bytes,
+                    backup_superblocks: Vec::new(),
+                },
+                uuid,
+            );
+            return;
         }
         let kind = if detected.is_partition_table() {
             ScanHitKind::PartitionTable(detected)
         } else {
             ScanHitKind::Filesystem(detected)
         };
-        self.hits.push(ScanHit {
-            offset: position,
-            kind,
-            size_bytes,
-            backup_superblocks: Vec::new(),
-        });
+        self.push_hit(
+            ScanHit {
+                offset: position,
+                kind,
+                size_bytes,
+                backup_superblocks: Vec::new(),
+            },
+            None,
+        );
+    }
+
+    /// Record a group-0 superblock at `position` that its own bytes cannot
+    /// establish as a filesystem start.
+    ///
+    /// One journalled transaction produces one such copy, and a busy
+    /// filesystem has journalled block 0 dozens of times, so the copies are
+    /// folded into a single run rather than listed one per line.
+    fn record_primary_copy(
+        &mut self,
+        position: u64,
+        size_bytes: Option<u64>,
+        uuid: Option<[u8; 16]>,
+    ) {
+        if self.inside_ext_filesystem(position, uuid) {
+            debug!(
+                offset = position,
+                "dropped a copy of a primary superblock lying inside its own filesystem — the \
+                 journal recorded block 0, this is not a second filesystem"
+            );
+            return;
+        }
+        if self.last_hit_is_primary_copies(uuid)
+            && let Some(hit) = self.hits.last_mut()
+            && let ScanHitKind::ExtPrimaryCopies {
+                copies,
+                last_offset,
+            } = &mut hit.kind
+        {
+            *copies += 1;
+            *last_offset = position;
+            return;
+        }
+        self.push_hit(
+            ScanHit {
+                offset: position,
+                kind: ScanHitKind::ExtPrimaryCopies {
+                    copies: 1,
+                    last_offset: position,
+                },
+                size_bytes,
+                backup_superblocks: Vec::new(),
+            },
+            uuid,
+        );
     }
 
     /// Record an ext backup superblock sitting at `superblock_offset`, whose
@@ -493,25 +621,46 @@ impl ScanState {
         }
         self.seen_superblocks.push(superblock_offset);
 
+        // The implied start is a signed quantity: an image cut out of the
+        // middle of a filesystem carries backups whose arithmetic lands
+        // before byte zero, and by how much is exactly what says "this
+        // medium begins inside a filesystem".
         let start = superblock_offset.checked_sub(info.copy_offset());
-        if let Some(index) = start.and_then(|start| self.ext_filesystem_at(start)) {
-            self.hits[index]
-                .backup_superblocks
-                .push(ExtBackupSuperblock {
-                    offset: superblock_offset,
-                    group: info.block_group_nr,
-                });
+        let start_before_medium = start
+            .is_none()
+            .then(|| info.copy_offset().saturating_sub(superblock_offset));
+        let copy = ExtBackupSuperblock {
+            offset: superblock_offset,
+            group: info.block_group_nr,
+        };
+
+        let corroborates = start
+            .and_then(|start| self.ext_filesystem_at(start))
+            .or_else(|| start.and_then(|start| self.ext_primary_copies_at(start, info.uuid)))
+            .or_else(|| self.ext_orphan_implying(info.uuid, start, start_before_medium));
+        if let Some(index) = corroborates {
+            self.hits[index].backup_superblocks.push(copy);
             return;
         }
-        self.hits.push(ScanHit {
-            offset: superblock_offset,
-            kind: ScanHitKind::ExtBackupSuperblock {
-                group: info.block_group_nr,
-                filesystem_start: start,
+        self.push_hit(
+            ScanHit {
+                offset: superblock_offset,
+                kind: ScanHitKind::ExtBackupSuperblock {
+                    group: info.block_group_nr,
+                    filesystem_start: start,
+                    start_before_medium,
+                },
+                size_bytes: Some(info.size_bytes()),
+                backup_superblocks: Vec::new(),
             },
-            size_bytes: Some(info.size_bytes()),
-            backup_superblocks: Vec::new(),
-        });
+            Some(info.uuid),
+        );
+    }
+
+    /// Add a hit and the filesystem identity that goes with it.
+    fn push_hit(&mut self, hit: ScanHit, uuid: Option<[u8; 16]>) {
+        self.hits.push(hit);
+        self.uuids.push(uuid);
     }
 
     /// Index of the ext filesystem hit that starts exactly at `offset`.
@@ -519,6 +668,67 @@ impl ScanState {
         self.hits.iter().position(|hit| {
             hit.offset == offset && hit.kind == ScanHitKind::Filesystem(DetectedBootSector::Ext)
         })
+    }
+
+    /// Index of a run of superblock copies that begins at `offset` and
+    /// belongs to the filesystem `uuid` names — the damaged-primary case,
+    /// where a backup vouches for a start the descriptor table could not.
+    fn ext_primary_copies_at(&self, offset: u64, uuid: [u8; 16]) -> Option<usize> {
+        self.hits
+            .iter()
+            .zip(&self.uuids)
+            .position(|(hit, hit_uuid)| {
+                hit.offset == offset
+                    && matches!(hit.kind, ScanHitKind::ExtPrimaryCopies { .. })
+                    && *hit_uuid == Some(uuid)
+            })
+    }
+
+    /// Index of an orphan backup hit for the same filesystem that implies the
+    /// same start, so the copies of one lost filesystem stay on one line.
+    fn ext_orphan_implying(
+        &self,
+        uuid: [u8; 16],
+        start: Option<u64>,
+        before: Option<u64>,
+    ) -> Option<usize> {
+        self.hits
+            .iter()
+            .zip(&self.uuids)
+            .position(|(hit, hit_uuid)| {
+                *hit_uuid == Some(uuid)
+                    && matches!(
+                        hit.kind,
+                        ScanHitKind::ExtBackupSuperblock {
+                            filesystem_start,
+                            start_before_medium,
+                            ..
+                        } if filesystem_start == start && start_before_medium == before
+                    )
+            })
+    }
+
+    /// Whether `position` falls inside the extent claimed by an ext
+    /// filesystem this scan already confirmed and identified as `uuid`.
+    fn inside_ext_filesystem(&self, position: u64, uuid: Option<[u8; 16]>) -> bool {
+        uuid.is_some()
+            && self.hits.iter().zip(&self.uuids).any(|(hit, hit_uuid)| {
+                *hit_uuid == uuid
+                    && hit.kind == ScanHitKind::Filesystem(DetectedBootSector::Ext)
+                    && position >= hit.offset
+                    && position < hit.offset.saturating_add(hit.size_bytes.unwrap_or(0))
+            })
+    }
+
+    /// Whether the most recent hit is a run of copies of the same
+    /// filesystem's primary superblock, and so can absorb another.
+    fn last_hit_is_primary_copies(&self, uuid: Option<[u8; 16]>) -> bool {
+        uuid.is_some()
+            && self.uuids.last().copied().flatten() == uuid
+            && self
+                .hits
+                .last()
+                .is_some_and(|hit| matches!(hit.kind, ScanHitKind::ExtPrimaryCopies { .. }))
     }
 
     /// The hits in offset order.
@@ -541,6 +751,17 @@ fn detect(chunk: &[u8], offset: usize, window: &[u8]) -> Option<DetectedBootSect
         .and_then(|relative| offset.checked_add(relative))
         .and_then(|start| chunk.get(start..))?;
     is_btrfs_primary_superblock(superblock).then_some(DetectedBootSector::Btrfs)
+}
+
+/// Whether the sector at the start of `window` is a partition table rather
+/// than data that happens to end in `55 AA`.
+///
+/// Mount-time parsing stays lenient — a damaged table is still a table, and
+/// refusing to read it would lose the partitions it does describe — but a
+/// scan meets a stray boot signature every few megabytes of file data, and
+/// each one it believes is a row an examiner has to rule out by hand.
+fn is_plausible_partition_table(window: &[u8]) -> bool {
+    Mbr::from_bytes(window).is_some_and(Mbr::is_plausible_table)
 }
 
 /// The size the structure at the start of `window` claims for its
@@ -588,242 +809,4 @@ fn boot_sector_size(window: &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        DetectedBootSector, ExtBackupSuperblock, ScanHitKind, ScanOptions, ext_superblock_info,
-        scan_media,
-    };
-    use std::io::Cursor;
-
-    const IMAGE_SIZE: usize = 16 << 20;
-    const FAT_OFFSET: u64 = 1 << 20;
-    /// Sector count and sector size of the synthetic FAT12 volume.
-    const FAT_SECTORS: u32 = 2880;
-    const FAT_SECTOR_SIZE: u32 = 512;
-
-    /// Write a minimal but valid FAT12 boot sector.
-    fn write_fat(media: &mut [u8], offset: u64) {
-        let offset = usize::try_from(offset).expect("offset fits");
-        let sector = &mut media[offset..offset + 512];
-        sector[0x00..0x03].copy_from_slice(&[0xeb, 0x3c, 0x90]);
-        sector[0x03..0x0b].copy_from_slice(b"mkfs.fat");
-        sector[0x0b..0x0d].copy_from_slice(&512_u16.to_le_bytes());
-        sector[0x0d] = 1;
-        sector[0x0e..0x10].copy_from_slice(&1_u16.to_le_bytes());
-        sector[0x10] = 2;
-        sector[0x11..0x13].copy_from_slice(&224_u16.to_le_bytes());
-        sector[0x13..0x15].copy_from_slice(&2880_u16.to_le_bytes());
-        sector[0x15] = 0xf0;
-        sector[0x16..0x18].copy_from_slice(&9_u16.to_le_bytes());
-        sector[510..512].copy_from_slice(&[0x55, 0xaa]);
-    }
-
-    /// Geometry of a synthetic ext filesystem.
-    struct Ext {
-        block_size: u32,
-        blocks_count: u32,
-        blocks_per_group: u32,
-        first_data_block: u32,
-    }
-
-    impl Ext {
-        /// Byte offset of the group `group` superblock copy from the start.
-        fn copy_offset(&self, group: u32) -> u64 {
-            if group == 0 {
-                return 1024;
-            }
-            u64::from(self.first_data_block + group * self.blocks_per_group)
-                * u64::from(self.block_size)
-        }
-
-        fn size_bytes(&self) -> u64 {
-            u64::from(self.blocks_count) * u64::from(self.block_size)
-        }
-
-        /// Write the group `group` superblock copy into `media`, for a
-        /// filesystem starting at `start`.
-        fn write(&self, media: &mut [u8], start: u64, group: u32) -> u64 {
-            let offset = usize::try_from(start + self.copy_offset(group)).expect("offset");
-            let sb = &mut media[offset..offset + 0x160];
-            sb[0x00..0x04].copy_from_slice(&8192_u32.to_le_bytes()); // s_inodes_count
-            sb[0x04..0x08].copy_from_slice(&self.blocks_count.to_le_bytes());
-            sb[0x14..0x18].copy_from_slice(&self.first_data_block.to_le_bytes());
-            let log = self.block_size.trailing_zeros() - 10;
-            sb[0x18..0x1c].copy_from_slice(&log.to_le_bytes());
-            sb[0x20..0x24].copy_from_slice(&self.blocks_per_group.to_le_bytes());
-            sb[0x28..0x2c].copy_from_slice(&2048_u32.to_le_bytes()); // s_inodes_per_group
-            sb[0x38..0x3a].copy_from_slice(&0xef53_u16.to_le_bytes());
-            let group = u16::try_from(group).expect("group fits");
-            sb[0x5a..0x5c].copy_from_slice(&group.to_le_bytes());
-            start + self.copy_offset(u32::from(group))
-        }
-    }
-
-    /// The 1 KiB-block filesystem used by most tests: its backups land 1024
-    /// bytes past a 4 KiB boundary, so the scan finds them by probing the
-    /// filesystem byte that precedes the copy.
-    fn small_block_ext() -> Ext {
-        Ext {
-            block_size: 1024,
-            blocks_count: 12288,
-            blocks_per_group: 8192,
-            first_data_block: 1,
-        }
-    }
-
-    #[test]
-    fn a_filesystem_and_its_backup_superblocks_are_found_and_folded() {
-        let mut media = vec![0_u8; IMAGE_SIZE];
-        write_fat(&mut media, FAT_OFFSET);
-        let ext = small_block_ext();
-        let start = 4 << 20;
-        ext.write(&mut media, start, 0);
-        let backup = ext.write(&mut media, start, 1);
-
-        let length = u64::try_from(media.len()).expect("length");
-        let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
-
-        assert_eq!(hits.len(), 2, "{hits:#?}");
-        assert_eq!(hits[0].offset, FAT_OFFSET);
-        assert_eq!(
-            hits[0].kind,
-            ScanHitKind::Filesystem(DetectedBootSector::Fat12)
-        );
-        assert_eq!(
-            hits[0].size_bytes,
-            Some(u64::from(FAT_SECTORS) * u64::from(FAT_SECTOR_SIZE))
-        );
-
-        assert_eq!(hits[1].offset, start);
-        assert_eq!(
-            hits[1].kind,
-            ScanHitKind::Filesystem(DetectedBootSector::Ext)
-        );
-        assert_eq!(hits[1].size_bytes, Some(ext.size_bytes()));
-        assert_eq!(
-            hits[1].backup_superblocks,
-            vec![ExtBackupSuperblock {
-                offset: backup,
-                group: 1
-            }],
-            "the backup belongs to the primary, not to a hit of its own"
-        );
-    }
-
-    #[test]
-    fn a_backup_on_a_large_block_filesystem_is_found_at_its_own_offset() {
-        // Groups start on a block boundary, so with 4 KiB blocks the copy
-        // sits *at* a stride-aligned offset rather than 1024 past one.
-        let ext = Ext {
-            block_size: 4096,
-            blocks_count: 2048,
-            blocks_per_group: 1024,
-            first_data_block: 0,
-        };
-        let mut media = vec![0_u8; IMAGE_SIZE];
-        let start = 1 << 20;
-        ext.write(&mut media, start, 0);
-        let backup = ext.write(&mut media, start, 1);
-        assert_eq!(backup % 4096, 0, "the copy is stride-aligned itself");
-
-        let length = u64::try_from(media.len()).expect("length");
-        let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
-
-        assert_eq!(hits.len(), 1, "{hits:#?}");
-        assert_eq!(hits[0].offset, start);
-        assert_eq!(
-            hits[0].backup_superblocks,
-            vec![ExtBackupSuperblock {
-                offset: backup,
-                group: 1
-            }]
-        );
-    }
-
-    #[test]
-    fn a_backup_without_its_primary_names_the_start_it_implies() {
-        let ext = small_block_ext();
-        let mut media = vec![0_u8; IMAGE_SIZE];
-        let start = 4 << 20;
-        let backup = ext.write(&mut media, start, 1);
-
-        let length = u64::try_from(media.len()).expect("length");
-        let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
-
-        assert_eq!(hits.len(), 1, "{hits:#?}");
-        assert_eq!(hits[0].offset, backup);
-        assert_eq!(
-            hits[0].kind,
-            ScanHitKind::ExtBackupSuperblock {
-                group: 1,
-                filesystem_start: Some(start),
-            }
-        );
-        assert_eq!(hits[0].size_bytes, Some(ext.size_bytes()));
-    }
-
-    #[test]
-    fn a_finer_stride_does_not_report_the_same_superblock_twice() {
-        let ext = small_block_ext();
-        let mut media = vec![0_u8; IMAGE_SIZE];
-        let start = 4 << 20;
-        ext.write(&mut media, start, 0);
-        ext.write(&mut media, start, 1);
-
-        let length = u64::try_from(media.len()).expect("length");
-        let options = ScanOptions::new().with_stride(512);
-        let hits = scan_media(&mut Cursor::new(media), length, options).expect("scan");
-
-        assert_eq!(hits.len(), 1, "{hits:#?}");
-        assert_eq!(hits[0].backup_superblocks.len(), 1, "{hits:#?}");
-    }
-
-    #[test]
-    fn boot_sectors_inside_a_sized_filesystem_are_not_reported() {
-        let ext = Ext {
-            block_size: 1024,
-            blocks_count: 16384,
-            blocks_per_group: 8192,
-            first_data_block: 1,
-        };
-        let mut media = vec![0_u8; IMAGE_SIZE];
-        ext.write(&mut media, 0, 0);
-        // File data that happens to look like a FAT boot sector.
-        write_fat(&mut media, 8 << 20);
-
-        let length = u64::try_from(media.len()).expect("length");
-        let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
-
-        assert_eq!(hits.len(), 1, "{hits:#?}");
-        assert_eq!(
-            hits[0].kind,
-            ScanHitKind::Filesystem(DetectedBootSector::Ext)
-        );
-        assert_eq!(hits[0].size_bytes, Some(ext.size_bytes()));
-    }
-
-    #[test]
-    fn a_zero_stride_is_refused_rather_than_looping() {
-        let options = ScanOptions::new().with_stride(0);
-        let result = scan_media(&mut Cursor::new(vec![0_u8; 4096]), 4096, options);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn empty_media_produces_no_hits() {
-        let hits =
-            scan_media(&mut Cursor::new(Vec::new()), 0, ScanOptions::new()).expect("empty scan");
-        assert!(hits.is_empty());
-    }
-
-    #[test]
-    fn superblock_geometry_matches_the_synthetic_layout() {
-        let ext = small_block_ext();
-        let mut media = vec![0_u8; 1 << 20];
-        ext.write(&mut media, 0, 0);
-        let info = ext_superblock_info(&media).expect("primary superblock");
-        assert!(info.is_primary());
-        assert_eq!(info.size_bytes(), ext.size_bytes());
-        assert_eq!(info.copy_offset(), 1024);
-    }
-}
+mod tests;

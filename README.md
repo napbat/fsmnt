@@ -341,6 +341,21 @@ suppressed so a multi-gigabyte partition does not report every stray `0xAA55`
 in its file data; ext superblocks are exempt, because one inside another
 filesystem's claimed extent means the extent is wrong.
 
+A magic number on its own is not enough to call something a start. An ext
+primary superblock counts as one only when the group descriptor table that
+has to follow it is there and — on any filesystem that carries descriptor
+checksums — verifies; `55 AA` counts as a partition table only when its four
+entries describe extents a partitioner could have written. That matters on a
+real image: an ext4 journal records whole blocks, so a busy filesystem holds
+dozens of pristine-looking copies of its own superblock, and a multi-gigabyte
+medium meets a coincidental boot signature every few megabytes. What fails
+these tests is still reported, as what it actually is and on one line: the
+superblock copies become a single row naming how many there are and the range
+they span, and orphan backup superblocks that agree on where their filesystem
+began become a single row too. When that computed start falls *before* byte
+zero, the row says so — the medium is a slice that begins partway inside a
+filesystem, and the bytes in front of it were never acquired.
+
 **Or let the scan stand in for the table — labelled as such.** `partitions
 SOURCE --scan` ignores whatever table the media carries and prints a
 partition table *reconstructed* from a scan, and `mount SOURCE MOUNTPOINT
