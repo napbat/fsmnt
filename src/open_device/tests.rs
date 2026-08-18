@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use fsmnt_core::{FsEntry, FsMetadata};
+use fsmnt_core::{FsEntry, FsError, FsMetadata, FsResult};
 use fsmnt_device::{
     DeviceReader, FilesystemDriver, HostDriveInfo, HostDriveResult, HostVolumeResolver,
     LogicalVolume, LogicalVolumeId, PhysicalExtent, SourceOrigin, SourceSelection,

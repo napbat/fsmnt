@@ -16,7 +16,7 @@ use fsmnt::device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, GptPartitionEntry, ImageFormat,
 };
 use fsmnt::{
-    FsEntry, FsError, FsMetadata, FsResult, ImageLayoutKind, ImageLayoutOptions, ImageOpenOptions,
+    FsEntry, FsError, FsMetadata, FsResult, ImageLayoutOptions, ImageOpenOptions, LayoutKind,
     LayoutOrigin, OpenImageError, TargetFilesystem, image_layout, image_layout_with_options,
     image_layout_with_sector_size, open_image, open_image_with_options,
 };
@@ -166,7 +166,7 @@ fn mbr_images_are_enumerated_with_types_sizes_and_detected_filesystems() {
     assert_eq!(layout.format, ImageFormat::Raw);
     assert_eq!(layout.sector_size, 512);
     assert_eq!(layout.size_bytes, MEDIA_SIZE as u64);
-    assert!(matches!(layout.kind, ImageLayoutKind::Mbr));
+    assert!(matches!(layout.kind, LayoutKind::Mbr));
     assert_eq!(layout.partitions.len(), 2);
 
     let data = &layout.partitions[0];
@@ -252,7 +252,7 @@ fn an_unpartitioned_image_is_one_whole_image_partition() {
     let layout = image_layout(&path).expect("enumerate bare image");
     assert!(matches!(
         layout.kind,
-        ImageLayoutKind::Bare(DetectedBootSector::Ntfs)
+        LayoutKind::Bare(DetectedBootSector::Ntfs)
     ));
     assert_eq!(layout.partitions.len(), 1);
     assert_eq!(layout.partitions[0].offset, 0);
@@ -320,7 +320,7 @@ fn a_4kn_gpt_is_detected_when_no_sector_size_is_given() {
 
     let layout = image_layout(&path).expect("enumerate the 4Kn image");
 
-    assert!(matches!(layout.kind, ImageLayoutKind::Gpt));
+    assert!(matches!(layout.kind, LayoutKind::Gpt));
     assert_eq!(layout.sector_size, 4096);
     assert!(
         layout.sector_size_auto_detected,
@@ -498,7 +498,7 @@ fn a_wiped_front_gpt_is_read_from_its_backup_header() {
     let (_directory, path) = image_file(&media);
 
     let layout = image_layout(&path).expect("enumerate the wiped-front image");
-    assert!(matches!(layout.kind, ImageLayoutKind::Gpt));
+    assert!(matches!(layout.kind, LayoutKind::Gpt));
     assert_eq!(
         layout.origin,
         LayoutOrigin::BackupTable,
@@ -537,7 +537,7 @@ fn a_layout_reconstructed_by_scanning_is_marked_synthetic_and_mountable() {
         .with_scan_stride(512);
     let layout = image_layout_with_options(&path, options).expect("reconstruct by scanning");
 
-    assert!(matches!(layout.kind, ImageLayoutKind::Scanned));
+    assert!(matches!(layout.kind, LayoutKind::Scanned));
     assert_eq!(
         layout.origin,
         LayoutOrigin::Scan { stride: 512 },

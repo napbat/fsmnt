@@ -1,15 +1,17 @@
-//! Find filesystems anywhere in a decoded disk image.
+//! Find filesystems anywhere in a medium, wherever they sit.
 //!
-//! [`image_layout`](crate::image_layout) answers "what does the partition
+//! [`image_layout`](crate::image_layout) and
+//! [`drive_layout`](crate::drive_layout) answer "what does the partition
 //! table say?". This module answers the question that remains when there is
 //! no partition table, when it is corrupt, or when it disagrees with the
 //! media: *what is actually in these bytes?*
 //!
 //! [`scan_image`] reads the decoded media once, front to back, and
 //! classifies every stride-aligned position with the same probes mounting
-//! uses — so an offset it reports is an offset `mount-image --offset` can
-//! open. Two things make the result readable rather than a wall of magic
-//! numbers:
+//! uses — so an offset it reports is an offset `fsmnt mount SOURCE --offset`
+//! can open. [`scan_drive`] does the same for a live drive, and
+//! [`scan_media`] for anything else that reads and seeks. Two things make
+//! the result readable rather than a wall of magic numbers:
 //!
 //! - **Backup superblocks are folded into their primary.** An ext filesystem
 //!   scatters superblock copies through itself; each one carries the block
@@ -29,8 +31,9 @@ use std::path::{Path, PathBuf};
 
 use fsmnt_device::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
-    FS_DETECT_PROBE_SIZE, ImageOpenError, ImageReader, ParsedBootSector, ext_superblock_info,
-    is_btrfs_primary_superblock, parse_boot_sector,
+    FS_DETECT_PROBE_SIZE, HostDriveEnumerator, HostDriveError, HostDriveId, ImageOpenError,
+    ImageReader, ParsedBootSector, SectorReader, ext_superblock_info, is_btrfs_primary_superblock,
+    parse_boot_sector,
 };
 
 /// Default distance between candidate positions.
@@ -87,8 +90,8 @@ impl Default for ScanOptions {
 /// What a scan found at one offset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanHit {
-    /// Byte offset in the decoded media. For a filesystem this is the offset
-    /// to hand to `mount-image --offset`; for a backup superblock it is
+    /// Byte offset in the medium. For a filesystem this is the offset to
+    /// hand to `fsmnt mount SOURCE --offset`; for a backup superblock it is
     /// where the copy itself sits, not where its filesystem starts.
     pub offset: u64,
     /// What the bytes at `offset` are.
@@ -103,8 +106,8 @@ pub struct ScanHit {
 }
 
 impl ScanHit {
-    /// The offset `mount-image --offset` would take for this hit, if it is
-    /// mountable at all.
+    /// The offset `fsmnt mount SOURCE --offset` would take for this hit, if
+    /// it is mountable at all.
     ///
     /// A partition table is not mountable, and a stray backup superblock is
     /// mountable only at the filesystem start it implies — never at its own
@@ -121,13 +124,13 @@ impl ScanHit {
     }
 }
 
-/// The hits a scan numbers for `mount-image --scanned N`: every hit with a
-/// [`mount_offset`](ScanHit::mount_offset), in scan order.
+/// The hits a scan numbers for `fsmnt mount SOURCE --scan --partition N`:
+/// every hit with a [`mount_offset`](ScanHit::mount_offset), in scan order.
 ///
-/// The number is **synthetic** — it comes from this scan of this image with
-/// these options, not from any partition table on the media — so it holds
-/// only for the same image scanned with the same stride. It is a convenience
-/// over pasting the offset, not an identity of the volume.
+/// The number is **synthetic** — it comes from this scan of this medium with
+/// these options, not from any partition table on it — so it holds only for
+/// the same medium scanned with the same stride. It is a convenience over
+/// pasting the offset, not an identity of the volume.
 #[must_use]
 pub fn mountable_hits(hits: &[ScanHit]) -> Vec<&ScanHit> {
     hits.iter()
@@ -169,12 +172,28 @@ pub enum ScanError {
     /// The image container could not be opened or decoded.
     #[error(transparent)]
     Container(#[from] ImageOpenError),
-    /// Reading the decoded media failed part-way through.
+    /// The drive could not be opened or queried.
+    #[error(transparent)]
+    Drive(#[from] HostDriveError),
+    /// The drive's length is unknown, so there is nothing to scan *to*.
+    ///
+    /// Unlike an image file, a drive has no length of its own to fall back
+    /// on: if the operating system will not say how large it is and seeking
+    /// to its end does not either, a scan cannot know when to stop.
+    #[error(
+        "drive {drive} did not report a size, and a scan has to know how far the media runs; \
+         image the drive and scan the image instead"
+    )]
+    UnknownDriveSize {
+        /// Drive that would not state its size.
+        drive: HostDriveId,
+    },
+    /// Reading the media failed part-way through.
     #[error("failed to read {path:?} at offset {offset}: {source}")]
     Read {
-        /// Image path supplied by the caller.
+        /// Image path supplied by the caller, or the drive's device path.
         path: PathBuf,
-        /// Decoded-media offset the read started at.
+        /// Media offset the read started at.
         offset: u64,
         /// Underlying seek or read failure.
         #[source]
@@ -183,6 +202,20 @@ pub enum ScanError {
     /// A stride of zero would test the same position forever.
     #[error("scan stride must be at least 1 byte")]
     ZeroStride,
+}
+
+impl ScanError {
+    /// Attach the medium's identity to a reader-level failure.
+    fn from_media(error: MediaScanError, path: &Path) -> Self {
+        match error {
+            MediaScanError::ZeroStride => Self::ZeroStride,
+            MediaScanError::Read { offset, source } => Self::Read {
+                path: path.to_path_buf(),
+                offset,
+                source,
+            },
+        }
+    }
 }
 
 /// Scan a raw, EWF, VHD, or VHDX image for filesystem starts.
@@ -208,25 +241,87 @@ pub fn scan_image_with_options(
     let path = path.as_ref();
     let mut image = ImageReader::open(path)?;
     let length = image.len();
-    scan_media(&mut image, length, options).map_err(|error| match error {
-        MediaScanError::ZeroStride => ScanError::ZeroStride,
-        MediaScanError::Read { offset, source } => ScanError::Read {
-            path: path.to_path_buf(),
-            offset,
+    scan_media(&mut image, length, options).map_err(|error| ScanError::from_media(error, path))
+}
+
+/// Scan a physical drive for filesystem starts.
+///
+/// The counterpart to [`scan_image`] for a live drive: a drive whose
+/// partition table was wiped and an image of one are the same forensic
+/// situation, so both are searched the same way and report the same offsets.
+/// Reads go through a sector-aligning view, because raw block-device handles
+/// reject reads that are not whole sectors.
+///
+/// The enumerator type parameter selects the platform: on Windows, Linux,
+/// and macOS, use [`HostDrives`](crate::HostDrives).
+///
+/// # Errors
+///
+/// Returns an error if the stride is zero, the drive cannot be opened, its
+/// size is unknown, or reading it fails part-way through.
+pub fn scan_drive<E: HostDriveEnumerator>(
+    drive: &HostDriveId,
+    options: ScanOptions,
+) -> Result<Vec<ScanHit>, ScanError> {
+    let info = E::get_drive_info(drive).ok();
+    let mut reader = E::open_drive(drive)?;
+    let length = crate::layout::drive_length(info.as_ref(), &mut reader).ok_or_else(|| {
+        ScanError::UnknownDriveSize {
+            drive: drive.clone(),
+        }
+    })?;
+    let sector_size = info
+        .as_ref()
+        .and_then(|info| info.sector_size)
+        .filter(|size| size.is_power_of_two())
+        .unwrap_or(crate::layout::DEFAULT_SECTOR_SIZE);
+    let path = info.map_or_else(|| PathBuf::from(drive.as_str()), |info| info.path);
+    // The readable length has to be a whole number of sectors; a drive whose
+    // reported size is not is reported as the sectors it does hold.
+    let aligned = length - length % u64::from(sector_size);
+    let mut media =
+        SectorReader::new(reader, aligned, sector_size).map_err(|source| ScanError::Read {
+            path: path.clone(),
+            offset: 0,
             source,
-        },
-    })
+        })?;
+    scan_media(&mut media, aligned, options).map_err(|error| ScanError::from_media(error, &path))
 }
 
-/// A failure from the reader-level scan, before it knows the image path.
-#[derive(Debug)]
-enum MediaScanError {
+/// Why a scan of an unnamed medium could not complete.
+///
+/// [`scan_media`] knows how far the media runs but not what it is called, so
+/// its failures carry an offset and leave naming the medium to the caller —
+/// which is how [`scan_image`] can say *which* image failed to read.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MediaScanError {
+    /// A stride of zero would test the same position forever.
+    #[error("scan stride must be at least 1 byte")]
     ZeroStride,
-    Read { offset: u64, source: std::io::Error },
+    /// Reading the media failed part-way through.
+    #[error("failed to read the media at offset {offset}: {source}")]
+    Read {
+        /// Media offset the read started at.
+        offset: u64,
+        /// Underlying seek or read failure.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
-/// Scan `length` bytes of `media`, one sequential pass.
-fn scan_media(
+/// Scan `length` bytes of `media` for filesystem starts, in one sequential
+/// pass.
+///
+/// The engine behind [`scan_image`] and [`scan_drive`], exposed for media
+/// that are neither: a decrypted container, an in-memory carve, a reader
+/// from another crate. `length` bounds the search — reads past it are never
+/// attempted, and a short read simply ends the scan.
+///
+/// # Errors
+///
+/// Returns an error if the stride is zero or reading the media fails.
+pub fn scan_media(
     media: &mut (impl Read + Seek),
     length: u64,
     options: ScanOptions,

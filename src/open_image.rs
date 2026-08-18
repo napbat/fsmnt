@@ -20,7 +20,7 @@ use fsmnt_device::{
 };
 
 use crate::ext_backup;
-use crate::image_layout::{self, ImageLayoutOptions, LayoutOrigin};
+use crate::layout::{self, ImageLayoutOptions, LayoutOrigin};
 use crate::truncation;
 
 /// A filesystem opened from a decoded disk-image container, ready to mount.
@@ -46,7 +46,8 @@ pub struct OpenedImage {
     /// to `size_bytes` when no partition was selected.
     pub declared_size_bytes: u64,
     /// Bytes the opened filesystem claims for itself that the image does not
-    /// carry, or `None` when it fits (see [`missing_filesystem_bytes`]).
+    /// carry, or `None` when it fits (see
+    /// [`missing_filesystem_bytes`](crate::missing_filesystem_bytes)).
     ///
     /// A filesystem whose superblock is present but whose data is not opens
     /// normally and then fails one read at a time; this states up front how
@@ -272,7 +273,8 @@ impl ImageOpenOptions {
 
     /// Select a partition of the image by its ordinal, counting non-empty
     /// partition-table entries from 0 — the same numbering
-    /// [`image_layout`] prints and `mount-device --partition` uses.
+    /// [`image_layout`](crate::image_layout) prints and `fsmnt mount DRIVE
+    /// --partition` uses.
     ///
     /// The partition's own start offset and length bound the filesystem, so
     /// this supersedes [`with_offset`](Self::with_offset): any offset set
@@ -291,7 +293,7 @@ impl ImageOpenOptions {
     /// 4096-byte units, so the partition offsets come out eight times too
     /// small when it is read as 512-byte sectors. Left unset, enumeration
     /// detects the sector size (see
-    /// [`ImageLayout::sector_size_auto_detected`]).
+    /// [`ImageLayout::sector_size_auto_detected`](crate::ImageLayout::sector_size_auto_detected)).
     #[must_use]
     pub const fn with_sector_size(mut self, sector_size: u32) -> Self {
         self.sector_size = Some(sector_size);
@@ -394,10 +396,10 @@ pub fn open_image(
 ///
 /// A partitioned whole-disk image is addressed by partition ordinal with
 /// [`ImageOpenOptions::with_partition`], which bounds the filesystem to that
-/// partition's extent; [`image_layout`] lists the ordinals. Without a
-/// partition the offset is used as-is, addressing decoded logical media
-/// rather than EWF segment bytes or VHD/VHDX container storage, and the
-/// filesystem spans the rest of the image.
+/// partition's extent; [`image_layout`](crate::image_layout) lists the
+/// ordinals. Without a partition the offset is used as-is, addressing
+/// decoded logical media rather than EWF segment bytes or VHD/VHDX
+/// container storage, and the filesystem spans the rest of the image.
 ///
 /// # Errors
 ///
@@ -420,7 +422,7 @@ pub fn open_image_with_options(
         best_effort_reads,
         filesystem,
     } = options;
-    let image_layout::LocatedImagePartition {
+    let layout::LocatedImagePartition {
         mut image,
         offset,
         declared_bytes,
@@ -434,7 +436,7 @@ pub fn open_image_with_options(
         if let Some(stride) = scan_stride {
             layout_options = layout_options.with_scan(true).with_scan_stride(stride);
         }
-        image_layout::locate_image_partition(path, partition, layout_options)?
+        layout::locate_image_partition(path, partition, layout_options)?
     } else {
         open_image_tail(path, offset)?
     };
@@ -518,7 +520,7 @@ pub fn open_image_with_options(
 fn open_image_tail(
     path: &std::path::Path,
     offset: u64,
-) -> Result<image_layout::LocatedImagePartition, OpenImageError> {
+) -> Result<layout::LocatedImagePartition, OpenImageError> {
     let image = ImageReader::open(path)?;
     let image_size = image.len();
     if offset >= image_size {
@@ -529,7 +531,7 @@ fn open_image_tail(
         });
     }
     let available_bytes = image_size - offset;
-    Ok(image_layout::LocatedImagePartition {
+    Ok(layout::LocatedImagePartition {
         image,
         offset,
         declared_bytes: available_bytes,

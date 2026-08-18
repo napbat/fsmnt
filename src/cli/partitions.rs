@@ -82,7 +82,7 @@ fn image_partitions(
     sector_size: Option<u32>,
     scan_stride: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use fsmnt::{ImageLayoutKind, ImageLayoutOptions, LayoutOrigin};
+    use fsmnt::{ImageLayoutOptions, LayoutKind, LayoutOrigin};
 
     let mut options = ImageLayoutOptions::new();
     if let Some(sector_size) = sector_size {
@@ -106,11 +106,11 @@ fn image_partitions(
     );
 
     match layout.kind {
-        ImageLayoutKind::Scanned => {
+        LayoutKind::Scanned => {
             print_scanned_layout(image, &layout);
             return Ok(());
         }
-        ImageLayoutKind::Gpt => {
+        LayoutKind::Gpt => {
             if layout.origin == LayoutOrigin::BackupTable {
                 println!(
                     "GPT partition table (recovered from the backup header in the last sector; \
@@ -135,7 +135,7 @@ fn image_partitions(
                 );
             }
         }
-        ImageLayoutKind::Mbr => {
+        LayoutKind::Mbr => {
             println!("MBR partition table");
             println!(
                 "{:>4}  {:<22} {:>12} {:>14}  FILESYSTEM",
@@ -152,7 +152,7 @@ fn image_partitions(
                 );
             }
         }
-        ImageLayoutKind::Bare(detected) => {
+        LayoutKind::Bare(detected) => {
             println!("No partition table; the whole image is {detected:?}");
             println!(
                 "Mount it with: fsmnt mount-image {} <MOUNTPOINT>",
@@ -160,7 +160,7 @@ fn image_partitions(
             );
             return Ok(());
         }
-        ImageLayoutKind::Unknown => {
+        LayoutKind::Unknown => {
             println!("Unrecognized image layout: no partition table and no known filesystem.");
             return Ok(());
         }
@@ -236,7 +236,7 @@ fn detected_label(detected: Option<fsmnt::device::DetectedBootSector>) -> String
 /// that was captured from it. Saying "unreadable" for an extent the
 /// acquisition never reached invites a hunt for corruption; saying it is
 /// past the end of the image says what happened.
-fn filesystem_column(partition: &fsmnt::ImagePartition) -> String {
+fn filesystem_column(partition: &fsmnt::LayoutPartition) -> String {
     if partition.is_beyond_end() {
         return "beyond end of image".to_string();
     }
