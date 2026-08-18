@@ -61,7 +61,7 @@ evidence handling:
   FAT32, exFAT and NTFS volumes whose sector 0 is dead are opened through
   their backup boot sectors automatically. All of these read through the
   same read-only path: the backup bytes are substituted in memory, never
-  written back — and every such fallback is announced as a `notice:` line
+  written back — and every such fallback is announced as a `warn:` line
   (see [Damaged and partial images](#damaged-and-partial-images)).
 
 ## Prerequisites
@@ -102,7 +102,7 @@ fsmnt = "latest"          # or "0.1.0"; same as "github:napbat/fsmnt" = "latest"
 
 [tasks.mount-evidence]
 description = "Mount the evidence image read-only"
-run = "fsmnt mount-image evidence.E01 /mnt/evidence --partition 2"
+run = "fsmnt mount evidence.E01 /mnt/evidence --partition 2"
 ```
 
 The archive contains both `fsmnt` and `fsmnt-proxy-server`, and both land on
@@ -145,82 +145,181 @@ Windows compiles the bundled Dokan sources with MSVC.
 
 ## CLI
 
+```sh
+fsmnt drives                     # list the physical drives on this machine
+fsmnt partitions SOURCE          # list the partitions of a drive or a disk image
+fsmnt scan SOURCE                # find filesystems no partition table mentions
+fsmnt mount SOURCE MOUNTPOINT    # mount a directory, a disk image, or a drive
+fsmnt unmount MOUNTPOINT         # release it again (`umount` works too)
+```
+
+One `mount` for all three kinds of source, and one spelling of `SOURCE` for
+every command. (`mount-image` and `mount-device` were earlier, separate
+commands with drifting option sets; they are gone, and everything they could
+do is an option of `fsmnt mount`.)
+
+### SOURCE — one grammar everywhere
+
+- **a directory** — exposed as a volume of its own (`mount` only);
+- **a disk image** — raw, EWF (`.E01`/`.Ex01`, first segment), VHD, or VHDX;
+- **a drive** — the ID `fsmnt drives` prints (`0` on Windows, `sda` on Linux,
+  `disk2` on macOS) or its operating-system device path
+  (`\\.\PhysicalDrive0`, `\\?\PhysicalDrive0`, `/dev/sda`, `/dev/nvme0n1`,
+  `/dev/disk2`, `/dev/rdisk2`), normalised to that ID.
+
+Resolved in this order: an existing directory is a directory; an existing
+file is an image; a device path is a drive; anything left that contains a
+path separator or has a file extension is an image — so a mistyped path
+fails as "cannot open image" rather than as "no such drive" — and a bare
+token is a drive ID.
+
+Say it outright when the guess would be wrong. `--image` never touches the
+filesystem, so a path that is not there yet still fails *as an image*;
+`--drive` accepts a device path and normalises it; `--dir` (on `mount` only)
+takes a directory and says so if it is not one. The three are mutually
+exclusive. `partitions` and `scan` refuse a directory outright.
+
 ### Inspect a machine's disks
 
 ```sh
-fsmnt drives                 # list physical drives with size, bus, and access state
-fsmnt partitions 0           # list partitions on drive 0, with detected filesystem
-fsmnt partitions disk.bin    # same listing for a disk image, with GPT names
-fsmnt scan disk.bin          # find filesystems the partition table does not mention
+fsmnt drives                 # physical drives with size, bus, and access state
+fsmnt partitions 0           # the partitions of drive 0
+fsmnt partitions disk.bin    # the same table for a disk image
+fsmnt scan disk.bin          # filesystems the partition table does not mention
 ```
 
-Drive IDs are what `fsmnt drives` prints: `0` on Windows, `sda` on Linux,
-`disk2` on macOS. `partitions` takes either a drive ID or the path to a raw,
-EWF, VHD, or VHDX image; anything that names an existing file, contains a
-path separator, or has a file extension is read as an image. `scan` takes an
-image only — see [Damaged and partial images](#damaged-and-partial-images).
+`partitions` prints one table shape for both kinds of source, so a drive and
+an image acquired from it can be compared line for line: `#`, `NAME` (GPT
+only), `TYPE`, `SIZE`, `OFFSET`, `FILESYSTEM` — plus, for a drive, a
+trailing `VOLUME` column naming the operating-system volume(s) laid over
+each partition and where they are mounted. That column is where the
+`--volume ID` value comes from; it reads `-` when there is none, or when
+volume discovery is not permitted here.
 
-### Mount a partition from a device
+```
+0: drive (Samsung SSD 990 PRO 2TB), 2.0 TB, sector size 512
+GPT partition table
+   #  NAME                  TYPE                  SIZE         OFFSET  FILESYSTEM  VOLUME
+   0  EFI system partition  EFI System          104 MB        1048576  Fat32       \\?\Volume{5f2…}\
+   1  Basic data partition  Microsoft basic da  1.9 TB      316669952  Ntfs        \\?\Volume{a71…}\ (C:)
+```
+
+The header line names the source and its size, the sector size the table was
+read in (and whether that was auto-detected), the kind of table, and where
+its entries came from — the media's own table, its GPT backup header, or a
+scan. The footer says how to mount one of the entries.
+
+### Mount
 
 ```sh
-fsmnt mount-device 0 Z: --partition 1
-fsmnt mount-device sda /mnt/evidence --partition 1
+fsmnt mount ./export Z: --volname Evidence               # a host directory
+fsmnt mount disk.img Z:                                  # an image that is one filesystem
+fsmnt mount disk.bin Z: --partition 3                    # one partition of a whole-disk image
+fsmnt mount evidence.E01 /mnt/evidence --partition 2
+fsmnt mount "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\Win11-dev.vhdx" Z: --partition 3
+fsmnt mount 0 Z: --partition 1                           # a partition of a drive
+fsmnt mount sda /mnt/evidence --partition 1
+fsmnt mount disk.img /mnt/img --offset 1048576
+fsmnt mount disk.img /mnt/img --offset 1M                # the same offset, written for humans
 ```
 
-By default this opens the operating system's logical view of the partition,
-which means an OS-unlocked encrypted volume can be read without supplying its
-key again. Useful flags:
+**Where the filesystem is** — three answers, identical for an image and a
+drive:
 
-- `--raw` — bypass logical volumes and read physical partition members
-  directly. Members of a multi-device filesystem are discovered across all
-  host drives automatically; add ones outside platform enumeration with
+- `--partition N` counts non-empty partition-table entries from 0, exactly as
+  `fsmnt partitions SOURCE` lists them, and bounds the filesystem to that
+  extent.
+- `--offset SIZE` opens raw media at a byte offset, for media no partition
+  table describes. On a drive the offset is *physical*: it counts from the
+  first byte of the drive, past any logical volume the operating system has
+  laid over it, so `--volume` is refused alongside it.
+- `--scan --partition N` counts the filesystems a scan of the media finds
+  instead of the entries of any table (see
+  [Damaged and partial images](#damaged-and-partial-images)).
+
+With none of them, the source must itself start with a filesystem: an
+unpartitioned image or drive is mounted whole, and a partitioned one is
+refused by name.
+
+```
+error: 0 contains a GPT partition table; select a partition with `--partition N` (see `fsmnt partitions 0`)
+```
+
+**Behaviour change:** `mount-device` used to default to partition 0, which on
+a modern disk is the EFI system partition. Nothing defaults now — say which
+partition you mean.
+
+**Which options apply to which source.** An option used against a source kind
+it was not written for is an error naming both — `--raw applies to drives;
+disk.bin is a disk image` — rather than being quietly ignored.
+
+| option | directory | image | drive |
+|---|:---:|:---:|:---:|
+| `--partition N` | – | ✓ | ✓ |
+| `--offset SIZE` | – | ✓ | ✓ |
+| `--scan`, `--stride BYTES` | – | ✓ | ✓ |
+| `--sector-size BYTES` | – | ✓ | ✓ |
+| `--raw`, `--volume ID`, `--member DRIVE:PARTITION` | – | – | ✓ |
+| `--fstab [PATH]` | – | ✓ | ✓ |
+| `--recovery-password`, `--bek-file` | – | ✓ | ✓ |
+| `--fs-root`, `--no-journal-replay`, `--backup-superblock`, `--salvage`, `--best-effort-reads` | – | ✓ | ✓ |
+| `--volname NAME`, `--fsname NAME` | ✓ | ✓ | ✓ |
+| `--detach` | ✓ | ✓ | ✓ |
+
+`--volname` defaults to the directory name, the image file stem, or the drive
+model; `--fsname` to `fsmnt-dir` for a directory and to the detected
+filesystem (`ntfs`, `fat32`, `extfs`, …) for an image or a drive.
+
+**Reading a drive.** A drive partition is opened through the operating
+system's logical view of it by default, which means an OS-unlocked encrypted
+volume can be read without supplying its key again.
+
+- `--raw` bypasses that and reads the physical partition members directly.
+  Members of a multi-device filesystem are discovered across all host drives
+  automatically; add ones outside platform enumeration with
   `--member DRIVE:PARTITION` (repeatable).
-- `--volume ID` — pick a specific logical volume when automatic selection is
-  ambiguous.
-- `--fstab [PATH]` — read the guest's `/etc/fstab` (or `PATH`) and compose the
-  child mounts it describes into a single namespace.
+- `--volume ID` picks one logical volume when automatic selection is
+  ambiguous. `fsmnt partitions DRIVE` prints the IDs in its `VOLUME` column.
 
-### Mount an image file
+**Reassembling a guest's tree.** `--fstab [PATH]` reads the selected root's
+`/etc/fstab` (or `PATH`) and composes the child mounts it describes into a
+single namespace, attaching them shallow-to-deep so `/boot/efi` lands inside
+`/boot`. On a drive the siblings are the partitions of every host drive; in
+an image they are the other partitions of the same image — which is the
+usual case, since a Linux VM's VHDX carries the whole tree. Sources are
+matched by UUID, because the device path a volume had when the system last
+ran is not the path it has anywhere else. On a drive the composer needs a
+partition ordinal, so `--fstab` does not combine with `--offset` there.
 
 ```sh
-fsmnt mount-image disk.img Z:
-fsmnt partitions disk.bin                     # see what a whole-disk image holds
-fsmnt mount-image disk.bin Z: --partition 3
-fsmnt mount-image evidence.E01 /mnt/evidence --partition 2
-fsmnt mount-image "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\Win11-dev.vhdx" Z: --partition 3
-fsmnt mount-image disk.img /mnt/img --offset 1048576
-fsmnt mount-image disk.img /mnt/img --offset 1M        # the same offset, written for humans
+fsmnt mount linux-vm.vhdx /mnt/guest --partition 2 --fstab
+fsmnt mount 0 /mnt/guest --partition 2 --fstab /etc/fstab.forensic
 ```
 
-Raw images, EWF v1/v2 physical evidence (`.E01`/`.Ex01`), legacy VHD, and VHDX
-are detected automatically. Pass the first EWF segment; sibling segments are
-discovered and decoded as one logical media stream. Fixed, dynamic, and
-differencing VHD/VHDX images are decoded by the repository-native readers;
-`.avhd` and `.avhdx` checkpoint parents are resolved from their container
-locators. Sparse blocks and VHDX log entries are read or replayed on demand,
-without attaching the image or writing to any layer.
-
-A whole-disk image — a typical Hyper-V system disk, an eMMC or SD-card dump —
-does not start at a filesystem. List what it contains with
-`fsmnt partitions IMAGE`, which prints each partition's ordinal, GPT name,
-type, size, byte offset, and detected filesystem, then mount one by its
-ordinal with `--partition N`. The filesystem is bounded to that partition's
-extent, and the numbering matches `mount-device --partition`. `--offset`
-remains for raw media no partition table describes; it always addresses
-decoded virtual media, not container storage.
+**Images.** Raw images, EWF v1/v2 physical evidence (`.E01`/`.Ex01`), legacy
+VHD, and VHDX are detected automatically. Pass the first EWF segment; sibling
+segments are discovered and decoded as one logical media stream. Fixed,
+dynamic, and differencing VHD/VHDX images are decoded by the
+repository-native readers; `.avhd` and `.avhdx` checkpoint parents are
+resolved from their container locators. Sparse blocks and VHDX log entries
+are read or replayed on demand, without attaching the image or writing to any
+layer.
 
 ### Damaged and partial images
 
 Acquisitions are not always whole, and the partition table is not always
-right. Three things help when the image and its table disagree.
+right. Three things help when the media and its table disagree — and, since
+a drive with a wiped table and an image of one are the same forensic
+situation, all three work on either.
 
-**Find filesystems the table does not mention.** `fsmnt scan IMAGE` reads the
-decoded media once and reports every offset that starts a filesystem, ready
-to paste into `--offset`:
+**Find filesystems the table does not mention.** `fsmnt scan SOURCE` reads
+the media once and reports every offset that starts a filesystem, ready to
+paste into `--offset`:
 
 ```sh
 fsmnt scan dump.bin
 fsmnt scan dump.bin --stride 512      # search harder: filesystems off a 4 KiB boundary
+fsmnt scan 0                          # the same search over a live drive
 ```
 
 ```
@@ -243,29 +342,30 @@ in its file data; ext superblocks are exempt, because one inside another
 filesystem's claimed extent means the extent is wrong.
 
 **Or let the scan stand in for the table — labelled as such.** `partitions
-IMAGE --scan` ignores whatever table the image carries and prints a
-partition table *reconstructed* from a scan, and `mount-image --scan
---partition N` mounts by that numbering (both take `--stride`; the numbers
-in `scan`'s `#` column are the same ones):
+SOURCE --scan` ignores whatever table the media carries and prints a
+partition table *reconstructed* from a scan, and `mount SOURCE MOUNTPOINT
+--scan --partition N` mounts by that numbering (both take `--stride`; the
+numbers in `scan`'s `#` column are the same ones):
 
 ```
-SYNTHETIC partition table — reconstructed by scanning the media every 4096 bytes for filesystem starts. No table was read from the image: sizes are what each filesystem claims for itself, there are no names or type GUIDs, and the numbers hold only for this image scanned with this stride.
-   #  TYPE (from scan)                                 SIZE         OFFSET  FILESYSTEM
-   0  Ext (scan)                                     3.3 GB      270532608  Ext
-   1  Ext (scan)                                     2.2 GB      903872512  Ext
-   2  Ext (scan)                                     1.5 GB     3625975808  Ext  TRUNCATED (121 MB missing)
+SYNTHETIC partition table — reconstructed by scanning the media every 4096 bytes for filesystem starts. No table was read from the disk image: sizes are what each filesystem claims for itself, there are no names or type GUIDs, and the numbers hold only for this disk image scanned with this stride.
+   #  TYPE (from scan)      SIZE         OFFSET  FILESYSTEM
+   0  Ext (scan)          3.3 GB      270532608  Ext
+   1  Ext (scan)          2.2 GB      903872512  Ext
+   2  Ext (scan)          1.5 GB     3625975808  Ext  TRUNCATED (121 MB missing)
 ```
 
 The word *synthetic* is deliberate and it follows the data around: the
-listing says it, the mount prints a `notice:` saying which numbering the
+listing says it, the mount emits a `warn:` line saying which numbering the
 ordinal came from, and library callers get it as a typed value —
-`ImageLayout::origin` is a `LayoutOrigin` (`Table`, `BackupTable`,
-`Scan { stride }`, or `None`), the kind is `ImageLayoutKind::Scanned`, and
-an image opened by ordinal carries `OpenedImage::layout_origin` — so
-nothing downstream can mistake a scan-built table for one the media
-carried. A filesystem the scan knows only from a backup superblock is an
-entry too, at the start the copy implies; mounting it produces the
-`--backup-superblock` guidance rather than nothing.
+`ImageLayout::origin` and `DriveLayout::origin` are a `LayoutOrigin`
+(`Table`, `BackupTable`, `Scan { stride }`, or `None`), the kind is
+`LayoutKind::Scanned`, and a volume opened by ordinal carries
+`OpenedImage::layout_origin` / `OpenedPartition::layout_origin` — so nothing
+downstream can mistake a scan-built table for one the media carried. A
+filesystem the scan knows only from a backup superblock is an entry too, at
+the start the copy implies; mounting it produces the `--backup-superblock`
+guidance rather than nothing.
 
 **Write offsets the way your notes have them.** `--offset` takes plain bytes,
 binary multiples (`K`/`M`/`G`/`T`, or the explicit `KiB`/`MiB`/`GiB`/`TiB`),
@@ -273,31 +373,32 @@ decimal ones (`KB`/`MB`/`GB`/`TB`), and sector counts with an `s` suffix.
 These all name the same byte:
 
 ```sh
-fsmnt mount-image dump.bin Z: --offset 270532608
-fsmnt mount-image dump.bin Z: --offset 258MiB
-fsmnt mount-image dump.bin Z: --offset 528384s     # sectors of --sector-size (512 by default)
+fsmnt mount dump.bin Z: --offset 270532608
+fsmnt mount dump.bin Z: --offset 258MiB
+fsmnt mount dump.bin Z: --offset 528384s     # sectors of --sector-size (512 by default)
 ```
 
 **Say what a sector is.** `--sector-size BYTES` (a power of two of at least
-512, on `mount-image`, `partitions`, and `scan`) sets both the unit for an
-`s`-suffixed offset and the unit the image's own GPT or MBR is read in. A
-dump of a 4Kn drive keeps its GPT header at byte 4096 and counts entry LBAs
-in 4096-byte units, so reading it as 512-byte sectors puts every partition at
-one-eighth of its real offset — when it finds the table at all. Without the
-flag, `fsmnt` tries 512-byte sectors, and if they turn up no partition table
-it retries at 4096 and says so:
+512, on `mount`, `partitions`, and `scan`) sets both the unit for an
+`s`-suffixed offset and the unit the GPT or MBR is read in. A dump of a 4Kn
+drive keeps its GPT header at byte 4096 and counts entry LBAs in 4096-byte
+units, so reading it as 512-byte sectors puts every partition at one-eighth
+of its real offset — when it finds the table at all. The same applies to a
+live 4Kn drive the operating system reports as 512e, or the reverse. Without
+the flag, an image tries 512-byte sectors, retries at 4096 if they turn up no
+partition table, and says so; a drive uses the geometry it reports.
 
 ```
 dump.bin: raw image, 512 GB, sector size 4096 (auto-detected)
 ```
 
-**See what the image is missing.** `fsmnt partitions IMAGE` marks partitions
+**See what the media is missing.** `fsmnt partitions SOURCE` marks partitions
 the file does not fully carry, instead of reporting them as unreadable:
 
 ```
    9  android_system           Linux filesystem             3.3 GB      270532608  Ext
   10  android_vendor           Linux filesystem             1.5 GB     3625975808  Ext  TRUNCATED (134 MB missing)
-  11  android_cache            Linux filesystem             2.2 GB     5198839808  beyond end of image
+  11  android_cache            Linux filesystem             2.2 GB     5198839808  beyond end of media
 ```
 
 Mounting one of those still works whenever the front of the filesystem is
@@ -305,11 +406,11 @@ there, so the shortfall is stated up front rather than surfacing later as
 per-file read errors:
 
 ```
-warning: filesystem claims 3.32 GB but only 3.32 GB are present in the image (3 MB missing); reads past that point will fail
+warn: filesystem claims 3.32 GB but only 3.32 GB are present in the image (3 MB missing); reads past that point will fail
 ```
 
-The same warning covers `mount-device` when a filesystem claims more than its
-partition provides. It is a comparison between what the filesystem's own
+The same warning covers a drive partition when a filesystem claims more than
+its partition provides. It is a comparison between what the filesystem's own
 superblock says and what the selected window holds — a *missing* tail, not a
 corrupt one. When the front is missing too, the mount is refused instead: the
 ext driver reads the root directory before reporting success (see
@@ -320,19 +421,19 @@ backup superblock is rejected by name.
 source cannot satisfy — a block past the end of a truncated dump, a sector
 that errors on a failing drive — fails, and with it the whole file. That is
 the right default (zeros are not data), but it makes a file that is 90 %
-present entirely uncopyable. `--best-effort-reads` (on `mount-image` and
-`mount-device`) serves such bytes as zeros instead, so what exists can be
-copied out, and reports what it substituted when the mount ends — distinct
-bytes, each counted once however often the filesystem re-read them:
+present entirely uncopyable. `--best-effort-reads` serves such bytes as zeros
+instead, so what exists can be copied out, and reports what it substituted
+when the mount ends — distinct bytes, each counted once however often the
+filesystem re-read them:
 
 ```sh
-fsmnt mount-image dump.bin Z: --partition 10 --salvage --best-effort-reads
+fsmnt mount dump.bin Z: --partition 10 --salvage --best-effort-reads
 ```
 
 ```
-notice: best-effort reads are on — data the source cannot provide is served as zeros; a summary follows when the volume is unmounted
+warn: best-effort reads are on — data the source cannot provide is served as zeros; a summary follows when the volume is unmounted
 …
-best-effort reads: 59 MB of the media that was read was not there and came back as zeros — 59 MB past the end of the source, 0 bytes in sectors that failed to read (0 read error(s))
+warn: best-effort reads: 59 MB of the media that was read was not there and came back as zeros — 59 MB past the end of the source, 0 bytes in sectors that failed to read (0 read error(s))
 ```
 
 On the truncated `android_vendor` above this turns 197 readable salvage
@@ -344,17 +445,17 @@ device the same flag rides over bad sectors one 512-byte sector at a time.
 
 **A wiped partition table has a backup too.** GPT writes a second header into
 the last sector of the disk and the entry array just before it. When the
-front of an image is gone — `dd` over the first sectors, a bootloader
+front of a medium is gone — `dd` over the first sectors, a bootloader
 mishap, an acquisition that started late — `partitions` and `--partition`
 read the table from that copy (validated by signature, header CRC, and its
 own recorded position) and say so:
 
 ```
-GPT partition table (recovered from the backup header in the last sector; the primary header at the front of the image is damaged)
+GPT partition table (recovered from the backup header in the last sector; the primary header at the front of the disk image is damaged)
 ```
 
 A protective MBR whose GPT header at LBA 1 is gone is treated the same way
-rather than as an MBR disk with one `0xEE` partition. Only an image that is
+rather than as an MBR disk with one `0xEE` partition. Only a medium that is
 truncated at the end as well loses both copies — and then `scan` still finds
 the filesystems themselves.
 
@@ -367,18 +468,20 @@ at sector 0 in memory for the duration of the mount, nothing written — and
 says so:
 
 ```
-notice: primary boot sector is not a valid exFAT boot region; opened through the backup copy at byte 6144 (6144 bytes) — the view reflects that copy
+warn: primary boot sector is not a valid exFAT boot region; opened through the backup copy at byte 6144 (6144 bytes) — the view reflects that copy
 ```
 
 FAT12/16 have no backup boot sector, so a damaged one stays unrecoverable
 here.
 
-**What fsmnt tells you.** Every departure from a plain open is printed as a
-`notice:` line on stderr before the volume appears — a backup boot sector or
+**What fsmnt tells you.** Every departure from a plain open is reported as a
+`warn:` line on stderr before the volume appears — a backup boot sector or
 superblock standing in for the primary, a journal replayed into the overlay,
-replay declined on a dirty volume, salvage mode, best-effort reads — so a
-scripted mount's log records under what conditions the evidence was viewed.
-Library users get the same list from `TargetFilesystem::notices()`.
+replay declined on a dirty volume, salvage mode, best-effort reads, a
+synthetic or backup-derived partition table — so a scripted mount's log
+records under what conditions the evidence was viewed, even at `-q`. Library
+users get the driver's own list from `TargetFilesystem::notices()`, and
+everything else through `tracing`. See [Logging](#logging).
 
 **Large files, damaged files.** Files are read in chunks at the position
 the OS asks for (every driver implements a positioned read), so copying a
@@ -423,9 +526,9 @@ table, in later block groups — with `sparse_super`, in groups 1, 3, 5, 7,
 messages point you at them.
 
 ```sh
-fsmnt mount-image dump.bin Z: --offset 270532608 --backup-superblock 1
-fsmnt mount-image dump.bin Z: --partition 10 --salvage
-fsmnt mount-device 0 Z: --partition 2 --salvage
+fsmnt mount dump.bin Z: --offset 270532608 --backup-superblock 1
+fsmnt mount dump.bin Z: --partition 10 --salvage
+fsmnt mount 0 Z: --partition 2 --salvage
 ```
 
 `--backup-superblock GROUP` opens the volume through group `GROUP`'s copy
@@ -485,21 +588,42 @@ ignoring the request. They combine with `--partition`, `--offset` and
 ### BitLocker
 
 ```sh
-fsmnt mount-image bde.img Z: --recovery-password 123456-...-654321
-fsmnt mount-device 0 Z: --partition 2 --bek-file startup.bek
+fsmnt mount bde.img Z: --recovery-password 123456-...-654321
+fsmnt mount 0 Z: --partition 2 --bek-file startup.bek
 ```
 
 Volumes whose protection is suspended unlock via the clear key with no
 credentials.
 
-### Mount a host directory
+### Logging
 
-```sh
-fsmnt mount ./export Z: --volname Evidence
+stdout carries the command's *product* only: the `drives`, `partitions` and
+`scan` tables, and the mount lifecycle lines a script may key on (`Volume
+mounted at Z:. …`, `Unmounted.`, `Unmounted Z:.`). Everything else — what was
+detected where, driver notices, warnings, the best-effort summary, the final
+error — goes to stderr as one line per event, `level: message key=value`:
+
+```
+info: detected Ntfs at offset 316669952 in raw image disk.bin
+warn: filesystem claims 1.90 TB but only 1.43 TB are present in the image (471 GB missing); reads past that point will fail
+info: mounting ntfs volume at Z:
 ```
 
-Exposes an ordinary directory as a read-only volume — handy for testing the
-mount backends without a disk image.
+| flag | effect |
+|---|---|
+| *(none)* | progress and outcomes (`info`) |
+| `-v` | plus the decisions inside the library, each line prefixed with the module it came from (`debug`) |
+| `-vv` | plus every operation a mounted volume serves (`trace`) |
+| `-q` | warnings and errors only |
+| `--log-file PATH` | append the same lines to `PATH` as well, without colour |
+| `FSMNT_LOG` | `tracing` `EnvFilter` directives (`debug`, `fsmnt_device=trace,info`); overrides `-v`/`-q` |
+
+The flags are global: `fsmnt -v partitions disk.bin` and
+`fsmnt partitions disk.bin -v` are the same command. Colour appears only when
+stderr is a terminal, and never in the log file. `--log-file` survives
+`--detach`, so a mount that failed in the background can still say why.
+`fuser` and `ewf` report through the `log` crate; those records arrive in the
+same stream under the same filter.
 
 ### Unmounting
 
@@ -521,18 +645,18 @@ intercept, so the directory keeps a dangling reparse point that reports
 "a device which does not exist was specified" for every access until
 `fsmnt unmount` clears it.
 
-To mount without a process to babysit, add `--detach` to any mount command.
+To mount without a process to babysit, add `--detach` to a mount command.
 The mount moves to a background process and the command returns as soon as
 the volume is usable, or fails if it does not come up within 30 seconds:
 
 ```sh
-fsmnt mount-image disk.img Z: --detach
-fsmnt mount-image evidence.E01 Y: --detach --offset 1048576
+fsmnt mount disk.img Z: --detach
+fsmnt mount evidence.E01 Y: --detach --offset 1048576 --log-file evidence.log
 fsmnt unmount Z: && fsmnt unmount Y:
 ```
 
-Run the command without `--detach` to see why a mount failed — the
-background process has no console to report to.
+The background process has no console to report to, so give it a
+`--log-file` — or re-run in the foreground — to see why a mount failed.
 
 ## Library
 
@@ -552,21 +676,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `fsmnt_core::TargetFilesystem` is the trait a mountable filesystem implements,
 and `fsmnt_device::DriverRegistry` is the plug-in point — register your own
 `FilesystemDriver` alongside or instead of the built-in ones and hand the
-registry to `open_device_partition` or `open_image`. `ImageOpenOptions` selects
-either a partition ordinal or an offset in decoded media, plus the
-partition-table sector size and the filesystem-owned root; `image_layout`
-(and `image_layout_with_sector_size`) returns the same enumeration the
-`partitions` command prints, so a listed ordinal is what `with_partition`
-takes, and each `ImagePartition` carries the `missing_bytes` the image is
-short of its declared extent. `scan_image` backs the `scan` command, returning
-`ScanHit`s with their folded ext backup superblocks. `OpenedImage` and
-`OpenedPartition` report `truncated_by`, the bytes the opened filesystem
-claims that its window does not hold — `missing_filesystem_bytes` is the same
-comparison on its own. Every container
-implements the object-safe `fsmnt_device::ImageContainer` trait, so raw, EWF,
-VHD, and VHDX readers share one typed virtual-media boundary. The umbrella
-open functions return `OpenImageError`, retaining the failed path, decoded
-offset, detected layout, and underlying container or filesystem error.
+registry to `open_device_partition` or `open_image`.
+
+Every way of saying *where* a filesystem is has a matching pair, one for an
+image and one for a drive, and both go through the same enumeration — so an
+image acquired from a drive and the drive itself number their partitions
+identically:
+
+| to say | image | drive |
+|---|---|---|
+| what is on it | `image_layout` | `drive_layout` |
+| what is *really* on it | `scan_image` | `scan_drive` |
+| open the N-th table entry | `ImageOpenOptions::with_partition` | `open_device_partition` |
+| open the N-th filesystem a scan finds | `ImageOpenOptions::with_scan` | `PartitionOpenOptions::with_scan` |
+| open at a byte offset | `ImageOpenOptions::with_offset` | `open_device_at_offset` |
+| read the table in 4 KiB sectors | `ImageOpenOptions::with_sector_size` | `PartitionOpenOptions::with_sector_size` |
+| compose a guest's fstab | `open_image_with_fstab` | `open_device_partition_with_fstab` |
+
+`image_layout` (and `image_layout_with_options`) returns the same enumeration
+the `partitions` command prints, so a listed ordinal is what `with_partition`
+takes, and each `LayoutPartition` carries the `missing_bytes` the medium is
+short of its declared extent. However a volume was located, the result says
+so: `OpenedImage::layout_origin` and `OpenedPartition::layout_origin` are a
+`LayoutOrigin` — the media's own table, its GPT backup, a `Scan { stride }`,
+or a bare byte offset. `OpenedImage` and `OpenedPartition` also report
+`truncated_by`, the bytes the opened filesystem claims that its window does
+not hold — `missing_filesystem_bytes` is the same comparison on its own.
+Every container implements the object-safe `fsmnt_device::ImageContainer`
+trait, so raw, EWF, VHD, and VHDX readers share one typed virtual-media
+boundary. The umbrella open functions return `OpenImageError`, retaining the
+failed path, decoded offset, detected layout, and underlying container or
+filesystem error.
+
+Diagnostics reach library users through
+[`tracing`](https://docs.rs/tracing): every first-party crate emits events —
+`debug` for the decisions inside (which table was read and how, which driver
+claimed the media, which logical volume was chosen), `info` for progress and
+outcomes, `warn` for anything a record has to keep — and none of them prints
+to stdout or stderr on its own. Install any subscriber to see them; the CLI's
+is in `src/cli/logging.rs`.
 
 ## Workspace layout
 
