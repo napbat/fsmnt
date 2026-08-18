@@ -8,4 +8,4 @@
 mod dokan;
 
 #[cfg(windows)]
-pub use dokan::mount;
+pub use dokan::{is_mounted, mount, unmount};

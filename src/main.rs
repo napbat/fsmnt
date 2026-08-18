@@ -6,6 +6,8 @@ use clap::{Args, Parser, Subcommand};
 
 use fsmnt::DirFilesystem;
 
+mod detach;
+
 /// Mount filesystem sources as read-only virtual volumes (FUSE on Unix,
 /// Dokan on Windows).
 #[derive(Parser)]
@@ -29,6 +31,24 @@ impl FilesystemMountOptions {
     }
 }
 
+/// Shared options for the commands that mount something.
+#[derive(Args, Clone, Debug, Default)]
+struct DetachOption {
+    /// Mount in a background process and return as soon as the volume is
+    /// ready, instead of blocking until it is unmounted.
+    #[arg(long)]
+    detach: bool,
+}
+
+impl DetachOption {
+    /// Whether this command should hand its mount to a background
+    /// process.  The background process runs the same command with the
+    /// flag removed, so it always mounts in the foreground itself.
+    fn requested(&self) -> bool {
+        self.detach && !detach::is_background_mount()
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Mount a host directory as a read-only volume.
@@ -47,6 +67,21 @@ enum Commands {
         /// Filesystem type label reported to the OS.
         #[arg(long, default_value = "fsmnt")]
         fsname: String,
+
+        #[command(flatten)]
+        detach: DetachOption,
+    },
+
+    /// Unmount a volume, from anywhere.
+    ///
+    /// Works from another shell while a mount command is blocking, which
+    /// then returns. On Windows it also restores a mountpoint directory
+    /// left behind by a mount process that was killed.
+    #[command(alias = "umount")]
+    Unmount {
+        /// Mountpoint to release: the directory on Unix; the drive letter
+        /// (e.g. `Z:`) or directory on Windows.
+        mountpoint: String,
     },
 
     /// Mount a raw, EWF, VHD, or VHDX image (NTFS, FAT, exFAT, ext, APFS,
@@ -80,6 +115,9 @@ enum Commands {
 
         #[command(flatten)]
         filesystem: FilesystemMountOptions,
+
+        #[command(flatten)]
+        detach: DetachOption,
     },
 
     /// List physical drives on this machine.
@@ -149,11 +187,47 @@ enum Commands {
 
         #[command(flatten)]
         filesystem: FilesystemMountOptions,
+
+        #[command(flatten)]
+        detach: DetachOption,
     },
+}
+
+impl Commands {
+    /// The mountpoint to wait for when this command hands its mount to a
+    /// background process, or `None` when it runs in the foreground.
+    fn detached_mountpoint(&self) -> Option<&str> {
+        let (detach, mountpoint) = match self {
+            Self::Mount {
+                detach, mountpoint, ..
+            }
+            | Self::MountImage {
+                detach, mountpoint, ..
+            } => (detach, mountpoint),
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            Self::MountDevice {
+                detach, mountpoint, ..
+            } => (detach, mountpoint),
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            Self::Drives | Self::Partitions { .. } => return None,
+            Self::Unmount { .. } => return None,
+        };
+        detach.requested().then_some(mountpoint.as_str())
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // `--detach`: hand the whole command to a background process and wait
+    // here only until its volume is live.
+    if let Some(mountpoint) = cli.command.detached_mountpoint() {
+        let pid = detach::spawn(mountpoint)?;
+        println!(
+            "Volume mounted at {mountpoint} (pid {pid}); run 'fsmnt unmount {mountpoint}' to unmount."
+        );
+        return Ok(());
+    }
 
     match cli.command {
         Commands::Mount {
@@ -161,7 +235,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mountpoint,
             volname,
             fsname,
+            detach: _,
         } => handle_mount(&source, &mountpoint, &volname, &fsname),
+        Commands::Unmount { mountpoint } => handle_unmount(&mountpoint),
         Commands::MountImage {
             image,
             mountpoint,
@@ -170,6 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             recovery_password,
             bek_file,
             filesystem,
+            detach: _,
         } => handle_mount_image(
             &image,
             &mountpoint,
@@ -196,6 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             bek_file,
             fstab,
             filesystem,
+            detach: _,
         } => handle_mount_device(MountDeviceOptions {
             drive: &drive,
             partition,
@@ -212,7 +290,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Mount `source` at `mountpoint` and block until Ctrl+C.
+/// Unmount whatever `fsmnt` has mounted at `mountpoint`.
+fn handle_unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fsmnt::unmount(mountpoint)?;
+    println!("Unmounted {mountpoint}.");
+    Ok(())
+}
+
+/// Mount `source` at `mountpoint` and block until the mount ends.
 fn handle_mount(
     source: &std::path::Path,
     mountpoint: &str,
@@ -244,7 +329,7 @@ fn ensure_unix_mountpoint(mountpoint: &str) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-/// Mount `fs` and block until Ctrl+C, printing progress.
+/// Mount `fs` and block until the mount ends, printing progress.
 fn block_on_mount(
     fs: Box<dyn fsmnt::TargetFilesystem>,
     mountpoint: &str,
@@ -256,7 +341,10 @@ fn block_on_mount(
     let mp_display = mountpoint.to_string();
     println!("Mounting {kind} volume at {mountpoint}...");
     fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
-        println!("Volume mounted at {mp_display}. Press Ctrl+C to unmount.");
+        println!(
+            "Volume mounted at {mp_display}. Press Ctrl+C, or run 'fsmnt unmount {mp_display}' \
+             from another shell, to unmount."
+        );
     })?;
     println!("Unmounted.");
     Ok(())
@@ -593,6 +681,38 @@ mod tests {
         let address = parse_partition_address("device:name:3").expect("partition address");
         assert_eq!(address.drive().as_str(), "device:name");
         assert_eq!(address.partition(), 3);
+    }
+
+    #[test]
+    fn unmount_is_also_spelled_umount() {
+        for name in ["unmount", "umount"] {
+            let cli = Cli::try_parse_from(["fsmnt", name, "Z:"]).expect("unmount command");
+            let Commands::Unmount { mountpoint } = cli.command else {
+                panic!("wrong command");
+            };
+            assert_eq!(mountpoint, "Z:");
+        }
+    }
+
+    #[test]
+    fn every_mount_command_can_detach() {
+        for args in [
+            ["fsmnt", "mount", "source", "Z:", "--detach"],
+            ["fsmnt", "mount-image", "image", "Z:", "--detach"],
+            ["fsmnt", "mount-device", "0", "Z:", "--detach"],
+        ] {
+            let cli = Cli::try_parse_from(args).expect("detached mount");
+            assert_eq!(cli.command.detached_mountpoint(), Some("Z:"));
+        }
+    }
+
+    #[test]
+    fn mounts_stay_in_the_foreground_without_the_detach_flag() {
+        let cli = Cli::try_parse_from(["fsmnt", "mount-image", "image", "Z:"]).expect("mount");
+        assert_eq!(cli.command.detached_mountpoint(), None);
+
+        let cli = Cli::try_parse_from(["fsmnt", "unmount", "Z:"]).expect("unmount");
+        assert_eq!(cli.command.detached_mountpoint(), None);
     }
 
     #[test]

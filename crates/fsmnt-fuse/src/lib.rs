@@ -8,4 +8,4 @@
 mod fuse;
 
 #[cfg(unix)]
-pub use fuse::mount;
+pub use fuse::{is_mounted, mount, unmount};

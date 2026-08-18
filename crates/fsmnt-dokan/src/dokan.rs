@@ -4,9 +4,9 @@
 //! [Dokan](https://dokan-dev.github.io/).  The volume can be mounted to a
 //! drive letter (e.g. `Z:`) or an empty NTFS directory.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
@@ -22,9 +22,12 @@ use windows_sys::Win32::{
     Foundation::{STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL},
     Storage::FileSystem::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
-        FILE_ATTRIBUTE_READONLY,
+        FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT,
     },
-    System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, SetConsoleCtrlHandler},
+    System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+        SetConsoleCtrlHandler,
+    },
 };
 
 /// Kernel-mode create disposition: overwrite existing file.
@@ -41,12 +44,55 @@ const FILE_DELETE_ON_CLOSE: u32 = 0x0000_1000;
 /// Signal flag set by the console control handler to request unmount.
 static STOP: AtomicBool = AtomicBool::new(false);
 
+/// Set by [`mount`] once the volume has been released, so the console
+/// control handler can tell that teardown finished.
+static UNMOUNTED: AtomicBool = AtomicBool::new(false);
+
+/// How long the console control handler waits for [`mount`] to finish
+/// unmounting on a close, logoff, or shutdown event.  Windows terminates
+/// the process as soon as the handler returns for those events, and gives
+/// it only about five seconds in total.
+const TEARDOWN_WAIT: Duration = Duration::from_secs(4);
+
+/// How long [`unmount`] waits for the driver to release a mount point
+/// after accepting the request.
+const UNMOUNT_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long [`unmount`] keeps re-asking the driver to remove a mount point
+/// that is still mounted (see [`remove_mount_point`]).
+const UNMOUNT_RETRY_WINDOW: Duration = Duration::from_secs(5);
+
+/// Gap between the unmount retries and release checks above.
+const RETRY_POLL: Duration = Duration::from_millis(100);
+
+/// File attributes of a directory mountpoint.  These raw bits are what
+/// identifies one: the mount-point reparse tag makes `FileType::is_dir`
+/// report a symlink rather than the directory it is.
+const MOUNTPOINT_ATTRIBUTES: u32 = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+
 /// Console control handler: request a clean unmount on Ctrl+C, Ctrl+Break,
-/// or console close.
+/// console close, logoff, or system shutdown.
+///
+/// `taskkill /F` is `TerminateProcess`, which no handler — here or anywhere
+/// else — can intercept.  The Dokan driver still drops the volume when the
+/// process dies, but a directory mountpoint can be left behind as a stale
+/// reparse point; [`unmount`] clears that.
 unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
     match ctrl_type {
-        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT => {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+            // The process keeps running, so the mount loop gets to unmount
+            // and return on its own.
             STOP.store(true, Ordering::SeqCst);
+            1 // handled
+        }
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            // For these events the process is terminated as soon as the
+            // handler returns, so wait here until the volume is released.
+            STOP.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + TEARDOWN_WAIT;
+            while !UNMOUNTED.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             1 // handled
         }
         _ => 0,
@@ -62,9 +108,14 @@ fn to_system_time(dt: Option<DateTime<Utc>>) -> SystemTime {
 /// Mounts `fs` as a read-only Dokan volume at `mountpoint`.
 ///
 /// Calls `on_mount` once the volume is successfully mounted, then blocks
-/// the calling thread until Ctrl+C.  Uses a Windows console control
-/// handler directly (instead of `ctrlc`) because Dokan installs its own
-/// handler that can conflict.
+/// the calling thread until Ctrl+C — or until another process removes the
+/// mount point, which is what [`unmount`] does.  Uses a Windows console
+/// control handler directly (instead of `ctrlc`) because Dokan installs
+/// its own handler that can conflict.
+///
+/// The volume is always unmounted before this returns, and a directory
+/// mountpoint is left as an ordinary directory rather than a dangling
+/// reparse point.
 ///
 /// # Errors
 ///
@@ -93,19 +144,166 @@ pub fn mount(
     on_mount();
 
     STOP.store(false, Ordering::SeqCst);
+    UNMOUNTED.store(false, Ordering::SeqCst);
     unsafe {
         SetConsoleCtrlHandler(Some(ctrl_handler), 1);
     }
 
-    // Poll until signalled — Dokan callbacks keep running on other threads.
-    while !STOP.load(Ordering::SeqCst) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    // Watch for the stop signal on a second thread, because dropping
+    // `file_system` is what blocks until the volume is closed.  Waiting on
+    // the drop rather than on the signal alone means another process
+    // removing the mount point (see [`unmount`]) also ends the mount.
+    let closed = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let closed = Arc::clone(&closed);
+        let wide_path = wide_path.clone();
+        std::thread::spawn(move || {
+            while !STOP.load(Ordering::SeqCst) && !closed.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if STOP.load(Ordering::SeqCst) {
+                let _ = dokan::unmount(&wide_path);
+            }
+        })
+    };
+
+    // Dokan callbacks keep running on other threads until the volume is
+    // released.
+    drop(file_system);
+    closed.store(true, Ordering::SeqCst);
+    let _ = watcher.join();
+
+    dokan::shutdown();
+    // Leave a directory mountpoint reusable rather than dangling.
+    clear_dangling_directory_mountpoint(mountpoint);
+    UNMOUNTED.store(true, Ordering::SeqCst);
+    unsafe {
+        SetConsoleCtrlHandler(Some(ctrl_handler), 0);
+    }
+    Ok(())
+}
+
+/// Unmounts the Dokan volume at `mountpoint`, from any process.
+///
+/// `mountpoint` is a drive letter (e.g. `"Z:"`) or the directory the volume
+/// was mounted on.  This removes the mount point the same way `dokanctl /u`
+/// does, which stops a running [`mount`] — its call returns — and then
+/// waits for the driver to release the volume.  A directory mountpoint is
+/// restored to an ordinary empty directory afterwards, including one left
+/// dangling by a mount process that was killed.
+///
+/// # Errors
+///
+/// Returns an error if `mountpoint` is not valid UTF-16, or if there was
+/// nothing to do: the driver has no volume mounted there and the path is
+/// not a mountpoint left over from one.
+pub fn unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let wide_path = U16CString::from_str(mountpoint)?;
+
+    dokan::init();
+    let removed = remove_mount_point(&wide_path, mountpoint);
+    dokan::shutdown();
+
+    if removed {
+        // Removal is asynchronous: wait for the volume to actually go, so
+        // the mountpoint below is inspected in its final state.
+        let deadline = Instant::now() + UNMOUNT_RELEASE_TIMEOUT;
+        while is_mounted(mountpoint) && Instant::now() < deadline {
+            std::thread::sleep(RETRY_POLL);
+        }
     }
 
-    let _ = dokan::unmount(&wide_path);
-    drop(file_system);
-    dokan::shutdown();
-    Ok(())
+    let cleared = clear_dangling_directory_mountpoint(mountpoint);
+    if removed || cleared {
+        return Ok(());
+    }
+    Err(format!("no Dokan volume is mounted at {mountpoint}").into())
+}
+
+/// Asks the driver to remove `mountpoint`, retrying briefly while a volume
+/// is still mounted there.
+///
+/// Dokan registers a directory mountpoint a moment after the volume itself
+/// becomes reachable, so a removal issued immediately after a mount can be
+/// rejected once or twice before it is accepted.  A mountpoint with
+/// nothing mounted on it fails straight away instead of retrying.
+fn remove_mount_point(wide_path: &U16CStr, mountpoint: &str) -> bool {
+    let deadline = Instant::now() + UNMOUNT_RETRY_WINDOW;
+    loop {
+        if dokan::unmount(wide_path) {
+            return true;
+        }
+        if !is_mounted(mountpoint) || Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(RETRY_POLL);
+    }
+}
+
+/// Restores a directory mountpoint that no longer has a volume behind it,
+/// reporting whether it cleaned anything up.
+///
+/// Dokan attaches a reparse point to a directory it mounts on and can
+/// leave it behind — always when the mount process was killed, and on some
+/// releases even after an orderly unmount.  What remains dangles: every
+/// access to the directory fails with "a device which does not exist was
+/// specified", so nothing can use the path again.  Removing the dangling
+/// reparse point (which never touches the filesystem that was mounted
+/// there) and recreating the directory empty makes the mountpoint usable
+/// once more.
+///
+/// Does nothing unless the path really is an unreadable reparse point, so
+/// a live mountpoint or an ordinary directory is left exactly as it is.
+fn clear_dangling_directory_mountpoint(mountpoint: &str) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    if drive_letter_root(mountpoint).is_some() {
+        return false;
+    }
+    let dangling = std::fs::symlink_metadata(mountpoint)
+        .is_ok_and(|meta| meta.file_attributes() & MOUNTPOINT_ATTRIBUTES == MOUNTPOINT_ATTRIBUTES)
+        && std::fs::read_dir(mountpoint).is_err();
+    if !dangling {
+        return false;
+    }
+    if std::fs::remove_dir(mountpoint).is_err() {
+        return false;
+    }
+    let _ = std::fs::create_dir(mountpoint);
+    true
+}
+
+/// Whether a Dokan volume is mounted at `mountpoint` and usable.
+///
+/// For a drive-letter mountpoint (`"Z:"`) this is whether the volume root
+/// can be opened.  A directory mountpoint has to carry both the reparse
+/// point Dokan attaches to it and a readable volume behind that reparse
+/// point: a mount process killed with `taskkill /F` leaves the reparse
+/// point in place but nothing behind it, and such a stale mountpoint
+/// answers `false` here until [`unmount`] clears it.
+#[must_use]
+pub fn is_mounted(mountpoint: &str) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    if let Some(root) = drive_letter_root(mountpoint) {
+        return std::fs::metadata(root).is_ok();
+    }
+    // `symlink_metadata` reports the directory itself, `metadata` follows
+    // the reparse point into the mounted volume.
+    std::fs::symlink_metadata(mountpoint)
+        .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+        && std::fs::metadata(mountpoint).is_ok()
+}
+
+/// The volume root (`Z:\`) of a drive-letter mountpoint, or `None` when
+/// `mountpoint` is a directory path.
+fn drive_letter_root(mountpoint: &str) -> Option<String> {
+    let mut chars = mountpoint.trim_end_matches(['\\', '/']).chars();
+    let letter = chars.next()?;
+    if !letter.is_ascii_alphabetic() || chars.next()? != ':' || chars.next().is_some() {
+        return None;
+    }
+    Some(format!("{letter}:\\"))
 }
 
 /// State associated with a single open file or directory.
@@ -481,5 +679,24 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
         _context: &'c Self::Context,
     ) -> OperationResult<()> {
         Err(STATUS_ACCESS_DENIED)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drive_letter_root;
+
+    #[test]
+    fn drive_letter_mountpoints_resolve_to_their_volume_root() {
+        assert_eq!(drive_letter_root("Z:").as_deref(), Some("Z:\\"));
+        assert_eq!(drive_letter_root("z:\\").as_deref(), Some("z:\\"));
+        assert_eq!(drive_letter_root("Z:/").as_deref(), Some("Z:\\"));
+    }
+
+    #[test]
+    fn directory_mountpoints_have_no_volume_root() {
+        assert_eq!(drive_letter_root(r"C:\mnt\evidence"), None);
+        assert_eq!(drive_letter_root("mnt"), None);
+        assert_eq!(drive_letter_root(""), None);
     }
 }
