@@ -57,8 +57,11 @@ evidence handling:
   want — because the primary is damaged — `--backup-superblock GROUP` asks
   for it explicitly, and `--salvage` opens a volume whose directory tree is
   unusable; see [Damaged ext metadata](#damaged-ext-metadata-backup-superblocks-and-salvage).
-  Both read through the same read-only path: the backup bytes are
-  substituted in memory, never written back.
+  FAT32, exFAT and NTFS volumes whose sector 0 is dead are opened through
+  their backup boot sectors automatically. All of these read through the
+  same read-only path: the backup bytes are substituted in memory, never
+  written back — and every such fallback is announced as a `notice:` line
+  (see [Damaged and partial images](#damaged-and-partial-images)).
 
 ## Prerequisites
 
@@ -286,6 +289,61 @@ corrupt one. When the front is missing too, the mount is refused instead: the
 ext driver reads the root directory before reporting success (see
 [Read-only guarantees](#read-only-guarantees)), and an offset that lands on a
 backup superblock is rejected by name.
+
+**Read what is there, even past the damage.** By default a read that the
+source cannot satisfy — a block past the end of a truncated dump, a sector
+that errors on a failing drive — fails, and with it the whole file. That is
+the right default (zeros are not data), but it makes a file that is 90 %
+present entirely uncopyable. `--best-effort-reads` (on `mount-image` and
+`mount-device`) serves such bytes as zeros instead, so what exists can be
+copied out, and reports what it substituted when the mount ends — distinct
+bytes, each counted once however often the filesystem re-read them:
+
+```sh
+fsmnt mount-image dump.bin Z: --partition 10 --salvage --best-effort-reads
+```
+
+```
+notice: best-effort reads are on — data the source cannot provide is served as zeros; a summary follows when the volume is unmounted
+…
+best-effort reads: 59 MB of the media that was read was not there and came back as zeros — 59 MB past the end of the source, 0 bytes in sectors that failed to read (0 read error(s))
+```
+
+On the truncated `android_vendor` above this turns 197 readable salvage
+entries into all 402 — the last 121 MB of the partition is simply not in
+the file, and now the files that reach into it read with a zero tail rather
+than not at all. The window becomes the partition's *declared* extent, so a
+filesystem whose data runs past the dump's end can still be walked. On a
+device the same flag rides over bad sectors one 512-byte sector at a time.
+
+**Boot sectors have backups too.** FAT32 keeps sectors 0–2 again at sector
+6, exFAT keeps its whole 12-sector boot region again at sector 12, and NTFS
+mirrors its boot sector into the last sector of the volume. When sector 0
+no longer classifies as any filesystem but one of those copies does, `fsmnt`
+detects the volume from the copy and opens it through the copy — presented
+at sector 0 in memory for the duration of the mount, nothing written — and
+says so:
+
+```
+notice: primary boot sector is not a valid exFAT boot region; opened through the backup copy at byte 6144 (6144 bytes) — the view reflects that copy
+```
+
+FAT12/16 have no backup boot sector, so a damaged one stays unrecoverable
+here.
+
+**What fsmnt tells you.** Every departure from a plain open is printed as a
+`notice:` line on stderr before the volume appears — a backup boot sector or
+superblock standing in for the primary, a journal replayed into the overlay,
+replay declined on a dirty volume, salvage mode, best-effort reads — so a
+scripted mount's log records under what conditions the evidence was viewed.
+Library users get the same list from `TargetFilesystem::notices()`.
+
+**Not covered.** A missing segment of an EWF set (`.E02` absent from an
+`.E01` chain) still fails at open — the EWF decoder needs every segment.
+NTFS's `$MFT` mirror and FAT's second FAT copy are not consulted when the
+first copy is damaged, and a damaged FAT12/16 boot sector has no backup.
+Directory blocks that are corrupt (rather than missing) fail that listing;
+`--salvage` still reaches the files below them on ext.
 
 ### Choosing what to expose
 
