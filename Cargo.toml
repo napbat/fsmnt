@@ -196,6 +196,9 @@ crc32c = { workspace = true }
 crc32fast = { workspace = true, features = ["std"] }
 flate2 = { workspace = true }
 fsmnt-testkit = { workspace = true, features = ["device"] }
+# The fscrypt fixture's master keys are SHA-512 of fixed labels, so the
+# integration test recomputes them the same way the fixture generator did.
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

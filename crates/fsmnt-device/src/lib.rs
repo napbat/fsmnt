@@ -35,6 +35,7 @@ mod detection;
 mod disk;
 mod drive;
 mod driver;
+mod fscrypt;
 mod image;
 mod partition_reader;
 mod sector_reader;
@@ -55,6 +56,7 @@ pub use driver::{
     FilesystemOpenOptions, FilesystemRoot, FilesystemRootParseError, ResolvedFilesystem,
     ResolvedMemberDiscovery, reject_unsupported_recovery,
 };
+pub use fscrypt::{FscryptKeySpec, FscryptKeySpecParseError};
 pub use fsmnt_parser_core::boot_sector::{
     BOOT_SECTOR_SIZE, BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_MAGIC,
     BTRFS_SUPERBLOCK_PROBE_SIZE, BootSectorDiagnosis, BootSectorHeader, BootSectorUnknownReason,

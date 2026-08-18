@@ -413,6 +413,55 @@ fn journal_replay_is_on_unless_declined() {
 }
 
 #[test]
+fn fscrypt_keys_repeat_and_reach_the_open_options() {
+    let v2 = "aa".repeat(32);
+    let v1 = format!("v1:aabbccddeeff0011:{}", "bb".repeat(64));
+    let args = mount(&[
+        "fsmnt",
+        "mount",
+        "data.img",
+        "Z:",
+        "--fscrypt-key",
+        &v2,
+        "--fscrypt-key",
+        &v1,
+    ]);
+    let options = args.filesystem.open_options();
+    let keys = options.fscrypt_keys();
+    assert_eq!(keys.len(), 2, "--fscrypt-key is repeatable");
+    assert_eq!(keys[0].version(), "v2");
+    assert_eq!(keys[0].descriptor(), None);
+    assert_eq!(keys[1].version(), "v1");
+    assert_eq!(
+        keys[1].descriptor(),
+        Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11])
+    );
+
+    // Nothing that could be a key is echoed by the option's Debug, because
+    // the whole options struct is logged at `-v`.
+    let rendered = format!("{options:?}");
+    assert!(!rendered.contains(&v2), "{rendered}");
+    assert!(rendered.contains("key_bytes: 32"), "{rendered}");
+}
+
+#[test]
+fn a_key_that_is_not_a_key_is_refused_at_parse_time() {
+    for garbage in [
+        "not-hex-at-all",
+        "aa",                  // 1 byte, far short of 16
+        "v1:aabb:aabbccdd",    // descriptor is not 8 bytes
+        "v1:aabbccddeeff0011", // v1 with no key half
+        "v2:",                 // v2 with no key at all
+    ] {
+        assert!(
+            Cli::try_parse_from(["fsmnt", "mount", "data.img", "Z:", "--fscrypt-key", garbage])
+                .is_err(),
+            "{garbage:?} is not a usable fscrypt key"
+        );
+    }
+}
+
+#[test]
 fn every_mount_can_detach_and_nothing_else_can() {
     let cli = Cli::try_parse_from(["fsmnt", "mount", "source", "Z:", "--detach"])
         .expect("detached mount");

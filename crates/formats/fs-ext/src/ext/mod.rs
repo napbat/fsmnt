@@ -850,6 +850,18 @@ impl Ext {
         self.encoding_flags & 0x0001 != 0
     }
 
+    /// Whether the filesystem was formatted for fscrypt
+    /// (`INCOMPAT_ENCRYPT`).
+    ///
+    /// The bit says the *filesystem* may carry encrypted objects, not that
+    /// any given inode is one — `ExtInode::is_encrypted` answers that. It
+    /// is what a consumer checks to decide whether missing master keys are
+    /// worth reporting at all.
+    #[must_use]
+    pub fn has_fscrypt(&self) -> bool {
+        self.incompat.contains(IncompatFeatures::ENCRYPT)
+    }
+
     /// Superblock `s_encrypt_pw_salt` (16 bytes; zero when fscrypt unused).
     #[must_use]
     pub fn s_encrypt_pw_salt(&self) -> [u8; 16] {
