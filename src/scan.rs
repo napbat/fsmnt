@@ -29,6 +29,8 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use tracing::debug;
+
 use fsmnt_device::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
     FS_DETECT_PROBE_SIZE, HostDriveEnumerator, HostDriveError, HostDriveId, ImageOpenError,
@@ -345,6 +347,12 @@ pub fn scan_media(
             break;
         }
         let chunk_end = read_at.saturating_add(u64::try_from(filled).unwrap_or(u64::MAX));
+        debug!(
+            start = read_at,
+            end = chunk_end,
+            length,
+            "read a chunk of the media to classify"
+        );
         // Positions whose probe window runs past the bytes in hand are left
         // for the next chunk — unless there is no next chunk, in which case
         // a short window is all there will ever be.

@@ -9,6 +9,8 @@
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
+use tracing::debug;
+
 use fsmnt_device::{
     DeviceMember, DeviceReader, DeviceSet, DriverRegistry, FilesystemMemberId,
     FilesystemOpenOptions, HostDriveId, HostVolumeResolver, LogicalVolumeId, PartitionAddress,
@@ -63,10 +65,23 @@ pub(super) fn open_logical_partition<E: HostVolumeResolver>(
     policy: &ReadPolicy,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
     let candidates = E::logical_volumes(&located.extent)?;
+    debug!(
+        drive = %located.extent.drive(),
+        offset = located.extent.offset(),
+        candidates = candidates.len(),
+        requested = ?requested.map(LogicalVolumeId::as_str),
+        "found the operating system's logical volumes over the partition"
+    );
     let volume = select_logical_volume(&located.extent, &candidates, requested)?;
     let length = volume.length().unwrap_or_else(|| located.extent.length());
     let sector_size = volume.sector_size().unwrap_or(located.sector_size);
     let identity = volume.id().clone();
+    debug!(
+        volume = %identity,
+        length,
+        sector_size,
+        "selected a logical volume to read the partition through"
+    );
     let reader = E::open_logical_volume(&volume)?;
     let zone_reporter = E::logical_zone_reporter(&volume)?;
     let reader = SectorReader::new(reader, length, sector_size)?;
@@ -135,6 +150,14 @@ pub(super) fn open_raw_partitions<E: HostVolumeResolver>(
             policy,
         );
     }
+
+    debug!(
+        drive = %primary.extent.drive(),
+        offset = primary.extent.offset(),
+        members = extents.len(),
+        stated = additional.len(),
+        "assembled the raw device set the filesystem will be opened from"
+    );
 
     let size = if extents.len() == 1 {
         primary.extent.length()
@@ -233,6 +256,12 @@ fn discover_raw_partitions<E: HostVolumeResolver>(
             if devices.push(member).is_err() {
                 continue;
             }
+            debug!(
+                drive = %located.extent.drive(),
+                offset = located.extent.offset(),
+                member = ?candidate.discovery().member(),
+                "adopted another partition as a member of the same filesystem"
+            );
             discovered_ids.push(candidate.discovery().member().clone());
             extents.push(located.extent);
             if discovery_complete(primary, discovered_ids) {

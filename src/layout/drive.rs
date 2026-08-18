@@ -7,6 +7,8 @@
 
 use std::io::{Seek, SeekFrom};
 
+use tracing::debug;
+
 use fsmnt_device::{Disk, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo};
 
 use super::media::{self, MediaEntries};
@@ -171,6 +173,12 @@ pub fn drive_layout<E: HostDriveEnumerator>(
         .sector_size
         .or_else(|| reported_sector_size(info.as_ref()));
     if let Some(sector_size) = stated {
+        debug!(
+            drive = %drive,
+            sector_size,
+            requested = options.sector_size.is_some(),
+            "reading the drive's partition table in a known sector size"
+        );
         return layout_at_sector_size::<E>(drive, info.as_ref(), sector_size, false);
     }
 
@@ -180,8 +188,19 @@ pub fn drive_layout<E: HostDriveEnumerator>(
     if first.as_ref().is_ok_and(describes_the_drive) {
         return first;
     }
+    debug!(
+        drive = %drive,
+        "512-byte sectors describe nothing on this drive; retrying the table at 4096"
+    );
     match layout_at_sector_size::<E>(drive, info.as_ref(), NATIVE_4K_SECTOR_SIZE, true) {
-        Ok(layout) if matches!(layout.kind, LayoutKind::Gpt) => Ok(layout),
+        Ok(layout) if matches!(layout.kind, LayoutKind::Gpt) => {
+            debug!(
+                drive = %drive,
+                sector_size = NATIVE_4K_SECTOR_SIZE,
+                "the drive's GPT is written in 4096-byte sectors"
+            );
+            Ok(layout)
+        }
         _ => first,
     }
 }

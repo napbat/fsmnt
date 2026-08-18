@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use tracing::debug;
+
 use fsmnt_device::{Disk, ImageFormat, ImageReader};
 
 use super::media::{self, MediaEntries};
@@ -193,6 +195,11 @@ pub(crate) fn read_image_layout(
         return layout_from_scan(path, options);
     }
     if let Some(sector_size) = options.sector_size {
+        debug!(
+            path = %path.display(),
+            sector_size,
+            "reading the image partition table in the sector size the caller stated"
+        );
         return layout_at_sector_size(path, sector_size, false);
     }
 
@@ -200,8 +207,19 @@ pub(crate) fn read_image_layout(
     if first.as_ref().is_ok_and(describes_the_media) {
         return first;
     }
+    debug!(
+        path = %path.display(),
+        "512-byte sectors describe nothing here; retrying the table at 4096"
+    );
     match layout_at_sector_size(path, NATIVE_4K_SECTOR_SIZE, true) {
-        Ok(view) if matches!(view.layout.kind, LayoutKind::Gpt) => Ok(view),
+        Ok(view) if matches!(view.layout.kind, LayoutKind::Gpt) => {
+            debug!(
+                path = %path.display(),
+                sector_size = NATIVE_4K_SECTOR_SIZE,
+                "the image is a dump of a 4Kn drive; its GPT reads in 4096-byte sectors"
+            );
+            Ok(view)
+        }
         _ => first,
     }
 }

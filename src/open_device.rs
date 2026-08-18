@@ -22,6 +22,8 @@ mod members;
 use std::io::{Read, Seek};
 use std::sync::Arc;
 
+use tracing::debug;
+
 use fsmnt_core::TargetFilesystem;
 use fsmnt_device::{
     DetectedBootSector, DriverRegistry, FilesystemOpenOptions, FilesystemRoot, HostDriveEnumerator,
@@ -350,6 +352,14 @@ pub fn open_device_at_offset<E: HostVolumeResolver>(
         .into());
     }
     let length = size_bytes.map_or(u64::MAX, |size| size - offset);
+    debug!(
+        drive = %drive,
+        offset,
+        length,
+        sector_size,
+        selection = ?source,
+        "opening raw drive bytes at a caller-supplied offset"
+    );
 
     let detected = detect_at_offset(reader, offset, length, sector_size)?;
     if matches!(
@@ -392,6 +402,15 @@ fn open_located<E: HostVolumeResolver>(
         filesystem,
         ..
     } = options;
+    debug!(
+        drive = %located.extent.drive(),
+        offset = located.extent.offset(),
+        length = located.extent.length(),
+        sector_size = located.sector_size,
+        origin = ?located.origin,
+        selection = ?source,
+        "opening a located partition"
+    );
     match source {
         SourceSelection::Auto => {
             open_logical_partition::<E>(located, None, drivers, &filesystem, &policy)
@@ -452,6 +471,15 @@ fn open_scanned_partition<E: HostVolumeResolver>(
             stride_flag(stride),
         )
     })?;
+    debug!(
+        drive = %drive,
+        partition,
+        stride,
+        offset,
+        length,
+        found = layout.partitions.len(),
+        "resolved a scanned ordinal to an extent on the drive"
+    );
 
     let located = LocatedPartition {
         extent: PhysicalExtent::new(drive.clone(), offset, length),

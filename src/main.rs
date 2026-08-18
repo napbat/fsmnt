@@ -2,18 +2,30 @@
 //!
 //! This file holds the clap definitions and the dispatch from a parsed
 //! command to its handler; the handlers themselves live in [`cli`].
+//!
+//! Every command takes one `SOURCE`, spelled the same way whether it is a
+//! directory, a disk image, or a drive ([`cli::source`]), so the way you say
+//! *where the bytes are* does not change with what is holding them. Which
+//! options a source kind accepts is checked after it is resolved, in
+//! [`cli::mount`], rather than encoded as a separate subcommand per kind.
 
 mod cli;
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
+
+use cli::logging::LogOptions;
+use cli::size::{SizeExpr, parse_sector_size, parse_size_expr};
 
 /// Mount filesystem sources as read-only virtual volumes (FUSE on Unix,
 /// Dokan on Windows).
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    #[command(flatten)]
+    log: LogOptions,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -80,7 +92,8 @@ impl FilesystemMountOptions {
 struct DetachOption {
     /// Mount in a background process and return as soon as the volume is
     /// ready, instead of blocking until it is unmounted. Stop it later with
-    /// `fsmnt unmount MOUNTPOINT`.
+    /// `fsmnt unmount MOUNTPOINT`. `--log-file` is kept, so a background
+    /// mount that fails can still say why.
     #[arg(long)]
     detach: bool,
 }
@@ -97,26 +110,34 @@ impl DetachOption {
 /// The `fsmnt` subcommands.
 #[derive(Subcommand)]
 enum Commands {
-    /// Mount a host directory as a read-only volume.
-    Mount {
-        /// Source directory to expose.
-        source: PathBuf,
+    /// List physical drives on this machine.
+    Drives,
 
-        /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
-        /// empty NTFS directory on Windows.
-        mountpoint: String,
+    /// List the partitions of a drive or a disk image.
+    Partitions(PartitionsArgs),
 
-        /// Volume label shown in the OS file manager.
-        #[arg(long, default_value = "fsmnt")]
-        volname: String,
+    /// Search a drive or a disk image for filesystems, wherever they sit.
+    ///
+    /// For media with no partition table, a corrupt one, or one that
+    /// disagrees with the bytes: reads the source once and reports every
+    /// offset that starts a filesystem, ready to pass to
+    /// `fsmnt mount SOURCE --offset`. ext backup superblocks are reported
+    /// as evidence for their filesystem, including the start they imply
+    /// when the primary is gone.
+    Scan(ScanArgs),
 
-        /// Filesystem type label reported to the OS.
-        #[arg(long, default_value = "fsmnt")]
-        fsname: String,
-
-        #[command(flatten)]
-        detach: DetachOption,
-    },
+    /// Mount a directory, a disk image, or a drive as a read-only volume.
+    ///
+    /// Images are raw, EWF (`.E01`/`.Ex01`), VHD or VHDX; drives are read
+    /// through the operating system's logical volume unless `--raw` says
+    /// otherwise. With neither `--partition` nor `--offset` the source must
+    /// itself start with a filesystem: an unpartitioned image or drive is
+    /// mounted whole, a partitioned one is refused with the command that
+    /// lists its partitions.
+    // Boxed because this variant carries every mount option there is and
+    // the others carry almost none; without it every `Commands` value would
+    // be as large as the largest one.
+    Mount(Box<MountArgs>),
 
     /// Unmount a volume, from anywhere.
     ///
@@ -129,206 +150,223 @@ enum Commands {
         /// (e.g. `Z:`) or directory on Windows.
         mountpoint: String,
     },
-
-    /// Mount a raw, EWF, VHD, or VHDX image (NTFS, FAT, exFAT, ext, APFS,
-    /// Btrfs, `BitLocker`) as a read-only volume.
-    MountImage {
-        /// Image path or first EWF segment (`.E01`/`.Ex01`). VHD/VHDX
-        /// differencing parents are resolved automatically. A whole-disk
-        /// image needs `--partition N` (list them with
-        /// `fsmnt partitions IMAGE`) or `--offset`; without either, the
-        /// decoded media must start with a filesystem.
-        image: PathBuf,
-
-        /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
-        /// empty NTFS directory on Windows.
-        mountpoint: String,
-
-        /// Partition to mount, as numbered by `fsmnt partitions IMAGE`
-        /// (0-based index over non-empty entries).
-        #[arg(long, conflicts_with = "offset")]
-        partition: Option<usize>,
-
-        /// Resolve `--partition` against a SYNTHETIC table reconstructed by
-        /// scanning the media for filesystem starts (`fsmnt partitions IMAGE
-        /// --scan` shows it), ignoring any partition table the image
-        /// carries. The ordinal is then "the N-th filesystem the scan
-        /// finds" — valid only for this image with the same `--stride`.
-        #[arg(long, requires = "partition", conflicts_with = "offset")]
-        scan: bool,
-
-        /// Distance in bytes between the positions `--scan` tests (a
-        /// filesystem that starts off a 4 KiB boundary needs 512).
-        #[arg(long, value_name = "BYTES", requires = "scan", default_value_t = fsmnt::DEFAULT_STRIDE)]
-        stride: u64,
-
-        /// Offset of the filesystem within the image, for media no partition
-        /// table describes: bytes (`270532608`), a binary or decimal
-        /// multiple (`258MiB`, `1M`, `270MB`), or sectors of
-        /// `--sector-size` (`528384s`). `fsmnt scan IMAGE` finds them.
-        #[arg(
-            long,
-            value_name = "SIZE",
-            value_parser = cli::size::parse_size_expr,
-            default_value = "0"
-        )]
-        offset: cli::size::SizeExpr,
-
-        /// Logical sector size of the imaged drive, in bytes (a power of two
-        /// of at least 512). Sets the unit for an `s`-suffixed `--offset`
-        /// and the unit the image's GPT/MBR is read in — a dump of a 4Kn
-        /// drive needs 4096. Detected when omitted.
-        #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
-        sector_size: Option<u32>,
-
-        /// Volume label shown in the OS file manager.
-        #[arg(long)]
-        volname: Option<String>,
-
-        /// `BitLocker` recovery password (48 digits, hyphen-separated
-        /// groups of six).
-        #[arg(long)]
-        recovery_password: Option<String>,
-
-        /// Path to a `BitLocker` .BEK startup key file.
-        #[arg(long)]
-        bek_file: Option<PathBuf>,
-
-        #[command(flatten)]
-        filesystem: FilesystemMountOptions,
-
-        #[command(flatten)]
-        detach: DetachOption,
-    },
-
-    /// List physical drives on this machine.
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    Drives,
-
-    /// List the partitions of a physical drive or a disk image.
-    Partitions {
-        /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`),
-        /// or the path to a raw, EWF, VHD, or VHDX image. Anything that
-        /// names an existing file, contains a path separator, or has a file
-        /// extension is treated as an image.
-        target: String,
-
-        /// Logical sector size the partition table is written in, in bytes
-        /// (a power of two of at least 512). A dump of a 4Kn drive needs
-        /// 4096; without this, 512 is tried first and 4096 second.
-        #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
-        sector_size: Option<u32>,
-
-        /// Ignore the image's partition table and print a SYNTHETIC one
-        /// reconstructed by scanning the media for filesystem starts. Its
-        /// numbering is what `mount-image --scan --partition N` uses.
-        /// Images only.
-        #[arg(long)]
-        scan: bool,
-
-        /// Distance in bytes between the positions `--scan` tests (a
-        /// filesystem that starts off a 4 KiB boundary needs 512).
-        #[arg(long, value_name = "BYTES", requires = "scan", default_value_t = fsmnt::DEFAULT_STRIDE)]
-        stride: u64,
-    },
-
-    /// Search an image for filesystems, wherever they sit.
-    ///
-    /// For media with no partition table, a corrupt one, or one that
-    /// disagrees with the bytes: reads the image once and reports every
-    /// offset that starts a filesystem, ready to pass to
-    /// `mount-image --offset`. ext backup superblocks are reported as
-    /// evidence for their filesystem, including the start they imply when
-    /// the primary is gone.
-    Scan {
-        /// Image path or first EWF segment.
-        image: PathBuf,
-
-        /// Distance between candidate offsets, in bytes. Filesystems start
-        /// on a block boundary, so the 4 KiB default finds them; use 512 to
-        /// search harder at eight times the cost.
-        #[arg(long, value_name = "BYTES", default_value_t = fsmnt::DEFAULT_STRIDE)]
-        stride: u64,
-
-        /// Logical sector size the offsets are also reported in.
-        #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
-        sector_size: Option<u32>,
-    },
-
-    /// Mount a partition from a physical drive (NTFS, FAT, exFAT, ext, APFS,
-    /// Btrfs, `BitLocker`).
-    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    MountDevice {
-        /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`).
-        drive: String,
-
-        /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
-        /// empty NTFS directory on Windows.
-        mountpoint: String,
-
-        /// Partition number (0-based index over non-empty entries).
-        #[arg(long, default_value_t = 0)]
-        partition: usize,
-
-        /// Bypass operating-system logical volumes and read physical
-        /// partition members directly.
-        #[arg(long, conflicts_with = "volume")]
-        raw: bool,
-
-        /// Select an operating-system logical volume by the identifier
-        /// reported when automatic selection is ambiguous.
-        #[arg(long, value_name = "ID")]
-        volume: Option<String>,
-
-        /// Add a raw member as `DRIVE:PARTITION` when automatic discovery
-        /// cannot enumerate it. May be repeated and requires `--raw`.
-        #[arg(long, value_name = "DRIVE:PARTITION", requires = "raw")]
-        member: Vec<String>,
-
-        /// Volume label shown in the OS file manager (defaults to the
-        /// drive model or ID).
-        #[arg(long)]
-        volname: Option<String>,
-
-        /// `BitLocker` recovery password (48 digits, hyphen-separated
-        /// groups of six).
-        #[arg(long)]
-        recovery_password: Option<String>,
-
-        /// Path to a `BitLocker` .BEK startup key file.
-        #[arg(long)]
-        bek_file: Option<PathBuf>,
-
-        /// Compose child mounts from the selected root's fstab. With no path,
-        /// reads /etc/fstab.
-        #[arg(
-            long,
-            value_name = "PATH",
-            num_args = 0..=1,
-            default_missing_value = "/etc/fstab"
-        )]
-        fstab: Option<String>,
-
-        #[command(flatten)]
-        filesystem: FilesystemMountOptions,
-
-        #[command(flatten)]
-        detach: DetachOption,
-    },
 }
 
-/// Run the selected subcommand, reporting failures by message.
+/// Everything `fsmnt mount` accepts.
 ///
-/// Returning the error from `main` would print its `Debug` form, which hides
-/// the guidance the error messages carry (which partition to pick, which
-/// credential is missing) behind a struct dump.
-fn main() -> std::process::ExitCode {
-    match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error: {error}");
-            std::process::ExitCode::FAILURE
-        }
+/// One option set for all three source kinds; which of them a given source
+/// can use is checked once the source is resolved (see
+/// [`cli::mount::handle_mount`]), so the error names the option and what the
+/// source turned out to be instead of hiding the option in another command.
+#[derive(Args, Clone, Debug)]
+#[command(group = ArgGroup::new("source_kind").multiple(false))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one command-line flag, which clap represents as a bool; \
+              the alternative the lint suggests cannot be expressed in an Args derive"
+)]
+struct MountArgs {
+    /// What to mount: a directory, the path to a raw/EWF/VHD/VHDX image, or
+    /// a drive — the ID `fsmnt drives` prints (`0`, `sda`, `disk2`) or its
+    /// device path (`\\.\PhysicalDrive0`, `/dev/sda`, `/dev/disk2`). Taken
+    /// in that order: an existing directory, an existing file, a device
+    /// path, then anything with a path separator or a file extension is an
+    /// image and a bare token is a drive ID.
+    source: String,
+
+    /// Mountpoint: a directory on Unix; a drive letter (e.g. `Z:`) or
+    /// empty NTFS directory on Windows.
+    mountpoint: String,
+
+    /// Read SOURCE as a host directory whatever it looks like.
+    #[arg(long, group = "source_kind")]
+    dir: bool,
+
+    /// Read SOURCE as a disk image path without consulting the filesystem,
+    /// so a path that is wrong fails as an image and names the file.
+    #[arg(long, group = "source_kind")]
+    image: bool,
+
+    /// Read SOURCE as a physical drive; a device path is normalised to the
+    /// ID `fsmnt drives` prints.
+    #[arg(long, group = "source_kind")]
+    drive: bool,
+
+    /// Partition to mount, as numbered by `fsmnt partitions SOURCE`
+    /// (0-based index over non-empty entries). Images and drives.
+    #[arg(long, conflicts_with = "offset")]
+    partition: Option<usize>,
+
+    /// Offset of the filesystem within the source, for media no partition
+    /// table describes: bytes (`270532608`), a binary or decimal multiple
+    /// (`258MiB`, `1M`, `270MB`), or sectors of `--sector-size`
+    /// (`528384s`). On a drive this is a physical offset, past any logical
+    /// volume the operating system lays over it. `fsmnt scan SOURCE` finds
+    /// them. Images and drives.
+    #[arg(long, value_name = "SIZE", value_parser = parse_size_expr, conflicts_with = "partition")]
+    offset: Option<SizeExpr>,
+
+    /// Resolve `--partition` against a SYNTHETIC table reconstructed by
+    /// scanning the media for filesystem starts (`fsmnt partitions SOURCE
+    /// --scan` shows it), ignoring any partition table the source carries.
+    /// The ordinal is then "the N-th filesystem the scan finds" — valid
+    /// only for this source at this stride. Images and drives.
+    #[arg(long, requires = "partition", conflicts_with = "offset")]
+    scan: bool,
+
+    /// Distance in bytes between the positions `--scan` tests (a
+    /// filesystem that starts off a 4 KiB boundary needs 512).
+    #[arg(long, value_name = "BYTES", requires = "scan", default_value_t = fsmnt::DEFAULT_STRIDE)]
+    stride: u64,
+
+    /// Logical sector size of the media, in bytes (a power of two of at
+    /// least 512). Sets the unit for an `s`-suffixed `--offset` and the
+    /// unit the GPT/MBR is read in — a dump of a 4Kn drive, or a 4Kn drive
+    /// the operating system reports as 512e, needs 4096. Detected, or taken
+    /// from the drive, when omitted. Images and drives.
+    #[arg(long, value_name = "BYTES", value_parser = parse_sector_size)]
+    sector_size: Option<u32>,
+
+    /// Bypass operating-system logical volumes and read physical partition
+    /// members directly. Drives only.
+    #[arg(long)]
+    raw: bool,
+
+    /// Select an operating-system logical volume by the identifier the
+    /// VOLUME column of `fsmnt partitions DRIVE` prints, for when automatic
+    /// selection is ambiguous. Drives only.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["raw", "offset", "scan"])]
+    volume: Option<String>,
+
+    /// Add a raw member as `DRIVE:PARTITION` when automatic discovery
+    /// cannot enumerate it. May be repeated and requires `--raw`. Drives
+    /// only.
+    #[arg(long, value_name = "DRIVE:PARTITION", requires = "raw")]
+    member: Vec<String>,
+
+    /// Compose child mounts from the selected root's fstab. With no path,
+    /// reads /etc/fstab. Children come from the other partitions of the
+    /// same image, or from the partitions of every host drive. Images and
+    /// drives.
+    #[arg(
+        long,
+        value_name = "PATH",
+        num_args = 0..=1,
+        default_missing_value = "/etc/fstab"
+    )]
+    fstab: Option<String>,
+
+    /// Volume label shown in the OS file manager. Defaults to the directory
+    /// name, the image file stem, or the drive model.
+    #[arg(long)]
+    volname: Option<String>,
+
+    /// Filesystem type label reported to the OS. Defaults to `fsmnt-dir`
+    /// for a directory, and to the detected filesystem (`ntfs`, `fat32`,
+    /// `extfs`, …) for an image or a drive.
+    #[arg(long)]
+    fsname: Option<String>,
+
+    /// `BitLocker` recovery password (48 digits, hyphen-separated groups of
+    /// six). Images and drives.
+    #[arg(long)]
+    recovery_password: Option<String>,
+
+    /// Path to a `BitLocker` .BEK startup key file. Images and drives.
+    #[arg(long)]
+    bek_file: Option<PathBuf>,
+
+    #[command(flatten)]
+    filesystem: FilesystemMountOptions,
+
+    #[command(flatten)]
+    detach: DetachOption,
+}
+
+/// Everything `fsmnt partitions` accepts.
+#[derive(Args, Clone, Debug)]
+#[command(group = ArgGroup::new("source_kind").multiple(false))]
+struct PartitionsArgs {
+    /// Drive ID as shown by `fsmnt drives` (e.g. `0`, `sda`, `disk2`) or
+    /// its device path, or the path to a raw, EWF, VHD, or VHDX image.
+    /// Anything that names an existing file, contains a path separator, or
+    /// has a file extension is read as an image.
+    source: String,
+
+    /// Read SOURCE as a disk image path without consulting the filesystem.
+    #[arg(long, group = "source_kind")]
+    image: bool,
+
+    /// Read SOURCE as a physical drive; a device path is normalised to the
+    /// ID `fsmnt drives` prints.
+    #[arg(long, group = "source_kind")]
+    drive: bool,
+
+    /// Logical sector size the partition table is written in, in bytes (a
+    /// power of two of at least 512). A dump of a 4Kn drive needs 4096;
+    /// without this, an image tries 512 first and 4096 second, and a drive
+    /// uses the size the operating system reports.
+    #[arg(long, value_name = "BYTES", value_parser = parse_sector_size)]
+    sector_size: Option<u32>,
+
+    /// Ignore the source's partition table and print a SYNTHETIC one
+    /// reconstructed by scanning the media for filesystem starts. Its
+    /// numbering is what `fsmnt mount --scan --partition N` uses.
+    #[arg(long)]
+    scan: bool,
+
+    /// Distance in bytes between the positions `--scan` tests (a
+    /// filesystem that starts off a 4 KiB boundary needs 512).
+    #[arg(long, value_name = "BYTES", requires = "scan", default_value_t = fsmnt::DEFAULT_STRIDE)]
+    stride: u64,
+}
+
+/// Everything `fsmnt scan` accepts.
+#[derive(Args, Clone, Debug)]
+#[command(group = ArgGroup::new("source_kind").multiple(false))]
+struct ScanArgs {
+    /// Drive ID as shown by `fsmnt drives` or its device path, or the path
+    /// to a raw, EWF, VHD, or VHDX image.
+    source: String,
+
+    /// Read SOURCE as a disk image path without consulting the filesystem.
+    #[arg(long, group = "source_kind")]
+    image: bool,
+
+    /// Read SOURCE as a physical drive; a device path is normalised to the
+    /// ID `fsmnt drives` prints.
+    #[arg(long, group = "source_kind")]
+    drive: bool,
+
+    /// Distance between candidate offsets, in bytes. Filesystems start on a
+    /// block boundary, so the 4 KiB default finds them; use 512 to search
+    /// harder at eight times the cost.
+    #[arg(long, value_name = "BYTES", default_value_t = fsmnt::DEFAULT_STRIDE)]
+    stride: u64,
+
+    /// Logical sector size the offsets are also reported in.
+    #[arg(long, value_name = "BYTES", value_parser = parse_sector_size)]
+    sector_size: Option<u32>,
+}
+
+impl MountArgs {
+    /// Which kind of source the command line stated, if it stated one.
+    fn source_kind(&self) -> cli::source::SourceKind {
+        cli::source::SourceKind::from_flags(self.dir, self.image, self.drive)
+    }
+}
+
+impl PartitionsArgs {
+    /// Which kind of source the command line stated, if it stated one.
+    fn source_kind(&self) -> cli::source::SourceKind {
+        cli::source::SourceKind::from_flags(false, self.image, self.drive)
+    }
+}
+
+impl ScanArgs {
+    /// Which kind of source the command line stated, if it stated one.
+    fn source_kind(&self) -> cli::source::SourceKind {
+        cli::source::SourceKind::from_flags(false, self.image, self.drive)
     }
 }
 
@@ -336,29 +374,37 @@ impl Commands {
     /// The mountpoint to wait for when this command hands its mount to a
     /// background process, or `None` when it runs in the foreground.
     fn detached_mountpoint(&self) -> Option<&str> {
-        let (detach, mountpoint) = match self {
-            Self::Mount {
-                detach, mountpoint, ..
-            }
-            | Self::MountImage {
-                detach, mountpoint, ..
-            } => (detach, mountpoint),
-            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-            Self::MountDevice {
-                detach, mountpoint, ..
-            } => (detach, mountpoint),
-            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-            Self::Drives => return None,
-            Self::Partitions { .. } | Self::Scan { .. } | Self::Unmount { .. } => return None,
-        };
-        detach.requested().then_some(mountpoint.as_str())
+        match self {
+            Self::Mount(args) => args.detach.requested().then_some(args.mountpoint.as_str()),
+            Self::Drives | Self::Partitions(_) | Self::Scan(_) | Self::Unmount { .. } => None,
+        }
     }
 }
 
-/// Parse the command line and dispatch to the selected subcommand.
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// Run the selected subcommand, reporting failures through the subscriber.
+///
+/// Returning the error from `main` would print its `Debug` form, which hides
+/// the guidance the error messages carry (which partition to pick, which
+/// credential is missing) behind a struct dump. It goes out as an `error!`
+/// event so it lands in `--log-file` alongside everything else — except when
+/// the subscriber is what failed, which nothing but stderr can report.
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    if let Err(error) = cli::logging::init(&cli.log) {
+        eprintln!("error: {error}");
+        return std::process::ExitCode::FAILURE;
+    }
+    match run(cli) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 
+/// Dispatch the parsed command line to its handler.
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--detach`: hand the whole command to a background process and wait
     // here only until its volume is live.
     if let Some(mountpoint) = cli.command.detached_mountpoint() {
@@ -370,84 +416,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
-        Commands::Mount {
-            source,
-            mountpoint,
-            volname,
-            fsname,
-            detach: _,
-        } => cli::handle_mount(&source, &mountpoint, &volname, &fsname),
-        Commands::Unmount { mountpoint } => cli::handle_unmount(&mountpoint),
-        Commands::MountImage {
-            image,
-            mountpoint,
-            partition,
-            scan,
-            stride,
-            offset,
-            sector_size,
-            volname,
-            recovery_password,
-            bek_file,
-            filesystem,
-            detach: _,
-        } => cli::handle_mount_image(cli::MountImageOptions {
-            image: &image,
-            mountpoint: &mountpoint,
-            partition,
-            scan_stride: scan.then_some(stride),
-            offset,
-            sector_size,
-            volname: volname.as_deref(),
-            recovery_password,
-            bek_file: bek_file.as_deref(),
-            filesystem: filesystem.open_options(),
-            best_effort_reads: filesystem.best_effort_reads,
-        }),
-        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Commands::Drives => cli::handle_drives(),
-        Commands::Partitions {
-            target,
-            sector_size,
-            scan,
-            stride,
-        } => cli::handle_partitions(&target, sector_size, scan.then_some(stride)),
-        Commands::Scan {
-            image,
-            stride,
-            sector_size,
-        } => cli::handle_scan(&cli::ScanImageOptions {
-            image: &image,
-            stride,
-            sector_size,
-        }),
-        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-        Commands::MountDevice {
-            drive,
-            mountpoint,
-            partition,
-            raw,
-            volume,
-            member,
-            volname,
-            recovery_password,
-            bek_file,
-            fstab,
-            filesystem,
-            detach: _,
-        } => cli::handle_mount_device(cli::MountDeviceOptions {
-            drive: &drive,
-            partition,
-            raw,
-            volume: volume.as_deref(),
-            members: &member,
-            mountpoint: &mountpoint,
-            volname: volname.as_deref(),
-            recovery_password,
-            bek_file: bek_file.as_deref(),
-            fstab: fstab.as_deref(),
-            filesystem: filesystem.open_options(),
-            best_effort_reads: filesystem.best_effort_reads,
-        }),
+        Commands::Partitions(args) => cli::handle_partitions(&args),
+        Commands::Scan(args) => cli::handle_scan(&args),
+        Commands::Mount(args) => cli::handle_mount(&args),
+        Commands::Unmount { mountpoint } => cli::handle_unmount(&mountpoint),
     }
 }

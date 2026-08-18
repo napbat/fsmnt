@@ -15,6 +15,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use tracing::debug;
+
 use fsmnt_core::{Fstab, FstabEntry, FstabSource, MountNamespace, TargetFilesystem};
 use fsmnt_device::{
     DriverRegistry, FilesystemOpenOptions, FilesystemRoot, HostDriveId, HostVolumeResolver,
@@ -173,10 +175,22 @@ fn compose_fstab_namespace(
         .map(normalize_uuid)
         .collect();
     let resolved = discover_uuid_addresses(root_fs.as_ref(), &requested_uuids, siblings)?;
+    debug!(
+        path = fstab_path,
+        entries = entries.len(),
+        requested = requested_uuids.len(),
+        resolved = resolved.len(),
+        "read the guest's fstab and located the volumes it names"
+    );
 
     let mut namespace = MountNamespace::new(root_fs);
     for entry in entries {
         if entry.has_option("noauto") || is_virtual_filesystem(entry) {
+            debug!(
+                mount_point = entry.mount_point(),
+                filesystem_type = entry.filesystem_type(),
+                "skipped an fstab entry: noauto, or a filesystem the kernel makes up"
+            );
             continue;
         }
         let result = open_fstab_entry(entry, siblings, &resolved).and_then(|child| {
@@ -186,6 +200,11 @@ fn compose_fstab_namespace(
         });
         if let Err(error) = result {
             if entry.has_option("nofail") {
+                debug!(
+                    mount_point = entry.mount_point(),
+                    error = %error,
+                    "skipped an fstab entry marked nofail that could not be attached"
+                );
                 continue;
             }
             return Err(format!(
@@ -194,6 +213,11 @@ fn compose_fstab_namespace(
             )
             .into());
         }
+        debug!(
+            mount_point = entry.mount_point(),
+            source = ?entry.source(),
+            "attached an fstab child mount"
+        );
     }
     Ok(namespace)
 }

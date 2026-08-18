@@ -5,6 +5,11 @@
 //! re-run in a background process and the foreground one only waits until
 //! the volume is actually usable, so a script can go on to the next mount
 //! and later stop each one by mountpoint with `fsmnt unmount`.
+//!
+//! Only `--detach` itself is dropped from the arguments handed on, so
+//! `--log-file` survives into the background process: its console output is
+//! discarded, and the log file is then the only place it can say why a mount
+//! failed.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -86,9 +91,9 @@ pub fn is_background_mount() -> bool {
 ///
 /// Returns an error if this executable's path cannot be determined, the
 /// background process cannot be started, it exits before the volume is
-/// ready (its own diagnostics are lost with its output, so the message
-/// suggests re-running in the foreground), or the volume does not appear
-/// within [`READY_TIMEOUT`].
+/// ready (its console output is gone with its console, so the message
+/// suggests re-running in the foreground — or `--log-file`, which it keeps),
+/// or the volume does not appear within [`READY_TIMEOUT`].
 pub fn spawn(mountpoint: &str) -> Result<u32, Box<dyn std::error::Error>> {
     let program = std::env::current_exe()?;
     let flag = std::ffi::OsStr::new(DETACH_FLAG);
@@ -121,7 +126,7 @@ pub fn spawn(mountpoint: &str) -> Result<u32, Box<dyn std::error::Error>> {
         if let Some(status) = child.try_wait()? {
             return Err(format!(
                 "the background mount exited before {mountpoint} was ready ({status}); \
-                 re-run without {DETACH_FLAG} to see why"
+                 re-run with --log-file, or without {DETACH_FLAG}, to see why"
             )
             .into());
         }

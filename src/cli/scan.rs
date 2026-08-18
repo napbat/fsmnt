@@ -1,63 +1,119 @@
-//! The `scan` subcommand: look for filesystems anywhere in an image.
-
-use std::path::Path;
+//! The `scan` subcommand: look for filesystems anywhere in a medium.
+//!
+//! A drive whose partition table was wiped and an image of one are the same
+//! forensic situation, so both are searched the same way and produce the
+//! same table; only the identity line at the top differs, because an image
+//! has a container format and a drive has a model.
 
 use fsmnt::{ScanHit, ScanHitKind, ScanOptions};
 
-use super::format_size;
+use super::format_media_size;
 use super::size::DEFAULT_SECTOR_SIZE;
+use super::source::{Source, resolve};
+use crate::ScanArgs;
 
-/// Everything `scan` needs.
-pub(crate) struct ScanImageOptions<'a> {
-    /// Image path, or the first segment of an EWF set.
-    pub(crate) image: &'a Path,
-    /// Distance between candidate positions, in bytes.
-    pub(crate) stride: u64,
-    /// Sector size the offset column is also reported in.
-    pub(crate) sector_size: Option<u32>,
+/// Search a drive or a disk image for filesystem starts and print the
+/// candidate offsets.
+///
+/// # Errors
+///
+/// Returns an error if the source is a directory, cannot be resolved, or
+/// cannot be read to the end.
+pub(crate) fn handle_scan(args: &ScanArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let source = resolve(&args.source, args.source_kind())?;
+    let hits = match &source {
+        Source::Directory(path) => {
+            return Err(format!(
+                "{} is a directory; this command takes a disk image or a drive",
+                path.display()
+            )
+            .into());
+        }
+        Source::Image(path) => {
+            let reader = fsmnt::ImageReader::open(path)?;
+            println!(
+                "{}: {} image, {}",
+                path.display(),
+                reader.format(),
+                format_media_size(reader.len()),
+            );
+            drop(reader);
+            tracing::info!(
+                "scanning {source} every {} bytes for filesystem starts",
+                args.stride
+            );
+            fsmnt::scan_image_with_options(path, ScanOptions::new().with_stride(args.stride))?
+        }
+        Source::Drive(drive) => scan_drive(args, &source, drive)?,
+    };
+
+    print_hits(args, &source, &hits);
+    Ok(())
 }
 
-/// Scan an image for filesystem starts and print the candidate offsets.
-pub(crate) fn handle_scan(
-    options: &ScanImageOptions<'_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let image = options.image;
-    let sector_size = options.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE);
-    let reader = fsmnt::ImageReader::open(image)?;
-    println!(
-        "{}: {} image, {}",
-        image.display(),
-        reader.format(),
-        format_size(reader.len()),
-    );
-    println!(
-        "Scanning every {} bytes for filesystem starts...",
-        options.stride
-    );
-    drop(reader);
+/// Scan a physical drive, announcing it the way an image announces itself.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn scan_drive(
+    args: &ScanArgs,
+    source: &Source,
+    drive: &fsmnt::device::HostDriveId,
+) -> Result<Vec<ScanHit>, Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+    use fsmnt::device::HostDriveEnumerator;
 
-    let hits =
-        fsmnt::scan_image_with_options(image, ScanOptions::new().with_stride(options.stride))?;
+    let info = HostDrives::get_drive_info(drive).ok();
+    let model = info
+        .as_ref()
+        .and_then(|info| info.model.as_deref())
+        .unwrap_or("unknown model");
+    let size = info
+        .as_ref()
+        .and_then(|info| info.size_bytes)
+        .map_or_else(|| "unknown".to_string(), format_media_size);
+    println!("{drive}: drive ({model}), {size}");
+    tracing::info!(
+        "scanning {source} every {} bytes for filesystem starts",
+        args.stride
+    );
+    Ok(fsmnt::scan_drive::<HostDrives>(
+        drive,
+        ScanOptions::new().with_stride(args.stride),
+    )?)
+}
+
+/// Physical drives cannot be scanned on this platform.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn scan_drive(
+    _args: &ScanArgs,
+    _source: &Source,
+    _drive: &fsmnt::device::HostDriveId,
+) -> Result<Vec<ScanHit>, Box<dyn std::error::Error>> {
+    Err(super::NO_DRIVE_SUPPORT.into())
+}
+
+/// Print what the scan found, and the two ways to mount one of them.
+fn print_hits(args: &ScanArgs, source: &Source, hits: &[ScanHit]) {
+    let sector_size = args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE);
     if hits.is_empty() {
         println!(
-            "\nNo filesystems found. A filesystem whose start is not aligned to {} bytes needs \
-             a finer scan: --stride 512.",
-            options.stride
+            "\nNo filesystems found. A filesystem whose start is not aligned to {} bytes needs a \
+             finer scan: --stride 512.",
+            args.stride
         );
-        return Ok(());
+        return;
     }
 
-    // The `#` column is the SYNTHETIC ordinal `mount-image --scan --partition`
-    // takes: the position among mountable hits, in scan order — the same
-    // numbering `partitions --scan` prints. It exists only for this image at
-    // this stride; partition tables get no number because they are not
-    // mountable.
+    // The `#` column is the SYNTHETIC ordinal `fsmnt mount --scan
+    // --partition` takes: the position among mountable hits, in scan order —
+    // the same numbering `partitions --scan` prints. It exists only for this
+    // medium at this stride; partition tables get no number because they are
+    // not mountable.
     println!(
         "\n{:>4}  {:>14} {:>14}  {:<22} {:>12}  NOTE",
         "#", "OFFSET", "SECTOR", "TYPE", "SIZE"
     );
     let mut ordinal = 0_usize;
-    for hit in &hits {
+    for hit in hits {
         let number = if hit.mount_offset().is_some() {
             let shown = ordinal.to_string();
             ordinal += 1;
@@ -70,26 +126,26 @@ pub(crate) fn handle_scan(
             hit.offset,
             sector_column(hit.offset, sector_size),
             type_column(hit),
-            hit.size_bytes.map_or_else(|| "-".to_string(), format_size),
+            hit.size_bytes
+                .map_or_else(|| "-".to_string(), format_media_size),
             note_column(hit),
         );
     }
 
     if let Some(first) = hits.iter().find(|hit| hit.mount_offset().is_some()) {
         let offset = first.mount_offset().unwrap_or(first.offset);
-        let stride_flag = if options.stride == fsmnt::DEFAULT_STRIDE {
+        let stride_flag = if args.stride == fsmnt::DEFAULT_STRIDE {
             String::new()
         } else {
-            format!(" --stride {}", options.stride)
+            format!(" --stride {}", args.stride)
         };
         println!(
-            "\nMount one with: fsmnt mount-image {0} <MOUNTPOINT> --offset {offset}\n\
-             or by its # above:  fsmnt mount-image {0} <MOUNTPOINT> --scan{stride_flag} \
-             --partition <#>   (# is synthetic — from this scan, not from the image)",
-            image.display(),
+            "\nMount one with: fsmnt mount {source} <MOUNTPOINT> --offset {offset}\n\
+             or by its # above:  fsmnt mount {source} <MOUNTPOINT> --scan{stride_flag} \
+             --partition <#>   (# is synthetic — from this scan, not from the {})",
+            source.describe(),
         );
     }
-    Ok(())
 }
 
 /// The offset expressed in sectors, or `-` when it is not a whole number of
@@ -126,7 +182,7 @@ fn note_column(hit: &ScanHit) -> String {
                 format!("backup superblock of group {group}; filesystem start would be at {start}")
             }
             None => format!(
-                "backup superblock of group {group}; its filesystem starts before this image"
+                "backup superblock of group {group}; its filesystem starts before this medium"
             ),
         },
         ScanHitKind::Filesystem(_) => backups_note(hit),

@@ -1,247 +1,339 @@
-//! The mounting subcommands: host directories, disk images, and devices.
+//! The `mount` subcommand: one option set, three kinds of source.
+//!
+//! Resolving the source comes first, because it decides which options mean
+//! anything ([`check_options`]) and which opener runs. Locating the
+//! filesystem inside it is then the same question for an image and a drive
+//! — a partition ordinal, a scanned ordinal, or a byte offset — and only
+//! the function that answers it differs.
 
-use super::size::{DEFAULT_SECTOR_SIZE, SizeExpr};
-use super::{block_on_mount, build_registry, ensure_unix_mountpoint, fs_label, warn_if_truncated};
+use std::path::Path;
+
+use tracing::info;
 
 use fsmnt::DirFilesystem;
 
-/// Mount `source` at `mountpoint` and block until Ctrl+C.
-pub(crate) fn handle_mount(
-    source: &std::path::Path,
-    mountpoint: &str,
-    volname: &str,
-    fsname: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !source.is_dir() {
-        return Err(format!("source is not a directory: {}", source.display()).into());
+use super::size::DEFAULT_SECTOR_SIZE;
+use super::source::{Source, SourceKind, check_applicability, resolve};
+use super::{
+    block_on_mount, build_registry, ensure_unix_mountpoint, fs_label, warn_if_truncated,
+    warn_layout_origin,
+};
+use crate::MountArgs;
+
+/// Options that describe a filesystem inside a medium: an image or a drive,
+/// never a host directory that already is one.
+const MEDIA: &[SourceKind] = &[SourceKind::Image, SourceKind::Drive];
+
+/// Options that only exist because an operating system has its own view of
+/// a drive's partitions.
+const DRIVE_ONLY: &[SourceKind] = &[SourceKind::Drive];
+
+/// Mount whatever `SOURCE` names, and block until the volume is released.
+///
+/// # Errors
+///
+/// Returns an error if the source cannot be resolved, an option does not
+/// apply to what it resolved to, the filesystem cannot be located or
+/// opened, or the mount backend refuses the mountpoint.
+pub(crate) fn handle_mount(args: &MountArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let source = resolve(&args.source, args.source_kind())?;
+    check_options(args, &source)?;
+    match &source {
+        Source::Directory(path) => mount_directory(args, path),
+        Source::Image(path) => mount_image(args, &source, path),
+        Source::Drive(drive) => mount_drive(args, &source, drive),
     }
+}
 
-    ensure_unix_mountpoint(mountpoint)?;
+/// Refuse the options this source kind has no use for.
+///
+/// clap already rejects the combinations that are wrong on their own
+/// (`--offset` with `--partition`, `--member` without `--raw`); this is the
+/// other half, where the option is fine but the source is not the kind it
+/// was written for.
+pub(super) fn check_options(
+    args: &MountArgs,
+    source: &Source,
+) -> Result<(), Box<dyn std::error::Error>> {
+    check_applicability(
+        source,
+        &[
+            ("--partition", args.partition.is_some(), MEDIA),
+            ("--offset", args.offset.is_some(), MEDIA),
+            ("--scan", args.scan, MEDIA),
+            ("--sector-size", args.sector_size.is_some(), MEDIA),
+            ("--raw", args.raw, DRIVE_ONLY),
+            ("--volume", args.volume.is_some(), DRIVE_ONLY),
+            ("--member", !args.member.is_empty(), DRIVE_ONLY),
+            ("--fstab", args.fstab.is_some(), MEDIA),
+            (
+                "--recovery-password",
+                args.recovery_password.is_some(),
+                MEDIA,
+            ),
+            ("--bek-file", args.bek_file.is_some(), MEDIA),
+            ("--fs-root", args.filesystem.fs_root.is_some(), MEDIA),
+            (
+                "--no-journal-replay",
+                args.filesystem.no_journal_replay,
+                MEDIA,
+            ),
+            (
+                "--backup-superblock",
+                args.filesystem.backup_superblock.is_some(),
+                MEDIA,
+            ),
+            ("--salvage", args.filesystem.salvage, MEDIA),
+            (
+                "--best-effort-reads",
+                args.filesystem.best_effort_reads,
+                MEDIA,
+            ),
+        ],
+    )
+}
 
-    let fs = DirFilesystem::new(source);
+/// Expose a host directory as a volume of its own.
+fn mount_directory(args: &MountArgs, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_unix_mountpoint(&args.mountpoint)?;
+
+    let volname = args.volname.clone().unwrap_or_else(|| {
+        path.file_name().map_or_else(
+            || "fsmnt".to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    });
     block_on_mount(
-        Box::new(fs),
-        mountpoint,
-        "fsmnt-dir",
-        volname,
-        fsname,
+        Box::new(DirFilesystem::new(path)),
+        &args.mountpoint,
+        "directory",
+        &volname,
+        args.fsname.as_deref().unwrap_or("fsmnt-dir"),
         0,
         None,
     )
 }
 
-/// Everything `mount-image` needs to open and mount an image container.
-pub(crate) struct MountImageOptions<'a> {
-    /// Image path, or the first segment of an EWF set.
-    pub(crate) image: &'a std::path::Path,
-    /// Where to attach the mounted volume.
-    pub(crate) mountpoint: &'a str,
-    /// Partition ordinal to mount, as listed by `fsmnt partitions IMAGE`.
-    pub(crate) partition: Option<usize>,
-    /// When set, resolve the ordinal against a synthetic table reconstructed
-    /// by scanning the media with this stride, not the image's own table.
-    pub(crate) scan_stride: Option<u64>,
-    /// Offset of the filesystem; used when no partition is selected. A
-    /// sector count here is resolved against `sector_size`.
-    pub(crate) offset: SizeExpr,
-    /// Logical sector size of the imaged drive, if the caller stated one.
-    pub(crate) sector_size: Option<u32>,
-    /// Volume label override.
-    pub(crate) volname: Option<&'a str>,
-    /// `BitLocker` recovery password, if supplied.
-    pub(crate) recovery_password: Option<String>,
-    /// `BitLocker` startup-key file, if supplied.
-    pub(crate) bek_file: Option<&'a std::path::Path>,
-    /// Filesystem-level open options: root selector and journal-replay choice.
-    pub(crate) filesystem: fsmnt::device::FilesystemOpenOptions,
-    /// Zero-fill (and count) what the image cannot provide instead of
-    /// failing the read.
-    pub(crate) best_effort_reads: bool,
-}
-
-/// Mount a supported filesystem image container.
-pub(crate) fn handle_mount_image(
-    options: MountImageOptions<'_>,
+/// Mount a filesystem inside a raw, EWF, VHD, or VHDX image.
+fn mount_image(
+    args: &MountArgs,
+    source: &Source,
+    path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let image = options.image;
-    let drivers = build_registry(options.recovery_password, options.bek_file)?;
-    let mut open_options = fsmnt::ImageOpenOptions::new()
-        .with_filesystem_options(options.filesystem)
-        .with_best_effort_reads(options.best_effort_reads);
-    if let Some(sector_size) = options.sector_size {
-        open_options = open_options.with_sector_size(sector_size);
+    let drivers = build_registry(args.recovery_password.clone(), args.bek_file.as_deref())?;
+    let mut options = fsmnt::ImageOpenOptions::new()
+        .with_filesystem_options(args.filesystem.open_options())
+        .with_best_effort_reads(args.filesystem.best_effort_reads);
+    if let Some(sector_size) = args.sector_size {
+        options = options.with_sector_size(sector_size);
     }
-    if let Some(stride) = options.scan_stride {
-        open_options = open_options.with_scan(stride);
+    if args.scan {
+        options = options.with_scan(args.stride);
     }
-    let open_options = match options.partition {
-        Some(partition) => open_options.with_partition(partition),
-        None => open_options.with_offset(options.offset.resolve(sector_size(options.sector_size))?),
+    options = match args.partition {
+        Some(partition) => options.with_partition(partition),
+        None => options.with_offset(requested_offset(args)?),
     };
-    let opened = fsmnt::open_image_with_options(image, &drivers, open_options)?;
 
-    ensure_unix_mountpoint(options.mountpoint)?;
+    let opened = match args.fstab.as_deref() {
+        Some(fstab) => {
+            let opened = fsmnt::open_image_with_fstab(path, &drivers, options, fstab)?;
+            info!("composed child mounts from {fstab}");
+            opened
+        }
+        None => fsmnt::open_image_with_options(path, &drivers, options)?,
+    };
 
-    let volname = options.volname.map_or_else(
-        || {
-            image
-                .file_stem()
-                .map_or_else(|| "fsmnt-image".to_string(), |s| s.to_string_lossy().into())
-        },
-        ToString::to_string,
-    );
+    ensure_unix_mountpoint(&args.mountpoint)?;
 
-    println!(
-        "Detected {:?} at offset {} in {} image {}",
+    let volname = args.volname.clone().unwrap_or_else(|| {
+        path.file_stem().map_or_else(
+            || "fsmnt-image".to_string(),
+            |stem| stem.to_string_lossy().into_owned(),
+        )
+    });
+    let label = fs_label(opened.detected);
+
+    info!(
+        "detected {:?} at offset {} in {} image {}",
         opened.detected,
         opened.offset,
         opened.format,
-        image.display(),
+        path.display(),
     );
-    // Say what the partition ordinal was resolved against whenever that was
-    // not simply the table at the front of the image — the provenance of an
-    // offset matters as much as the offset.
-    match opened.layout_origin {
-        Some(fsmnt::LayoutOrigin::Scan { stride }) => eprintln!(
-            "notice: partition {} is an entry of a SYNTHETIC table reconstructed by scanning the \
-             media every {stride} bytes — no partition table was read from the image, and the \
-             number is valid only for this image at this stride",
-            options.partition.unwrap_or_default()
-        ),
-        Some(fsmnt::LayoutOrigin::BackupTable) => eprintln!(
-            "notice: the partition table was recovered from the GPT backup header in the last \
-             sector; the primary at the front of the image is damaged"
-        ),
-        Some(fsmnt::LayoutOrigin::Table | fsmnt::LayoutOrigin::None) | None => {}
-    }
+    warn_layout_origin(opened.layout_origin, args.partition, source);
     warn_if_truncated(opened.truncated_by, opened.size_bytes, "image");
     block_on_mount(
         opened.filesystem,
-        options.mountpoint,
-        fs_label(opened.detected),
+        &args.mountpoint,
+        label,
         &volname,
-        fs_label(opened.detected),
+        args.fsname.as_deref().unwrap_or(label),
         opened.size_bytes,
         opened.substitutions,
     )
 }
 
-/// The sector size a size expression's `s` suffix counts.
-fn sector_size(requested: Option<u32>) -> u32 {
-    requested.unwrap_or(DEFAULT_SECTOR_SIZE)
+/// The byte offset `--offset` asks for, or the start of the media.
+fn requested_offset(args: &MountArgs) -> Result<u64, Box<dyn std::error::Error>> {
+    let Some(offset) = args.offset else {
+        return Ok(0);
+    };
+    Ok(offset.resolve(args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE))?)
 }
 
-/// Everything `mount-device` needs to open and mount a drive partition.
+/// Mount a filesystem on a physical drive.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-pub(crate) struct MountDeviceOptions<'a> {
-    /// Drive ID as printed by `fsmnt drives`.
-    pub(crate) drive: &'a str,
-    /// Partition ordinal over non-empty partition-table entries.
-    pub(crate) partition: usize,
-    /// Bypass operating-system logical volumes.
-    pub(crate) raw: bool,
-    /// Explicit logical-volume identifier.
-    pub(crate) volume: Option<&'a str>,
-    /// Extra raw members as `DRIVE:PARTITION`.
-    pub(crate) members: &'a [String],
-    /// Where to attach the mounted volume.
-    pub(crate) mountpoint: &'a str,
-    /// Volume label override.
-    pub(crate) volname: Option<&'a str>,
-    /// `BitLocker` recovery password, if supplied.
-    pub(crate) recovery_password: Option<String>,
-    /// `BitLocker` startup-key file, if supplied.
-    pub(crate) bek_file: Option<&'a std::path::Path>,
-    /// Guest fstab to compose child mounts from.
-    pub(crate) fstab: Option<&'a str>,
-    /// Filesystem-level open options: root selector and journal-replay choice.
-    pub(crate) filesystem: fsmnt::device::FilesystemOpenOptions,
-    /// Zero-fill (and count) what the device cannot provide instead of
-    /// failing the read.
-    pub(crate) best_effort_reads: bool,
-}
-
-/// Mount a partition from a physical drive.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-pub(crate) fn handle_mount_device(
-    options: MountDeviceOptions<'_>,
+fn mount_drive(
+    args: &MountArgs,
+    source: &Source,
+    drive: &fsmnt::device::HostDriveId,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
-    use fsmnt::device::{
-        HostDriveEnumerator, HostDriveId, LogicalVolumeId, SourceOrigin, SourceSelection,
-    };
+    use fsmnt::device::{HostDriveEnumerator, LogicalVolumeId, SourceOrigin, SourceSelection};
 
-    let id = HostDriveId::new(options.drive);
-    let drivers = build_registry(options.recovery_password, options.bek_file)?;
-
-    let selection = if options.raw {
-        let additional_partitions = options
-            .members
-            .iter()
-            .map(|member| parse_partition_address(member))
-            .collect::<Result<Vec<_>, _>>()?;
+    let drivers = build_registry(args.recovery_password.clone(), args.bek_file.as_deref())?;
+    let selection = if args.raw {
         SourceSelection::Raw {
-            additional_partitions,
+            additional_partitions: args
+                .member
+                .iter()
+                .map(|member| parse_partition_address(member))
+                .collect::<Result<Vec<_>, _>>()?,
         }
-    } else if let Some(volume) = options.volume {
+    } else if let Some(volume) = args.volume.as_deref() {
         SourceSelection::Logical(LogicalVolumeId::new(volume))
     } else {
         SourceSelection::Auto
     };
-    let open_options = fsmnt::PartitionOpenOptions::new()
+    let mut options = fsmnt::PartitionOpenOptions::new()
         .with_source(selection)
-        .with_filesystem_options(options.filesystem)
-        .with_best_effort_reads(options.best_effort_reads);
-    let opened = if let Some(fstab) = options.fstab {
-        let opened = fsmnt::open_device_partition_with_fstab::<HostDrives>(
-            &id,
-            options.partition,
-            &drivers,
-            open_options,
-            fstab,
-        )?;
-        println!("Composed child mounts from {fstab}");
-        opened
-    } else {
-        fsmnt::open_device_partition_with_options::<HostDrives>(
-            &id,
-            options.partition,
-            &drivers,
-            open_options,
-        )?
-    };
-
-    ensure_unix_mountpoint(options.mountpoint)?;
-
-    let volname = options.volname.map_or_else(
-        || {
-            HostDrives::get_drive_info(&id)
-                .ok()
-                .and_then(|i| i.model)
-                .unwrap_or_else(|| options.drive.to_string())
-        },
-        ToString::to_string,
-    );
-
-    match &opened.source {
-        SourceOrigin::Logical(volume) => {
-            println!("Opened logical volume {}", volume.id());
-        }
-        SourceOrigin::Raw(extents) => {
-            println!("Opened {} raw physical member(s)", extents.len());
-        }
+        .with_filesystem_options(args.filesystem.open_options())
+        .with_best_effort_reads(args.filesystem.best_effort_reads);
+    if let Some(sector_size) = args.sector_size {
+        options = options.with_sector_size(sector_size);
+    }
+    if args.scan {
+        options = options.with_scan(args.stride);
     }
 
+    let opened = open_drive_location(args, source, drive, &drivers, options)?;
+
+    ensure_unix_mountpoint(&args.mountpoint)?;
+
+    let volname = args.volname.clone().unwrap_or_else(|| {
+        HostDrives::get_drive_info(drive)
+            .ok()
+            .and_then(|info| info.model)
+            .unwrap_or_else(|| drive.to_string())
+    });
+    match &opened.source {
+        SourceOrigin::Logical(volume) => info!("opened logical volume {}", volume.id()),
+        SourceOrigin::Raw(extents) => info!("opened {} raw physical member(s)", extents.len()),
+    }
+
+    let label = fs_label(opened.detected);
+    warn_layout_origin(opened.layout_origin, args.partition, source);
     warn_if_truncated(opened.truncated_by, opened.size_bytes, "partition");
     block_on_mount(
         opened.filesystem,
-        options.mountpoint,
-        fs_label(opened.detected),
+        &args.mountpoint,
+        label,
         &volname,
-        fs_label(opened.detected),
+        args.fsname.as_deref().unwrap_or(label),
         opened.size_bytes,
         opened.substitutions,
     )
+}
+
+/// Open the drive at whichever location the command line named.
+///
+/// A byte offset reads the drive physically, so no partition table is
+/// consulted and no logical volume exists; an ordinal — from the table or
+/// from a scan — goes through the ordinary partition opener. With neither,
+/// the drive has to start with a filesystem itself.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn open_drive_location(
+    args: &MountArgs,
+    source: &Source,
+    drive: &fsmnt::device::HostDriveId,
+    drivers: &fsmnt::device::DriverRegistry,
+    options: fsmnt::PartitionOpenOptions,
+) -> Result<fsmnt::OpenedPartition, Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+
+    if let Some(offset) = args.offset {
+        // The image composer accepts any location because it re-derives the
+        // siblings from the layout; the device one is written against an
+        // ordinal, and an offset is not one.
+        if args.fstab.is_some() {
+            return Err(
+                "--fstab needs a partition ordinal on a drive; use --partition (list them with \
+                 `fsmnt partitions DRIVE`)"
+                    .into(),
+            );
+        }
+        let offset = offset.resolve(args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE))?;
+        return fsmnt::open_device_at_offset::<HostDrives>(drive, offset, drivers, options);
+    }
+
+    let partition = match args.partition {
+        Some(partition) => partition,
+        None => whole_drive_partition(args, source, drive)?,
+    };
+    match args.fstab.as_deref() {
+        Some(fstab) => {
+            let opened = fsmnt::open_device_partition_with_fstab::<HostDrives>(
+                drive, partition, drivers, options, fstab,
+            )?;
+            info!("composed child mounts from {fstab}");
+            Ok(opened)
+        }
+        None => fsmnt::open_device_partition_with_options::<HostDrives>(
+            drive, partition, drivers, options,
+        ),
+    }
+}
+
+/// The ordinal to open when the caller named no location at all.
+///
+/// An unpartitioned drive is mounted whole, exactly as an unpartitioned
+/// image is. A partitioned one is refused rather than guessed at: the old
+/// `mount-device` default of partition 0 usually landed on the EFI system
+/// partition, which is a 100 MB FAT nobody asked for.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn whole_drive_partition(
+    args: &MountArgs,
+    source: &Source,
+    drive: &fsmnt::device::HostDriveId,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    use fsmnt::{DriveLayoutOptions, HostDrives, LayoutKind};
+
+    let mut options = DriveLayoutOptions::new();
+    if let Some(sector_size) = args.sector_size {
+        options = options.with_sector_size(sector_size);
+    }
+    let layout = fsmnt::drive_layout::<HostDrives>(drive, options)?;
+    let table = match layout.kind {
+        LayoutKind::Bare(_) | LayoutKind::Unknown | LayoutKind::Scanned => return Ok(0),
+        LayoutKind::Gpt => "GPT",
+        LayoutKind::Mbr => "MBR",
+    };
+    Err(format!(
+        "{source} contains a {table} partition table; select a partition with `--partition N` \
+         (see `fsmnt partitions {source}`)"
+    )
+    .into())
+}
+
+/// Physical drives cannot be opened on this platform.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn mount_drive(
+    _args: &MountArgs,
+    _source: &Source,
+    _drive: &fsmnt::device::HostDriveId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err(super::NO_DRIVE_SUPPORT.into())
 }
 
 /// Parse a `DRIVE:PARTITION` raw-member argument.

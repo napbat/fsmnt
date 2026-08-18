@@ -13,6 +13,8 @@
 
 use std::sync::Arc;
 
+use tracing::debug;
+
 use fsmnt_core::{FsError, TargetFilesystem};
 use fsmnt_device::{
     DetectedBootSector, DeviceReader, DriverRegistry, FilesystemOpenOptions, FilesystemRoot,
@@ -428,18 +430,7 @@ pub fn open_image_with_options(
         declared_bytes,
         available_bytes,
         origin: layout_origin,
-    } = if let Some(partition) = partition {
-        let mut layout_options = ImageLayoutOptions::new();
-        if let Some(sector_size) = sector_size {
-            layout_options = layout_options.with_sector_size(sector_size);
-        }
-        if let Some(stride) = scan_stride {
-            layout_options = layout_options.with_scan(true).with_scan_stride(stride);
-        }
-        layout::locate_image_partition(path, partition, layout_options)?
-    } else {
-        open_image_tail(path, offset)?
-    };
+    } = locate_image_window(path, partition, offset, sector_size, scan_stride)?;
 
     // Bounded to the window so a dead sector 0 can still be classified from
     // the copies each format keeps (FAT32/exFAT backup regions, the NTFS
@@ -451,6 +442,12 @@ pub fn open_image_with_options(
             source,
         })?;
     let detected = ext_backup::detection_with_backup_request(detected, &filesystem);
+    debug!(
+        path = %path.display(),
+        offset,
+        detected = ?detected,
+        "classified the boot sector at the selected image offset"
+    );
     if matches!(
         detected,
         DetectedBootSector::MbrPartitioned | DetectedBootSector::GptPartitioned
@@ -510,6 +507,42 @@ pub fn open_image_with_options(
         substitutions,
         layout_origin,
     })
+}
+
+/// Resolve *where* the filesystem is: a partition ordinal from the image's
+/// own table (or from a scan of the media), or a byte offset the caller
+/// named.
+fn locate_image_window(
+    path: &std::path::Path,
+    partition: Option<usize>,
+    offset: u64,
+    sector_size: Option<u32>,
+    scan_stride: Option<u64>,
+) -> Result<layout::LocatedImagePartition, OpenImageError> {
+    let located = if let Some(partition) = partition {
+        let mut layout_options = ImageLayoutOptions::new();
+        if let Some(sector_size) = sector_size {
+            layout_options = layout_options.with_sector_size(sector_size);
+        }
+        if let Some(stride) = scan_stride {
+            layout_options = layout_options.with_scan(true).with_scan_stride(stride);
+        }
+        layout::locate_image_partition(path, partition, layout_options)?
+    } else {
+        open_image_tail(path, offset)?
+    };
+    debug!(
+        path = %path.display(),
+        format = %located.image.format(),
+        decoded_bytes = located.image.len(),
+        partition = ?partition,
+        origin = ?located.origin,
+        offset = located.offset,
+        declared_bytes = located.declared_bytes,
+        available_bytes = located.available_bytes,
+        "located the filesystem window inside the decoded image"
+    );
+    Ok(located)
 }
 
 /// Open the decoded media and take everything from `offset` to its end.

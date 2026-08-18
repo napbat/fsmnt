@@ -1,28 +1,41 @@
 //! Subcommand handlers and the helpers they share.
 //!
 //! `main.rs` owns the clap definitions and dispatches into this module:
-//! [`mount`] implements the three mounting commands, [`partitions`] the two
-//! inspection commands, [`scan`] searches media no partition table
-//! describes, [`size`] reads the size expressions their offsets are written
-//! in, [`detach`] hands a mount to a background process, and the helpers
-//! below are used by all of them.
+//! [`source`] decides what the single `SOURCE` positional names, [`mount`]
+//! mounts it, [`partitions`] and [`scan`] inspect it, [`size`] reads the
+//! size expressions their offsets are written in, [`detach`] hands a mount
+//! to a background process, [`logging`] installs the subscriber every
+//! message goes through, and the helpers below are used by all of them.
+//!
+//! The division of output is deliberate: `println!` here is reserved for
+//! what the command *produces* — the tables, and the mount lifecycle lines
+//! a script may key on — while everything that describes how the command
+//! got there is a `tracing` event, so `-q`, `-v` and `--log-file` control
+//! it without changing what a pipeline reads.
 
 pub(crate) mod detach;
+pub(crate) mod logging;
 pub(crate) mod mount;
 pub(crate) mod partitions;
 pub(crate) mod scan;
 pub(crate) mod size;
+pub(crate) mod source;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-pub(crate) use mount::{MountDeviceOptions, handle_mount_device};
-pub(crate) use mount::{MountImageOptions, handle_mount, handle_mount_image};
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-pub(crate) use partitions::handle_drives;
-pub(crate) use partitions::handle_partitions;
-pub(crate) use scan::{ScanImageOptions, handle_scan};
+pub(crate) use mount::handle_mount;
+pub(crate) use partitions::{handle_drives, handle_partitions};
+pub(crate) use scan::handle_scan;
+
+use tracing::{info, warn};
+
+/// What every drive operation reports on a platform with no drive
+/// enumerator, instead of the command not existing at all: the source
+/// grammar is the same everywhere, so `fsmnt partitions 0` should say why
+/// it cannot be answered here.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub(crate) const NO_DRIVE_SUPPORT: &str = "physical drives are not supported on this platform";
 
 /// On Unix the mountpoint is a directory; create it if needed.
 #[allow(
@@ -39,7 +52,7 @@ pub(crate) fn ensure_unix_mountpoint(mountpoint: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// Mount `fs` and block until the mount ends, printing progress.
+/// Mount `fs` and block until the mount ends.
 ///
 /// `substitutions` is the best-effort-read counter of the source, when that
 /// mode is on; what it accumulated is reported once the mount ends, since
@@ -58,17 +71,17 @@ pub(crate) fn block_on_mount(
     // Anything the driver did that departs from a plain open — a backup
     // boot sector or superblock standing in for the primary, a degraded
     // mode — is said out loud before the volume appears, so a scripted
-    // mount leaves that fact in its log.
+    // mount leaves that fact in its log even at `-q`.
     for notice in fs.notices() {
-        eprintln!("notice: {notice}");
+        warn!("{notice}");
     }
     if substitutions.is_some() {
-        eprintln!(
-            "notice: best-effort reads are on — data the source cannot provide is served as \
-             zeros; a summary follows when the volume is unmounted"
+        warn!(
+            "best-effort reads are on — data the source cannot provide is served as zeros; a \
+             summary follows when the volume is unmounted"
         );
     }
-    println!("Mounting {kind} volume at {mountpoint}...");
+    info!("mounting {kind} volume at {mountpoint}");
     fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
         println!(
             "Volume mounted at {mp_display}. Press Ctrl+C, or run 'fsmnt unmount {mp_display}' \
@@ -89,10 +102,10 @@ fn report_substitutions(stats: &fsmnt::device::ReadSubstitutions) {
     use size::format_size_precise;
 
     if !stats.any() {
-        eprintln!("best-effort reads: every byte that was read was present in the source");
+        info!("best-effort reads: every byte that was read was present in the source");
         return;
     }
-    eprintln!(
+    warn!(
         "best-effort reads: {} of the media that was read was not there and came back as zeros \
          — {} past the end of the source, {} in sectors that failed to read ({} read error(s))",
         format_size_precise(stats.missing_bytes() + stats.errored_bytes()),
@@ -122,8 +135,20 @@ pub(crate) fn format_size(bytes: u64) -> String {
     format!("{gb}.{tenths} GB")
 }
 
-/// Warn on stderr when the opened filesystem is larger than the bytes
-/// behind it.
+/// Format a length a medium may not know.
+///
+/// A drive whose size the operating system declines to report — and every
+/// extent on it that is bounded by nothing else — carries 0, which the
+/// layout types define as "unknown, running to the end". Printing that as
+/// "0 MB" would state a fact nobody established.
+pub(crate) fn format_media_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "unknown".to_string();
+    }
+    format_size(bytes)
+}
+
+/// Warn when the opened filesystem is larger than the bytes behind it.
 ///
 /// The mount itself succeeds — the superblock is at the front — so without
 /// this the shortfall only shows up later as per-file read errors, which
@@ -135,13 +160,41 @@ pub(crate) fn warn_if_truncated(truncated_by: Option<u64>, available_bytes: u64,
         return;
     };
     let claimed = available_bytes.saturating_add(missing);
-    eprintln!(
-        "warning: filesystem claims {} but only {} are present in the {medium} ({} missing); \
-         reads past that point will fail",
+    warn!(
+        "filesystem claims {} but only {} are present in the {medium} ({} missing); reads past \
+         that point will fail",
         format_size_precise(claimed),
         format_size_precise(available_bytes),
         format_size_precise(missing),
     );
+}
+
+/// Say what a partition ordinal was resolved against, whenever that was not
+/// simply the table at the front of the medium.
+///
+/// The provenance of an offset matters as much as the offset: a table read
+/// from the media, a table recovered from its backup copy and a table
+/// *invented* by a scan are three different claims, and a report that
+/// repeats the ordinal has to be able to say which one it is repeating.
+pub(crate) fn warn_layout_origin(
+    origin: Option<fsmnt::LayoutOrigin>,
+    partition: Option<usize>,
+    source: &source::Source,
+) {
+    match origin {
+        Some(fsmnt::LayoutOrigin::Scan { stride }) => warn!(
+            "partition {} is an entry of a SYNTHETIC table reconstructed by scanning the media \
+             every {stride} bytes — no partition table was read from {source}, and the number is \
+             valid only for this {} at this stride",
+            partition.unwrap_or_default(),
+            source.describe(),
+        ),
+        Some(fsmnt::LayoutOrigin::BackupTable) => warn!(
+            "the partition table was recovered from the GPT backup header in the last sector; the \
+             primary at the front of {source} is damaged"
+        ),
+        Some(fsmnt::LayoutOrigin::Table | fsmnt::LayoutOrigin::None) | None => {}
+    }
 }
 
 /// Filesystem type label for a detected boot sector.
