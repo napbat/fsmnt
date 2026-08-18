@@ -323,11 +323,11 @@ fsmnt scan 0                          # the same search over a live drive
 ```
 
 ```
-        OFFSET         SECTOR  TYPE                           SIZE  NOTE
-             0             0s  GptPartitioned                    -  partition table; list it with `fsmnt partitions`
-     270532608        528384s  Ext                          3.3 GB  4 backup superblocks (groups 1, 3, 7, 9)
-     903872512       1765376s  Ext                          2.2 GB  1 backup superblock (group 1)
-    3625975808       7081984s  Ext                          1.5 GB  5 backup superblocks (groups 1, 3, 5, 7, 9)
+   #          OFFSET         SECTOR  TYPE                           SIZE  NOTE
+   -               0             0s  GptPartitioned                    -  partition table; list it with `fsmnt partitions`
+   0       270532608        528384s  Ext                          3.3 GB  4 backup superblocks (groups 1, 3, 7, 9)
+   1       903872512       1765376s  Ext                          2.2 GB  1 backup superblock (group 1)
+   2      3625975808       7081984s  Ext                          1.5 GB  5 backup superblocks (groups 1, 3, 5, 7, 9)
 ```
 
 Each hit is classified with the same probes a mount uses, and the size shown
