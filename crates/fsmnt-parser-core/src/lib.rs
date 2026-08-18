@@ -27,8 +27,9 @@ pub mod traverse;
 pub use boot_sector::{
     BOOT_SECTOR_SIZE, BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_MAGIC,
     BTRFS_SUPERBLOCK_PROBE_SIZE, BootSectorDiagnosis, BootSectorUnknownReason, DetectedBootSector,
-    ExtBackupSuperblock, ExtStartCheck, ExtSuperblockInfo, FS_DETECT_PROBE_SIZE,
-    diagnose_boot_sector, ext_backup_superblock_group, ext_backup_superblock_info, ext_start_check,
+    ExtBackupSuperblock, ExtRootInodeLocation, ExtStartCheck, ExtSuperblockInfo,
+    FS_DETECT_PROBE_SIZE, diagnose_boot_sector, ext_backup_superblock_group,
+    ext_backup_superblock_info, ext_root_inode_location, ext_root_inode_plausible, ext_start_check,
     ext_superblock_info, ext4_crc16, ext4_crc32c, is_btrfs_primary_superblock,
 };
 #[cfg(feature = "std")]

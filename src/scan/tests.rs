@@ -88,25 +88,59 @@ impl Ext {
         sb[0x68..0x78].copy_from_slice(&self.uuid);
     }
 
+    /// Block the group-0 descriptor points its inode table at.
+    fn inode_table_block(&self) -> u32 {
+        self.first_data_block + 4
+    }
+
+    /// Byte offset of the root inode from the filesystem start: inode 2 is
+    /// the second entry of group 0's inode table.
+    fn root_inode_offset(&self) -> u64 {
+        self.root_inode_offset_for(self.inode_table_block())
+    }
+
+    /// The same, for an inode table the descriptor puts at `table_block`.
+    fn root_inode_offset_for(&self, table_block: u32) -> u64 {
+        u64::from(table_block) * u64::from(self.block_size) + u64::from(EXT_INODE_SIZE)
+    }
+
     /// Write the group-0 descriptor that turns a superblock at `start` into a
     /// filesystem start. No checksum feature is declared, so the structural
     /// fields alone have to be consistent — which is the point.
     fn write_descriptor(&self, media: &mut [u8], start: u64) {
+        self.write_descriptor_at(media, start, self.inode_table_block());
+    }
+
+    /// The same, with the inode table put wherever `table_block` says — the
+    /// one field a scan now has to follow off the end of the chunk.
+    fn write_descriptor_at(&self, media: &mut [u8], start: u64, table_block: u32) {
         let at = usize::try_from(start + self.descriptor_offset()).expect("offset");
         let desc = &mut media[at..at + 32];
         desc[0x00..0x04].copy_from_slice(&(self.first_data_block + 2).to_le_bytes());
         desc[0x04..0x08].copy_from_slice(&(self.first_data_block + 3).to_le_bytes());
-        desc[0x08..0x0c].copy_from_slice(&(self.first_data_block + 4).to_le_bytes());
+        desc[0x08..0x0c].copy_from_slice(&table_block.to_le_bytes());
+    }
+
+    /// Write the root inode a mount would read next: a directory with the
+    /// links and the size every ext root has, and no deletion time.
+    fn write_root_inode(&self, media: &mut [u8], start: u64) {
+        let at = usize::try_from(start + self.root_inode_offset()).expect("offset");
+        let inode = &mut media[at..at + 128];
+        inode[0x00..0x02].copy_from_slice(&0x41ed_u16.to_le_bytes()); // i_mode: drwxr-xr-x
+        inode[0x04..0x08].copy_from_slice(&self.block_size.to_le_bytes()); // i_size_lo
+        inode[0x1a..0x1c].copy_from_slice(&3_u16.to_le_bytes()); // i_links_count
     }
 
     /// Write the group `group` superblock copy into `media`, for a
     /// filesystem starting at `start`; the primary brings its descriptor
-    /// table with it, because that is what makes it a start.
+    /// table and the root inode that table names with it, because between
+    /// them that is what makes it a start.
     fn write(&self, media: &mut [u8], start: u64, group: u32) -> u64 {
         let at = start + self.copy_offset(group);
         self.write_superblock(media, at, group);
         if group == 0 {
             self.write_descriptor(media, start);
+            self.write_root_inode(media, start);
         }
         at
     }
@@ -119,6 +153,24 @@ impl Ext {
         // where the descriptor table would be if this were a start.
         let junk = usize::try_from(at + self.descriptor_offset()).expect("offset");
         media[junk..junk + 64].fill(0xFF);
+    }
+
+    /// Copy blocks 0 and 1 of the filesystem at `start` to `at`, byte for
+    /// byte, and fill the inode table the copied descriptor names with the
+    /// all-ones bitmap that is actually there.
+    ///
+    /// This is the harder journal record: one transaction touching both
+    /// blocks writes them adjacently, so the copy carries a real, correctly
+    /// checksummed group descriptor table and reads as a filesystem start
+    /// for as far as the two blocks go.
+    fn write_block_pair(&self, media: &mut [u8], start: u64, at: u64) {
+        let pair = usize::try_from(self.descriptor_offset() + u64::from(self.block_size))
+            .expect("two blocks");
+        let from = usize::try_from(start).expect("offset");
+        let to = usize::try_from(at).expect("offset");
+        media.copy_within(from..from + pair, to);
+        let table = usize::try_from(at + self.root_inode_offset()).expect("offset");
+        media[table..table + 128].fill(0xFF);
     }
 }
 
@@ -376,6 +428,120 @@ fn a_backup_naming_an_unconfirmed_primary_makes_it_mountable() {
             copies: 1,
             last_offset: start,
         }
+    );
+    assert_eq!(
+        hits[0].backup_superblocks,
+        vec![ExtBackupSuperblock {
+            offset: backup,
+            group: 1
+        }]
+    );
+    assert_eq!(hits[0].mount_offset(), Some(start));
+}
+
+#[test]
+fn a_journalled_pair_of_blocks_is_a_copy_however_well_its_table_reads() {
+    // The false positive the descriptor-table check cannot see: one ext4
+    // journal transaction touching block 0 and block 1 records them
+    // adjacently, so the copy carries the real filesystem's group descriptor
+    // table with it and reads as a start for as far as two blocks go. What
+    // separates them is the root inode that table points at, which relative
+    // to the copy is somebody else's bytes.
+    let ext = large_block_ext(1024);
+    let mut media = vec![0_u8; IMAGE_SIZE];
+    ext.write(&mut media, 0, 0);
+    let journalled = 6 << 20;
+    let pair = 7 << 20;
+    ext.write_journalled_copy(&mut media, journalled);
+    ext.write_block_pair(&mut media, 0, pair);
+    let fat = 8 << 20;
+    write_fat(&mut media, fat);
+    assert!(
+        journalled > ext.size_bytes(),
+        "the copies have to lie past what the filesystem claims",
+    );
+    assert!(
+        fat > pair && fat < pair + ext.size_bytes(),
+        "the FAT has to sit inside the extent the copy claims for itself",
+    );
+
+    let length = u64::try_from(media.len()).expect("length");
+    let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
+
+    assert_eq!(hits.len(), 3, "{hits:#?}");
+    assert_eq!(
+        hits[0].kind,
+        ScanHitKind::Filesystem(DetectedBootSector::Ext)
+    );
+    assert_eq!(hits[1].offset, journalled);
+    assert_eq!(
+        hits[1].kind,
+        ScanHitKind::ExtPrimaryCopies {
+            copies: 2,
+            last_offset: pair,
+        },
+        "the pair is a copy like any other and folds in with its neighbour",
+    );
+    assert_eq!(hits[1].mount_offset(), None);
+    assert_eq!(hits[2].offset, fat);
+    assert_eq!(
+        hits[2].kind,
+        ScanHitKind::Filesystem(DetectedBootSector::Fat12),
+        "a copy claims the size of a filesystem that starts elsewhere, so it suppresses nothing",
+    );
+}
+
+#[test]
+fn a_root_inode_past_the_end_of_the_medium_decides_nothing() {
+    // A truncated image whose front is intact: the inode table its
+    // descriptor names was simply never acquired. "I could not look" must
+    // not read as "not a filesystem", or the one mountable thing in the file
+    // disappears.
+    let ext = large_block_ext(8192);
+    let mut media = vec![0_u8; IMAGE_SIZE];
+    ext.write_superblock(&mut media, 1024, 0);
+    let far = 6000;
+    ext.write_descriptor_at(&mut media, 0, far);
+
+    let length = u64::try_from(media.len()).expect("length");
+    assert!(
+        ext.root_inode_offset_for(far) > length,
+        "the root inode has to fall past the bytes the medium holds",
+    );
+    let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
+
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].offset, 0);
+    assert_eq!(
+        hits[0].kind,
+        ScanHitKind::Filesystem(DetectedBootSector::Ext)
+    );
+    assert_eq!(hits[0].mount_offset(), Some(0));
+}
+
+#[test]
+fn a_backup_outranks_a_root_inode_that_reads_wrong() {
+    // A start with damage rather than a copy: the descriptor table verifies,
+    // a backup superblock computes this very offset as its filesystem's
+    // start, and only the root inode disagrees. Three structures against one
+    // inode — it stays a filesystem, and `--salvage` is what the damage is
+    // for.
+    let ext = large_block_ext(2048);
+    let mut media = vec![0_u8; IMAGE_SIZE];
+    let start = 1 << 20;
+    ext.write(&mut media, start, 0);
+    let inode = usize::try_from(start + ext.root_inode_offset()).expect("offset");
+    media[inode..inode + 128].fill(0xFF);
+    let backup = ext.write(&mut media, start, 1);
+
+    let length = u64::try_from(media.len()).expect("length");
+    let hits = scan_media(&mut Cursor::new(media), length, ScanOptions::new()).expect("scan");
+
+    assert_eq!(hits.len(), 1, "{hits:#?}");
+    assert_eq!(hits[0].offset, start);
+    assert_eq!(
+        hits[0].kind,
+        ScanHitKind::Filesystem(DetectedBootSector::Ext)
     );
     assert_eq!(
         hits[0].backup_superblocks,

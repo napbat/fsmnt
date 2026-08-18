@@ -257,16 +257,20 @@ fn primary_copies_note(hit: &ScanHit, copies: usize, last_offset: u64) -> String
             hit.offset,
         );
     }
+    // Deliberately vague about *which* test the copy failed: a run folds
+    // together copies with no group descriptors behind them and copies whose
+    // descriptors verified but pointed at no root directory, and the reader
+    // wants the same thing from both — the offset is not a start.
     if copies == 1 {
         return format!(
-            "one copy of a primary superblock at {}, not followed by its group descriptors — a \
-             journal write inside a filesystem, not a start",
+            "one copy of a primary superblock at {}, without the filesystem a start has behind it \
+             — a journal write inside one, not a start",
             hit.offset,
         );
     }
     format!(
-        "{copies} copies of a primary superblock between {} and {last_offset}, none followed by \
-         its group descriptors — journal writes inside a filesystem, not a start",
+        "{copies} copies of a primary superblock between {} and {last_offset}, none with the \
+         filesystem a start has behind it — journal writes inside one, not starts",
         hit.offset,
     )
 }
@@ -411,8 +415,8 @@ mod tests {
         assert_eq!(type_column(&copies), "Ext (superblock copies)");
         assert_eq!(
             note_column(&copies),
-            "50 copies of a primary superblock between 3424641024 and 3428098048, none followed \
-             by its group descriptors — journal writes inside a filesystem, not a start"
+            "50 copies of a primary superblock between 3424641024 and 3428098048, none with the \
+             filesystem a start has behind it — journal writes inside one, not starts"
         );
 
         let single = ScanHit {
@@ -426,8 +430,8 @@ mod tests {
         };
         assert_eq!(
             note_column(&single),
-            "one copy of a primary superblock at 4096, not followed by its group descriptors — a \
-             journal write inside a filesystem, not a start"
+            "one copy of a primary superblock at 4096, without the filesystem a start has behind \
+             it — a journal write inside one, not a start"
         );
     }
 

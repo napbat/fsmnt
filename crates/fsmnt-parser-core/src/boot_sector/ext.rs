@@ -13,7 +13,11 @@
 //! touches it, and each copy reads as a pristine primary. What distinguishes
 //! the real thing is the group descriptor table that must immediately follow
 //! it, so [`ext_start_check`] goes and looks. See
-//! [`ExtStartCheck`] for what its three answers mean.
+//! [`ExtStartCheck`] for what its three answers mean. One journal record
+//! can hold block 0 and block 1 together, though, and then the descriptor
+//! table travels with the copy — so [`ext_root_inode_location`] takes the
+//! next step a mount would, naming where that table puts the root
+//! directory for [`ext_root_inode_plausible`] to judge.
 
 use super::{read_u16_le, read_u32_le};
 
@@ -85,6 +89,22 @@ const BG_INODE_TABLE_HI: usize = 0x28;
 /// Every `bg_flags` bit ext4 defines: `INODE_UNINIT`, `BLOCK_UNINIT`,
 /// `ITABLE_ZEROED`. Anything outside them is not a descriptor.
 const BG_FLAGS_KNOWN: u16 = 0x0007;
+
+/// Field offsets within the 128-byte base inode every ext inode starts
+/// with, whatever `s_inode_size` widens it to.
+const INODE_I_MODE: usize = 0x00;
+const INODE_I_SIZE_LO: usize = 0x04;
+const INODE_I_DTIME: usize = 0x14;
+const INODE_I_LINKS_COUNT: usize = 0x1A;
+/// Length of that base inode, and so the shortest buffer worth judging.
+const EXT_INODE_BASE_LEN: usize = 128;
+/// `i_mode`'s file-type field and its directory value, from
+/// `include/uapi/linux/stat.h`.
+const INODE_S_IFMT: u16 = 0xF000;
+const INODE_S_IFDIR: u16 = 0x4000;
+/// The root directory's inode number. Inodes are numbered from 1, so the
+/// root is the second entry of group 0's inode table.
+const EXT_ROOT_INODE_NUMBER: u64 = 2;
 
 /// Structural sanity of an ext superblock at offset 1024 of `buf`: the
 /// magic plus the cheap field checks that keep a coincidental 0xEF53 in a
@@ -416,26 +436,116 @@ pub enum ExtStartCheck {
 /// recognised as ext and rescued from a backup superblock.
 #[must_use]
 pub fn ext_start_check(buf: &[u8]) -> ExtStartCheck {
+    match start_evidence(buf) {
+        StartEvidence::Confirmed(..) => ExtStartCheck::Confirmed,
+        StartEvidence::Unconfirmed => ExtStartCheck::Unconfirmed,
+        StartEvidence::Inconclusive => ExtStartCheck::Inconclusive,
+    }
+}
+
+/// [`ExtStartCheck`] with the bytes the confirmation was drawn from still
+/// attached, so a caller that wants to go further into the filesystem does
+/// not have to locate the group-0 descriptor a second time.
+enum StartEvidence<'a> {
+    /// A filesystem starts here; the geometry and the group-0 descriptor
+    /// that said so.
+    Confirmed(ExtSuperblockInfo, &'a [u8]),
+    /// A plausible primary superblock the descriptor table does not back up.
+    Unconfirmed,
+    /// Not a plausible primary superblock, or too few bytes to tell.
+    Inconclusive,
+}
+
+/// The whole of the start check, keeping hold of what it read.
+fn start_evidence(buf: &[u8]) -> StartEvidence<'_> {
     if !probe_ext(buf) {
-        return ExtStartCheck::Inconclusive;
+        return StartEvidence::Inconclusive;
     }
     let Some(info) = ext_superblock_info(buf) else {
-        return ExtStartCheck::Inconclusive;
+        return StartEvidence::Inconclusive;
     };
     // A descriptor width the format cannot produce is decided here rather
     // than by the slice below, so a wild `s_desc_size` reads as "not a
     // start" instead of "the buffer was too short".
     if !descriptor_width_plausible(&info) {
-        return ExtStartCheck::Unconfirmed;
+        return StartEvidence::Unconfirmed;
     }
     let Some(desc) = first_group_descriptor(buf, &info) else {
-        return ExtStartCheck::Inconclusive;
+        return StartEvidence::Inconclusive;
     };
     if descriptor_is_structural(&info, desc) && descriptor_checksum_holds(buf, &info, desc) {
-        ExtStartCheck::Confirmed
+        StartEvidence::Confirmed(info, desc)
     } else {
-        ExtStartCheck::Unconfirmed
+        StartEvidence::Unconfirmed
     }
+}
+
+/// Where the root directory's inode sits, measured from the first byte of
+/// its filesystem.
+///
+/// Produced by [`ext_root_inode_location`]. The offset is relative because
+/// the caller is the one that knows where the filesystem starts — which,
+/// for a scan, is the very thing under test.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtRootInodeLocation {
+    /// Byte offset of inode 2 from the filesystem start.
+    pub offset: u64,
+    /// Bytes the inode occupies on disk, i.e. `s_inode_size`. Only the
+    /// first 128 of them are the base inode [`ext_root_inode_plausible`]
+    /// judges; the rest are extended fields.
+    pub len: u32,
+}
+
+/// Where the group-0 descriptor puts the root inode, for a buffer that
+/// starts at a confirmed filesystem start.
+///
+/// The step past [`ext_start_check`]: a verified descriptor table proves
+/// one was written here, but a journalled copy of block 0 followed by block
+/// 1 carries a real one too — the table of the filesystem it was copied
+/// from. What separates the copy from the original is that only the
+/// original's inode table holds the root directory, so a caller that can
+/// read the medium can go and look. Returns `None` unless the start is
+/// [`Confirmed`](ExtStartCheck::Confirmed), or on the arithmetic overflow
+/// only a nonsensical descriptor could produce.
+#[must_use]
+pub fn ext_root_inode_location(buf: &[u8]) -> Option<ExtRootInodeLocation> {
+    let StartEvidence::Confirmed(info, desc) = start_evidence(buf) else {
+        return None;
+    };
+    let wide = info.feature_incompat & EXT_INCOMPAT_64BIT != 0 && info.desc_size >= 64;
+    let inode_table = descriptor_block(desc, BG_INODE_TABLE_LO, BG_INODE_TABLE_HI, wide)?;
+    let offset = inode_table
+        .checked_mul(u64::from(info.block_size))?
+        .checked_add((EXT_ROOT_INODE_NUMBER - 1).checked_mul(u64::from(info.inode_size))?)?;
+    Some(ExtRootInodeLocation {
+        offset,
+        len: info.inode_size,
+    })
+}
+
+/// Whether `inode` reads as an ext root directory.
+///
+/// Only the facts the format guarantees of inode 2 on every ext2/3/4
+/// filesystem ever written: it is a directory, it has at least the two
+/// links `.` and its own entry in the parent, it has a size — a directory
+/// always occupies at least one block — and it has never been deleted.
+/// Nothing is asked of `i_flags`, the timestamps, or the block map, because
+/// those legitimately vary and a false negative here is far more expensive
+/// than a false positive: it hides the only mountable filesystem in an
+/// image, where a false positive costs one row an examiner rules out.
+///
+/// A buffer shorter than the 128-byte base inode is `false`; callers that
+/// could not read that much should treat the question as unanswered rather
+/// than answered no.
+#[must_use]
+pub fn ext_root_inode_plausible(inode: &[u8]) -> bool {
+    if inode.len() < EXT_INODE_BASE_LEN {
+        return false;
+    }
+    read_u16_le(inode, INODE_I_MODE) & INODE_S_IFMT == INODE_S_IFDIR
+        && read_u16_le(inode, INODE_I_LINKS_COUNT) >= 2
+        && read_u32_le(inode, INODE_I_SIZE_LO) > 0
+        && read_u32_le(inode, INODE_I_DTIME) == 0
 }
 
 /// Whether `s_desc_size` is a width ext4 can actually have written: the

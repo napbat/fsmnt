@@ -133,26 +133,123 @@ fn a_structurally_sound_descriptor_with_a_wrong_checksum_is_not_a_start() {
     assert_eq!(ext_start_check(&buf), ExtStartCheck::Unconfirmed);
 }
 
+/// Block the hand-built descriptor points its inode table at, and the byte
+/// offset of inode 2 that follows from it: one inode into that block.
+const START_CHECK_INODE_TABLE_BLOCK: u64 = 102;
+const START_CHECK_ROOT_INODE_OFFSET: u64 =
+    START_CHECK_INODE_TABLE_BLOCK * START_CHECK_BLOCK_SIZE as u64 + START_CHECK_INODE_SIZE as u64;
+
+/// A root inode as mke2fs writes it: `drwxr-xr-x`, three links (`.`, `..`
+/// from itself, and the parent's entry), one block of directory data, alive.
+fn build_root_inode() -> std::vec::Vec<u8> {
+    let mut inode = std::vec![0_u8; usize::from(START_CHECK_INODE_SIZE)];
+    inode[0x00..0x02].copy_from_slice(&0x41ED_u16.to_le_bytes()); // i_mode
+    inode[0x04..0x08].copy_from_slice(&4096_u32.to_le_bytes()); // i_size_lo
+    inode[0x1A..0x1C].copy_from_slice(&3_u16.to_le_bytes()); // i_links_count
+    inode
+}
+
+#[test]
+fn a_root_inode_reads_as_the_directory_it_is() {
+    assert!(ext_root_inode_plausible(&build_root_inode()));
+}
+
+#[test]
+fn the_root_inode_check_needs_a_whole_base_inode() {
+    let inode = build_root_inode();
+    assert!(
+        !ext_root_inode_plausible(&inode[..127]),
+        "under 128 bytes there is no inode to judge",
+    );
+    assert!(ext_root_inode_plausible(&inode[..128]));
+}
+
+#[test]
+fn garbage_where_the_root_inode_should_be_is_not_a_root_inode() {
+    // The three things actually found at a wrong inode-table address: an
+    // all-ones bitmap block, an unwritten one, and a regular file — which is
+    // what a *right* address in the wrong filesystem tends to hold.
+    let mut regular = build_root_inode();
+    regular[0x00..0x02].copy_from_slice(&0x81A4_u16.to_le_bytes()); // -rw-r--r--
+    for (name, inode) in [
+        ("0xFF fill", std::vec![0xFF_u8; 256]),
+        ("all zero", std::vec![0_u8; 256]),
+        ("a regular file", regular),
+    ] {
+        assert!(
+            !ext_root_inode_plausible(&inode),
+            "{name} is not the root directory",
+        );
+    }
+}
+
+#[test]
+fn a_deleted_or_unlinked_root_inode_is_not_one() {
+    let mut deleted = build_root_inode();
+    deleted[0x14..0x18].copy_from_slice(&0x4EBD_02D2_u32.to_le_bytes()); // i_dtime
+    assert!(!ext_root_inode_plausible(&deleted), "a live root never has a deletion time");
+
+    let mut unlinked = build_root_inode();
+    unlinked[0x1A..0x1C].copy_from_slice(&1_u16.to_le_bytes()); // i_links_count
+    assert!(!ext_root_inode_plausible(&unlinked), "the root always has at least `.` and `..`");
+
+    let mut empty = build_root_inode();
+    empty[0x04..0x08].copy_from_slice(&0_u32.to_le_bytes()); // i_size_lo
+    assert!(!ext_root_inode_plausible(&empty), "a directory occupies at least one block");
+}
+
+#[test]
+fn the_root_inode_location_follows_the_descriptor_to_the_inode_table() {
+    let location = ext_root_inode_location(&build_ext_start()).expect("a confirmed start");
+    assert_eq!(location.offset, START_CHECK_ROOT_INODE_OFFSET);
+    assert_eq!(location.len, u32::from(START_CHECK_INODE_SIZE));
+}
+
+#[test]
+fn only_a_confirmed_start_has_a_root_inode_to_locate() {
+    let mut buf = build_ext_start();
+    let checksum = START_CHECK_BLOCK_SIZE + 0x1E;
+    buf[checksum] ^= 0xFF;
+    assert_eq!(ext_start_check(&buf), ExtStartCheck::Unconfirmed);
+    assert!(
+        ext_root_inode_location(&buf).is_none(),
+        "an unconfirmed table's inode-table pointer is not worth following",
+    );
+    assert!(ext_root_inode_location(&buf[..2048]).is_none());
+}
+
+#[test]
+fn every_ext_fixture_has_a_readable_root_inode_where_it_says() {
+    // The false-negative guard for the root-inode check: it may reject
+    // whatever it likes, but never a filesystem mkfs actually wrote, because
+    // rejecting one hides the only mountable thing in an image.
+    for (path, image) in ext_fixtures() {
+        // 68 KiB reaches the first descriptor of even a 64 KiB-block
+        // filesystem, which is the largest ext supports.
+        let prefix = &image[..image.len().min(68 * 1024)];
+        let location = ext_root_inode_location(prefix)
+            .unwrap_or_else(|| std::panic!("{} is a real ext filesystem", path.display()));
+        let start = usize::try_from(location.offset).expect("offset fits");
+        let end = start + usize::try_from(location.len).expect("length fits");
+        assert!(
+            end <= image.len(),
+            "{} is {} bytes and puts its root inode at {start}",
+            path.display(),
+            image.len(),
+        );
+        assert!(
+            ext_root_inode_plausible(&image[start..end]),
+            "{} has its root directory at {start} and the check must see it",
+            path.display(),
+        );
+    }
+}
+
 #[test]
 fn the_check_confirms_the_start_of_every_ext_fixture() {
     // The false-negative guard: whatever the check rejects, it must never
-    // reject a filesystem that mkfs actually wrote. The fixtures are
-    // generated and gitignored, so a clean checkout simply has nothing to
-    // check here.
-    let testdata =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../formats/fs-ext/testdata");
-    let Ok(entries) = std::fs::read_dir(&testdata) else {
-        return;
-    };
-    let mut checked = 0_usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("img") {
-            continue;
-        }
-        let Ok(image) = std::fs::read(&path) else {
-            continue;
-        };
+    // reject a filesystem that mkfs actually wrote.
+    for (path, image) in ext_fixtures() {
         // 68 KiB reaches the first descriptor of even a 64 KiB-block
         // filesystem, which is the largest ext supports.
         let prefix = &image[..image.len().min(68 * 1024)];
@@ -162,7 +259,32 @@ fn the_check_confirms_the_start_of_every_ext_fixture() {
             "{} is a real ext filesystem and must be recognised as one",
             path.display(),
         );
-        checked += 1;
     }
-    std::eprintln!("checked {checked} ext fixture(s)");
+}
+
+/// Every generated ext fixture, read whole.
+///
+/// The images are produced by `testdata/gen-fixtures.sh` and gitignored, so
+/// a clean checkout simply has nothing here and the tests that iterate this
+/// pass vacuously; the count goes to stderr so a skip is visible rather than
+/// silent.
+fn ext_fixtures() -> std::vec::Vec<(std::path::PathBuf, std::vec::Vec<u8>)> {
+    let testdata =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../formats/fs-ext/testdata");
+    let Ok(entries) = std::fs::read_dir(&testdata) else {
+        std::eprintln!("no ext fixtures in {}", testdata.display());
+        return std::vec::Vec::new();
+    };
+    let mut fixtures = std::vec::Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("img") {
+            continue;
+        }
+        if let Ok(image) = std::fs::read(&path) {
+            fixtures.push((path, image));
+        }
+    }
+    std::eprintln!("read {} ext fixture(s)", fixtures.len());
+    fixtures
 }

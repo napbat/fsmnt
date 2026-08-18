@@ -344,7 +344,10 @@ filesystem's claimed extent means the extent is wrong.
 A magic number on its own is not enough to call something a start. An ext
 primary superblock counts as one only when the group descriptor table that
 has to follow it is there and — on any filesystem that carries descriptor
-checksums — verifies; `55 AA` counts as a partition table only when its four
+checksums — verifies; a start is then accepted only once the root inode that
+descriptor table points at reads as a directory, which is the next thing a
+mount does and the one step a journalled copy of blocks 0 and 1 — table and
+all — cannot fake. `55 AA` counts as a partition table only when its four
 entries describe extents a partitioner could have written. That matters on a
 real image: an ext4 journal records whole blocks, so a busy filesystem holds
 dozens of pristine-looking copies of its own superblock, and a multi-gigabyte

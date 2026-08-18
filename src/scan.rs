@@ -30,9 +30,12 @@
 //!   of them by chance, or in file data that once *was* filesystem metadata.
 //!   So an ext primary superblock counts as a start only when the group
 //!   descriptor table that must follow it is there (see
-//!   [`ext_start_check`]), and a `55 AA` counts as a partition table only
-//!   when its four entries describe extents a partitioner could have written
-//!   (see [`Mbr::is_plausible_table`]). What fails those tests is still
+//!   [`ext_start_check`]) *and* the root inode that table points at reads
+//!   as a directory (see [`ext_root_inode_location`]) — the step a mount
+//!   takes next, and the one a journalled copy of blocks 0 and 1 cannot
+//!   survive. A `55 AA` counts as a partition table only when its four
+//!   entries describe extents a partitioner could have written (see
+//!   [`Mbr::is_plausible_table`]). What fails those tests is still
 //!   reported — as what it actually is, folded into one line.
 
 use std::io::{Read, Seek, SeekFrom};
@@ -43,8 +46,9 @@ use tracing::debug;
 use fsmnt_device::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
     ExtStartCheck, FS_DETECT_PROBE_SIZE, HostDriveEnumerator, HostDriveError, HostDriveId,
-    ImageOpenError, ImageReader, Mbr, ParsedBootSector, SectorReader, ext_start_check,
-    ext_superblock_info, is_btrfs_primary_superblock, parse_boot_sector,
+    ImageOpenError, ImageReader, Mbr, ParsedBootSector, SectorReader, ext_root_inode_location,
+    ext_root_inode_plausible, ext_start_check, ext_superblock_info, is_btrfs_primary_superblock,
+    parse_boot_sector,
 };
 
 /// Default distance between candidate positions.
@@ -183,9 +187,14 @@ pub enum ScanHitKind {
         /// `filesystem_start` is `None`.
         start_before_medium: Option<u64>,
     },
-    /// Copies of an ext primary superblock (group 0) that are NOT followed by
-    /// their group descriptor table: block 0 journalled inside a filesystem,
-    /// or a start whose table is damaged.
+    /// Copies of an ext primary superblock (group 0) with no filesystem
+    /// behind them: block 0 journalled inside a filesystem, or a start whose
+    /// metadata is damaged.
+    ///
+    /// A copy fails either of the two tests a start passes — no group
+    /// descriptor table follows it, or one does but the root inode it points
+    /// at is not a directory, which is what block 0 and block 1 journalled
+    /// together look like.
     ///
     /// [`ScanHit::offset`] is the first, `last_offset` the last, `copies` how
     /// many. Backups that name `offset` as their filesystem's start land in
@@ -404,11 +413,17 @@ pub fn scan_media(
         if last_position <= position {
             break;
         }
+        // Some candidates can only be settled by reading somewhere else
+        // entirely — an ext root inode lies megabytes past the chunk that
+        // found its superblock. `read_chunk` seeks before every chunk it
+        // fills, so a read taken out of line here costs one seek and leaves
+        // the sequential pass exactly where it was.
+        let mut read_media = |offset: u64, into: &mut [u8]| read_chunk(media, offset, into);
         while position < last_position {
             let Ok(offset) = usize::try_from(position - read_at) else {
                 break;
             };
-            state.classify(&buffer[..filled], offset, position);
+            state.classify(&mut read_media, length, &buffer[..filled], offset, position);
             position = position.saturating_add(options.stride);
         }
     }
@@ -454,6 +469,15 @@ fn read_chunk(
     Ok(filled)
 }
 
+/// A way back to the medium from inside the classifier: fill `into` from
+/// `offset`, returning how many bytes were got.
+///
+/// A scan is a sequential pass, but one question cannot be answered from the
+/// chunk in hand — where an ext descriptor table says the root inode is —
+/// and this is how it gets asked without threading the medium's concrete
+/// type through every classifier.
+type MediaRead<'a> = dyn FnMut(u64, &mut [u8]) -> std::io::Result<usize> + 'a;
+
 /// Hits gathered so far, plus what is needed to fold and filter new ones.
 #[derive(Default)]
 struct ScanState {
@@ -469,18 +493,34 @@ struct ScanState {
     /// Offsets of ext superblock copies already recorded, so a stride that
     /// tests both alignments does not report the same copy twice.
     seen_superblocks: Vec<u64>,
+    /// Offsets demoted to a copy *only* because the root inode their
+    /// descriptor table named did not read as a directory — everything else
+    /// about them said "filesystem start". A backup superblock that later
+    /// names one of these offsets outranks the inode and puts it back.
+    root_inode_demoted: Vec<u64>,
 }
 
 impl ScanState {
     /// Test one candidate position against every probe.
-    fn classify(&mut self, chunk: &[u8], offset: usize, position: u64) {
+    ///
+    /// `read_at` reaches the rest of the `length`-byte medium, for the one
+    /// question the bytes in hand cannot answer: whether the root inode an
+    /// ext descriptor table points at is really there.
+    fn classify(
+        &mut self,
+        read_at: &mut MediaRead<'_>,
+        length: u64,
+        chunk: &[u8],
+        offset: usize,
+        position: u64,
+    ) {
         let Some(tail) = chunk.get(offset..) else {
             return;
         };
         let window = &tail[..tail.len().min(FS_DETECT_PROBE_SIZE)];
 
         if let Some(detected) = detect(chunk, offset, window) {
-            self.record_detected(position, detected, window, tail);
+            self.record_detected(read_at, length, position, detected, window, tail);
         }
 
         // An ext superblock lies 1024 bytes into its filesystem, so a copy
@@ -504,9 +544,12 @@ impl ScanState {
     ///
     /// `window` is the detection prefix; `tail` runs from `position` to the
     /// end of the chunk, which reaches past the group descriptor table of
-    /// even a 64 KiB-block ext filesystem.
+    /// even a 64 KiB-block ext filesystem. `read_at` and `length` are the
+    /// rest of the medium, for the ext evidence that lies outside the chunk.
     fn record_detected(
         &mut self,
+        read_at: &mut MediaRead<'_>,
+        length: u64,
         position: u64,
         detected: DetectedBootSector,
         window: &[u8],
@@ -525,29 +568,15 @@ impl ScanState {
             return;
         }
         let size_bytes = declared_size(detected, window);
+        if is_ext {
+            self.record_ext(read_at, length, position, window, tail, size_bytes);
+            return;
+        }
         // A copy of a superblock sits *inside* the filesystem it describes,
         // so its declared size still marks bytes that are file data rather
         // than filesystem starts — the suppression is right either way.
         if let Some(size) = size_bytes {
             self.covered_end = self.covered_end.max(position.saturating_add(size));
-        }
-        if is_ext {
-            self.seen_superblocks.push(position.saturating_add(LEAD_IN));
-            let uuid = ext_superblock_info(window).map(|info| info.uuid);
-            if ext_start_check(tail) == ExtStartCheck::Unconfirmed {
-                self.record_primary_copy(position, size_bytes, uuid);
-                return;
-            }
-            self.push_hit(
-                ScanHit {
-                    offset: position,
-                    kind: ScanHitKind::Filesystem(detected),
-                    size_bytes,
-                    backup_superblocks: Vec::new(),
-                },
-                uuid,
-            );
-            return;
         }
         let kind = if detected.is_partition_table() {
             ScanHitKind::PartitionTable(detected)
@@ -565,12 +594,69 @@ impl ScanState {
         );
     }
 
-    /// Record a group-0 superblock at `position` that its own bytes cannot
+    /// Decide what an ext primary superblock at `position` actually is, and
+    /// record it.
+    ///
+    /// Two questions, in the order a mount asks them. Is the group
+    /// descriptor table there? And does the root inode it points at read as
+    /// a directory? An ext4 journal records whole blocks, so a transaction
+    /// touching both block 0 and block 1 leaves a byte-perfect superblock
+    /// *and* a byte-perfect descriptor table side by side somewhere in the
+    /// journal — evidence the first question cannot see through. The second
+    /// one can: the table's inode-table pointer is relative to the real
+    /// filesystem, so measured from the copy it lands on unrelated bytes.
+    ///
+    /// Nothing is recorded and `covered_end` is left alone until the answer
+    /// is in, because a copy claims the size of a filesystem that starts
+    /// somewhere else; letting it suppress the several gigabytes in front of
+    /// it would hide the very things a scan is run to find.
+    fn record_ext(
+        &mut self,
+        read_at: &mut MediaRead<'_>,
+        length: u64,
+        position: u64,
+        window: &[u8],
+        tail: &[u8],
+        size_bytes: Option<u64>,
+    ) {
+        let uuid = ext_superblock_info(window).map(|info| info.uuid);
+        if ext_start_check(tail) == ExtStartCheck::Unconfirmed {
+            self.record_primary_copy(position, size_bytes, uuid);
+            return;
+        }
+        if !root_inode_reads_as_a_directory(read_at, length, position, tail) {
+            debug!(
+                offset = position,
+                "the group descriptor table verified but the root inode it points at is not a \
+                 directory — a journal recorded block 0 and block 1 together, this is a copy"
+            );
+            self.root_inode_demoted.push(position);
+            self.record_primary_copy(position, size_bytes, uuid);
+            return;
+        }
+        self.seen_superblocks.push(position.saturating_add(LEAD_IN));
+        if let Some(size) = size_bytes {
+            self.covered_end = self.covered_end.max(position.saturating_add(size));
+        }
+        self.push_hit(
+            ScanHit {
+                offset: position,
+                kind: ScanHitKind::Filesystem(DetectedBootSector::Ext),
+                size_bytes,
+                backup_superblocks: Vec::new(),
+            },
+            uuid,
+        );
+    }
+
+    /// Record a group-0 superblock at `position` that the medium cannot
     /// establish as a filesystem start.
     ///
     /// One journalled transaction produces one such copy, and a busy
-    /// filesystem has journalled block 0 dozens of times, so the copies are
-    /// folded into a single run rather than listed one per line.
+    /// filesystem has journalled block 0 hundreds of times, so the copies are
+    /// folded into a single run rather than listed one per line. Which of the
+    /// two tests a copy failed is not recorded: the row says the same thing
+    /// either way, that no filesystem begins here.
     fn record_primary_copy(
         &mut self,
         position: u64,
@@ -640,6 +726,7 @@ impl ScanState {
             .or_else(|| self.ext_orphan_implying(info.uuid, start, start_before_medium));
         if let Some(index) = corroborates {
             self.hits[index].backup_superblocks.push(copy);
+            self.promote_if_only_the_root_inode_objected(index);
             return;
         }
         self.push_hit(
@@ -655,6 +742,37 @@ impl ScanState {
             },
             Some(info.uuid),
         );
+    }
+
+    /// Put back a start that only the root inode argued against, now that a
+    /// backup superblock has named its offset.
+    ///
+    /// The two demotions are not the same evidence. When the descriptor
+    /// table never verified, a backup naming the offset says "a filesystem
+    /// began here and its table is gone" — a salvage job, and the hit stays
+    /// a run of copies so the `--backup-superblock` route is the one on
+    /// offer. When the table *did* verify and only the root inode read
+    /// wrong, a backup naming the offset makes three independent structures
+    /// agree on this start, against one damaged inode: it is a filesystem
+    /// here with damage inside it, which is what `--salvage` is for, so it
+    /// goes back to being a filesystem. Only an unfolded run qualifies —
+    /// once other copies have joined it the offset is the run's, not this
+    /// candidate's.
+    fn promote_if_only_the_root_inode_objected(&mut self, index: usize) {
+        let hit = &mut self.hits[index];
+        if !self.root_inode_demoted.contains(&hit.offset)
+            || !matches!(hit.kind, ScanHitKind::ExtPrimaryCopies { copies: 1, .. })
+        {
+            return;
+        }
+        debug!(
+            offset = hit.offset,
+            "a backup superblock names this offset as its filesystem's start, which outranks the \
+             root inode that read wrong — recording it as a filesystem again"
+        );
+        hit.kind = ScanHitKind::Filesystem(DetectedBootSector::Ext);
+        let end = hit.offset.saturating_add(hit.size_bytes.unwrap_or(0));
+        self.covered_end = self.covered_end.max(end);
     }
 
     /// Add a hit and the filesystem identity that goes with it.
@@ -737,6 +855,53 @@ impl ScanState {
         hits.sort_by_key(|hit| hit.offset);
         hits
     }
+}
+
+/// Bytes of an ext inode that have to be in hand before its contents are
+/// worth judging: the base inode every `s_inode_size` starts with.
+const EXT_INODE_BASE_LEN: usize = 128;
+
+/// Whether the root inode of a candidate ext filesystem at `position` reads
+/// as a directory.
+///
+/// Inconclusive answers are `true`. The location falling past the end of the
+/// medium, a read that fails, a read that comes up short: none of them is
+/// evidence against the filesystem, and a scan that treated "I could not
+/// look" as "not a filesystem" would drop truncated images — where the front
+/// is intact and the only mountable volume in the file starts at byte zero.
+fn root_inode_reads_as_a_directory(
+    read_at: &mut MediaRead<'_>,
+    length: u64,
+    position: u64,
+    tail: &[u8],
+) -> bool {
+    let Some(location) = ext_root_inode_location(tail) else {
+        return true;
+    };
+    let Some(start) = position.checked_add(location.offset) else {
+        return true;
+    };
+    let Some(end) = start.checked_add(u64::from(location.len)) else {
+        return true;
+    };
+    let Ok(len) = usize::try_from(location.len) else {
+        return true;
+    };
+    if end > length {
+        debug!(
+            offset = position,
+            inode = start,
+            length,
+            "the root inode a descriptor table names lies past the end of the medium — nothing to \
+             read, so nothing decided"
+        );
+        return true;
+    }
+    let mut inode = vec![0_u8; len];
+    let Ok(read) = read_at(start, &mut inode) else {
+        return true;
+    };
+    read < EXT_INODE_BASE_LEN || ext_root_inode_plausible(&inode[..read])
 }
 
 /// Classify the bytes at `offset`, including the Btrfs superblock that sits
