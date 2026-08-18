@@ -135,7 +135,7 @@ mod scan;
 mod truncation;
 
 pub use backend::{is_mounted, mount, unmount};
-pub use fstab_mount::open_device_partition_with_fstab;
+pub use fstab_mount::{open_device_partition_with_fstab, open_image_with_fstab};
 pub use layout::{
     DriveLayout, DriveLayoutError, DriveLayoutOptions, ImageLayout, ImageLayoutOptions, LayoutKind,
     LayoutOrigin, LayoutPartition, drive_layout, image_layout, image_layout_with_options,
