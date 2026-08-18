@@ -5,10 +5,11 @@
 
 Cross-platform **read-only** virtual mounting for raw, Expert Witness Format
 (EWF), VHD, and VHDX filesystem images and block devices. `fsmnt` parses
-on-disk filesystems in pure Rust and presents them as a browsable volume, so
-files can be inspected and copied with ordinary OS tools — no kernel driver
-for the guest filesystem required, and nothing is ever written back to the
-source.
+on-disk filesystems in Rust — the parsers themselves are pure Rust; the one
+native library in the binary is libzstd, for Btrfs zstd-compressed extents —
+and presents them as a browsable volume, so files can be inspected and
+copied with ordinary OS tools — no kernel driver for the guest filesystem
+required, and nothing is ever written back to the source.
 
 | Platform      | Mount backend | Mount target              |
 |---------------|---------------|---------------------------|
