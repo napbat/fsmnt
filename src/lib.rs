@@ -119,7 +119,7 @@ mod scan;
 mod truncation;
 
 pub use backend::{is_mounted, mount, unmount};
-pub use fstab_mount::open_device_partition_with_fstab;
+pub use fstab_mount::{open_device_partition_with_fstab, open_image_with_fstab};
 pub use image_layout::{
     ImageLayout, ImageLayoutKind, ImageLayoutOptions, ImagePartition, LayoutOrigin, image_layout,
     image_layout_with_options, image_layout_with_sector_size,
