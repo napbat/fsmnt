@@ -108,17 +108,20 @@ fn invalid_root_selector(value: &str) -> FilesystemRootParseError {
 }
 
 /// Options applied while a filesystem driver opens its source.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FilesystemOpenOptions {
     root: FilesystemRoot,
+    journal_replay: bool,
 }
 
 impl FilesystemOpenOptions {
-    /// Create options using the driver's default filesystem root.
+    /// Create options using the driver's default filesystem root, with
+    /// journal replay enabled.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             root: FilesystemRoot::Default,
+            journal_replay: true,
         }
     }
 
@@ -129,10 +132,37 @@ impl FilesystemOpenOptions {
         self
     }
 
+    /// Whether a driver may replay a dirty journal (and orphan lists) into
+    /// an in-memory overlay before serving reads.
+    ///
+    /// Replay never writes to the source: fsmnt reads are read-only
+    /// regardless of this setting. It only decides which *view* a dirty
+    /// volume presents — the recovered state (default), or the bytes exactly
+    /// as they sit on disk (`false`), which is what evidence-handling
+    /// workflows compare against carving results. Drivers without journal
+    /// replay satisfy `false` trivially.
+    #[must_use]
+    pub const fn with_journal_replay(mut self, replay: bool) -> Self {
+        self.journal_replay = replay;
+        self
+    }
+
     /// Requested filesystem-owned root.
     #[must_use]
     pub const fn root(&self) -> &FilesystemRoot {
         &self.root
+    }
+
+    /// Whether journal replay into an overlay is permitted.
+    #[must_use]
+    pub const fn journal_replay(&self) -> bool {
+        self.journal_replay
+    }
+}
+
+impl Default for FilesystemOpenOptions {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -303,10 +333,14 @@ pub trait FilesystemDriver: Send + Sync {
         detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>>;
 
-    /// Open a filesystem with an explicit filesystem-owned root selection.
+    /// Open a filesystem with explicit open options.
     ///
     /// The default implementation accepts only [`FilesystemRoot::Default`]
-    /// and delegates to [`open`](Self::open).
+    /// and delegates to [`open`](Self::open). It ignores
+    /// [`FilesystemOpenOptions::journal_replay`]: a driver that never
+    /// replays a journal already presents the on-disk state, so declining
+    /// replay changes nothing. Drivers that do replay (ext) override this
+    /// method to honour it.
     ///
     /// # Errors
     ///
@@ -347,9 +381,10 @@ pub trait FilesystemDriver: Send + Sync {
 
     /// Open one or more raw members with filesystem-open options.
     ///
-    /// The default implementation delegates default-root requests to
-    /// [`open_devices`](Self::open_devices). For an explicit root, it accepts
-    /// one member and delegates to [`open_with_options`](Self::open_with_options).
+    /// The default implementation delegates all-default requests to
+    /// [`open_devices`](Self::open_devices). For any explicit option (a
+    /// root selector, journal replay disabled) it accepts one member and
+    /// delegates to [`open_with_options`](Self::open_with_options).
     ///
     /// # Errors
     ///
@@ -361,7 +396,7 @@ pub trait FilesystemDriver: Send + Sync {
         detected: DetectedBootSector,
         options: &FilesystemOpenOptions,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        if options.root() == &FilesystemRoot::Default {
+        if options == &FilesystemOpenOptions::new() {
             return self.open_devices(devices, detected);
         }
         let reader = devices

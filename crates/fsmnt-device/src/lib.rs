@@ -40,7 +40,7 @@ mod partition_reader;
 mod sector_reader;
 mod source;
 
-pub use detection::detect_boot_sector_at;
+pub use detection::{detect_boot_sector_at, ext_backup_superblock_at};
 pub use disk::{Disk, DiskLayout};
 pub use drive::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,

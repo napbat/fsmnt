@@ -16,7 +16,9 @@ use chrono::{DateTime, Utc};
 use fs_ext::io::{Read, Seek, SeekFrom};
 use fs_ext::{Ext, ExtError, ExtTimestamp, JournalReplay, OrphanReplay, OverlayReader};
 use fsmnt_core::{FsEntry, FsError, FsMetadata, FsResult, TargetFilesystem};
-use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use fsmnt_device::{
+    DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
+};
 use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
 
@@ -45,6 +47,10 @@ pub struct ExtFilesystem<R: Read + Seek + Send> {
 enum Overlay {
     /// The strict open succeeded directly; no recovery was needed.
     Clean,
+    /// The caller declined replay: reads present the on-disk bytes even if
+    /// the journal is dirty or orphans are pending. Serves reads exactly
+    /// like [`Overlay::Clean`]; kept distinct so the choice is reportable.
+    Unreplayed,
     /// Journal replay ran; no pending orphan state.
     Journal(JournalReplay),
     /// Journal *and* orphan replay ran. Transitively owns the journal.
@@ -156,16 +162,76 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// required but no journal is present, or if the post-recovery strict
     /// open still fails (e.g. an unsupported incompatible feature flag).
     pub fn new(mut reader: R) -> FsResult<Self> {
-        match Ext::new(&mut reader) {
-            Ok(ext) => Ok(Self {
+        let mut fs = match Ext::new(&mut reader) {
+            Ok(ext) => Self {
                 reader,
                 ext,
                 overlay: Overlay::Clean,
-            }),
+            },
             Err(ExtError::NeedsRecovery | ExtError::OrphanRecoveryRequired) => {
-                Self::recover(reader)
+                Self::recover(reader)?
             }
-            Err(e) => Err(map_ext_error(e, "<open>")),
+            Err(e) => return Err(map_ext_error(e, "<open>")),
+        };
+        fs.check_root_directory()?;
+        Ok(fs)
+    }
+
+    /// Open an ext2/ext3/ext4 volume from `reader` **without** journal or
+    /// orphan replay: reads present the bytes exactly as they sit on disk,
+    /// even if the journal is dirty (`INCOMPAT_RECOVER`) or orphans are
+    /// pending (`RO_COMPAT_ORPHAN_PRESENT`).
+    ///
+    /// [`Self::new`] never writes to the source either — replay only builds
+    /// an in-memory overlay — so this is not a safety switch but a *view*
+    /// switch: it lets evidence workflows compare what fsmnt presents with
+    /// what a carving tool sees in the raw image, and it makes a dirty
+    /// volume browsable when its journal is missing or unparsable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the superblock, feature flags, or group
+    /// descriptors are invalid, or if the root directory is unusable.
+    pub fn new_without_replay(mut reader: R) -> FsResult<Self> {
+        let ext = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<open>"))?;
+        let mut fs = Self {
+            reader,
+            ext,
+            overlay: Overlay::Unreplayed,
+        };
+        fs.check_root_directory()?;
+        Ok(fs)
+    }
+
+    /// Fail the open unless the root directory (inode 2) is readable and is
+    /// a directory.
+    ///
+    /// A superblock alone does not prove the volume is usable: the group
+    /// descriptors and inode tables are located relative to the superblock,
+    /// so a plausible-looking superblock that is not the primary — an ext
+    /// backup copy partway into a partition, or a stale one on reused media
+    /// — parses fine and then yields a mount with no readable files. In a
+    /// forensic context "mounted, empty" is easily misread as "no data";
+    /// refusing to open with a pointed message is the safer outcome.
+    fn check_root_directory(&mut self) -> FsResult<()> {
+        // The inode borrows `ext`, so decide inside the closure and hand
+        // out only an owned verdict.
+        let verdict = self.with_reader(|ext, reader| {
+            ext.inode(reader, EXT4_ROOT_INO)
+                .map(|inode| inode.is_directory())
+                .map_err(|e| e.to_string())
+        });
+        match verdict {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(FsError::Filesystem(format!(
+                "root inode {EXT4_ROOT_INO} is not a directory; the superblock at this offset does \
+                 not describe a usable filesystem (a backup superblock rather than the primary?)"
+            ))),
+            Err(e) => Err(FsError::Filesystem(format!(
+                "root directory (inode {EXT4_ROOT_INO}) is unreadable: {e}; the superblock at this \
+                 offset does not describe a usable filesystem (a backup superblock rather than the \
+                 primary?)"
+            ))),
         }
     }
 
@@ -240,7 +306,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// Run `f` with a reader view that routes through the active overlay.
     fn with_reader<T>(&mut self, f: impl FnOnce(&Ext, &mut Reader<'_, R>) -> T) -> T {
         let mut reader = match &self.overlay {
-            Overlay::Clean => Reader::Direct(&mut self.reader),
+            Overlay::Clean | Overlay::Unreplayed => Reader::Direct(&mut self.reader),
             Overlay::Journal(j) => Reader::Journal(OverlayReader::new(&mut self.reader, j)),
             Overlay::Orphan(o) => Reader::Orphan(OverlayReader::new(&mut self.reader, o)),
         };
@@ -256,6 +322,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     pub fn overlay_kind(&self) -> &'static str {
         match &self.overlay {
             Overlay::Clean => "clean",
+            Overlay::Unreplayed => "unreplayed",
             Overlay::Journal(_) => "journal",
             Overlay::Orphan(_) => "orphan",
         }
@@ -370,6 +437,30 @@ impl FilesystemDriver for ExtDriver {
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
         Ok(Box::new(ExtFilesystem::new(reader)?))
+    }
+
+    /// ext has a single root, so only [`FilesystemRoot::Default`] is
+    /// accepted; [`FilesystemOpenOptions::journal_replay`] selects between
+    /// the recovered view ([`ExtFilesystem::new`]) and the raw on-disk view
+    /// ([`ExtFilesystem::new_without_replay`]).
+    fn open_with_options(
+        &self,
+        reader: Box<dyn DeviceReader>,
+        detected: DetectedBootSector,
+        options: &FilesystemOpenOptions,
+    ) -> FsResult<Box<dyn TargetFilesystem>> {
+        if options.root() != &FilesystemRoot::Default {
+            return Err(FsError::Filesystem(format!(
+                "filesystem driver {:?} does not support root selector {:?}",
+                self.name(),
+                options.root()
+            )));
+        }
+        if options.journal_replay() {
+            self.open(reader, detected)
+        } else {
+            Ok(Box::new(ExtFilesystem::new_without_replay(reader)?))
+        }
     }
 }
 

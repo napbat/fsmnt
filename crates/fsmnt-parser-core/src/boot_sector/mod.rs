@@ -52,7 +52,13 @@ const SB_S_LOG_BLOCK_SIZE: usize = 0x18;
 const SB_S_BLOCKS_PER_GROUP: usize = 0x20;
 const SB_S_INODES_PER_GROUP: usize = 0x28;
 const SB_S_MAGIC: usize = 0x38;
-const EXT_PROBE_MIN_LEN: usize = EXT_SUPERBLOCK_OFFSET + SB_S_MAGIC + 2; // 0x43A
+/// `s_block_group_nr`: the block group this superblock copy belongs to.
+/// e2fsprogs writes 0 into the primary and the group number into every
+/// backup (`sparse_super` puts them in groups 1, 3, 5, 7, 9, 25, 27, …),
+/// which is what lets a probe tell a filesystem start from a copy that
+/// merely sits somewhere inside one.
+const SB_S_BLOCK_GROUP_NR: usize = 0x5A;
+const EXT_PROBE_MIN_LEN: usize = EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR + 2; // 0x45C
 const EXT_MAGIC: u16 = 0xEF53;
 
 fn read_u16_le(buf: &[u8], off: usize) -> u16 {
@@ -76,10 +82,11 @@ fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     ])
 }
 
-/// Prefix probe for ext2/ext3/ext4 superblock. Runs cheap sanity checks
-/// beyond `s_magic` to avoid misclassifying GPT partition-entry arrays
-/// (where a coincidental 0xEF53 at offset 0x438 would otherwise match).
-fn probe_ext(buf: &[u8]) -> bool {
+/// Structural sanity of an ext superblock at offset 1024 of `buf`: the
+/// magic plus the cheap field checks that keep a coincidental 0xEF53 in a
+/// GPT partition-entry array from passing. Says nothing about whether the
+/// copy is the primary — see [`probe_ext`] and [`ext_backup_superblock_group`].
+fn ext_superblock_plausible(buf: &[u8]) -> bool {
     if buf.len() < EXT_PROBE_MIN_LEN {
         return false;
     }
@@ -98,6 +105,37 @@ fn probe_ext(buf: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+/// Prefix probe for the *start* of an ext2/ext3/ext4 filesystem: a
+/// plausible superblock whose `s_block_group_nr` is 0.
+///
+/// Backup superblocks carry their own group number there, so an offset
+/// that lands on one partway into a filesystem is not reported as `Ext`.
+/// Mounting from a backup used to "succeed" — the group descriptors were
+/// then read from the wrong place and the volume exposed no files, which
+/// in a forensic context reads as "this partition is empty".
+fn probe_ext(buf: &[u8]) -> bool {
+    ext_superblock_plausible(buf)
+        && read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR) == 0
+}
+
+/// If `buf` (the first bytes at a candidate offset) holds an ext **backup**
+/// superblock, return the block group it belongs to.
+///
+/// Returns `None` for a primary superblock and for anything that is not a
+/// plausible ext superblock, so callers can turn a `Unknown` detection
+/// into a precise diagnosis: "this is a copy from group N, not the start of
+/// the filesystem".
+#[must_use]
+pub fn ext_backup_superblock_group(buf: &[u8]) -> Option<u16> {
+    if !ext_superblock_plausible(buf) {
+        return None;
+    }
+    match read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR) {
+        0 => None,
+        group => Some(group),
+    }
 }
 
 /// `nx_magic` of an APFS container superblock — the bytes `NXSB`.

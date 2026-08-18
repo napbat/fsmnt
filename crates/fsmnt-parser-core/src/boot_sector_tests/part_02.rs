@@ -265,21 +265,22 @@ fn from_bytes_rejects_ext_when_sanity_fields_are_bogus() {
 // ========================================================================
 
 #[test]
-fn ext_probe_min_len_matches_magic_field_end() {
-    // The constant must equal the offset of the last byte of s_magic + 1.
-    // Catches arithmetic-operator mutations on the constant expression at
-    // line 37 (e.g. `+` → `-` or `*`).
-    assert_eq!(EXT_PROBE_MIN_LEN, 0x43A);
+fn ext_probe_min_len_matches_block_group_nr_field_end() {
+    // The constant must equal the offset of the last byte of
+    // s_block_group_nr + 1 — the furthest field the probe reads. Catches
+    // arithmetic-operator mutations on the constant expression
+    // (e.g. `+` → `-` or `*`).
+    assert_eq!(EXT_PROBE_MIN_LEN, 0x45C);
 }
 
 #[test]
 fn ext_probe_short_buffer_at_minimum_minus_one_returns_unknown() {
-    // Buffer of size 0x439 has buf[0x438] but not buf[0x439], so the
-    // u16 magic read at offset 0x438 would index out of bounds. The
-    // size check at probe_ext line 52 must reject this buffer; any
-    // mutation that shrinks EXT_PROBE_MIN_LEN below 0x43A makes the
-    // check pass, and the magic read then panics.
-    let buf = vec![0u8; 0x439];
+    // A buffer one byte short of EXT_PROBE_MIN_LEN lacks the last byte of
+    // s_block_group_nr, so the u16 read at 0x45A would index out of
+    // bounds. The size check in probe_ext must reject this buffer; any
+    // mutation that shrinks EXT_PROBE_MIN_LEN makes the check pass and
+    // the read then panics.
+    let buf = vec![0u8; EXT_PROBE_MIN_LEN - 1];
     assert_eq!(
         DetectedBootSector::from_bytes(&buf),
         DetectedBootSector::Unknown
@@ -288,16 +289,49 @@ fn ext_probe_short_buffer_at_minimum_minus_one_returns_unknown() {
 
 #[test]
 fn ext_probe_succeeds_at_exact_minimum_buffer_size() {
-    // Buffer of exactly 0x43A bytes — the smallest size that fits the
-    // magic field. Catches mutations that grow EXT_PROBE_MIN_LEN
-    // (e.g. `SB_S_MAGIC + 2` → `SB_S_MAGIC * 2`) which would push the
-    // size threshold above the buffer length.
-    let mut buf = vec![0u8; 0x43A];
+    // Buffer of exactly EXT_PROBE_MIN_LEN bytes — the smallest size that
+    // fits every probed field, s_block_group_nr included. Catches
+    // mutations that grow EXT_PROBE_MIN_LEN (e.g. `+ 2` → `* 2`) which
+    // would push the size threshold above the buffer length.
+    let mut buf = vec![0u8; EXT_PROBE_MIN_LEN];
     synthesize_ext_superblock(&mut buf);
     assert_eq!(
         DetectedBootSector::from_bytes(&buf),
         DetectedBootSector::Ext
     );
+}
+
+#[test]
+fn ext_probe_rejects_backup_superblock() {
+    // A backup superblock is byte-for-byte a plausible superblock except
+    // that s_block_group_nr names the group it lives in. Landing on one
+    // partway into a filesystem must not read as a filesystem start.
+    let mut buf = vec![0u8; FS_DETECT_PROBE_SIZE];
+    synthesize_ext_superblock(&mut buf);
+    buf[EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR..EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR + 2]
+        .copy_from_slice(&3u16.to_le_bytes());
+    assert_eq!(
+        DetectedBootSector::from_bytes(&buf),
+        DetectedBootSector::Unknown
+    );
+    assert_eq!(ext_backup_superblock_group(&buf), Some(3));
+}
+
+#[test]
+fn ext_backup_superblock_group_is_none_for_primary_and_non_ext() {
+    let mut primary = vec![0u8; FS_DETECT_PROBE_SIZE];
+    synthesize_ext_superblock(&mut primary);
+    assert_eq!(ext_backup_superblock_group(&primary), None);
+
+    // Same non-zero group number, but no ext magic: not a superblock at
+    // all, so no backup diagnosis either.
+    let mut not_ext = vec![0u8; FS_DETECT_PROBE_SIZE];
+    not_ext[EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR..EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR + 2]
+        .copy_from_slice(&3u16.to_le_bytes());
+    assert_eq!(ext_backup_superblock_group(&not_ext), None);
+
+    // Too short to hold s_block_group_nr.
+    assert_eq!(ext_backup_superblock_group(&primary[..EXT_PROBE_MIN_LEN - 1]), None);
 }
 
 #[test]

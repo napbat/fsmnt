@@ -29,6 +29,28 @@ pub fn detect_boot_sector_at(
     Ok(probe_at(reader, offset)?.detected)
 }
 
+/// If `offset` holds an ext **backup** superblock, return the block group
+/// it belongs to.
+///
+/// [`detect_boot_sector_at`] deliberately reports such offsets as
+/// [`DetectedBootSector::Unknown`] — a backup copy is not the start of a
+/// filesystem, and opening from one yields a volume with no readable files.
+/// This companion probe lets a caller explain *why* an offset was rejected
+/// ("backup superblock of group N; the filesystem starts earlier") instead
+/// of a bare "no filesystem". Returns `None` for a primary superblock and
+/// for non-ext data.
+///
+/// # Errors
+///
+/// Returns an error when the seek or read at `offset` fails.
+pub fn ext_backup_superblock_at(
+    reader: &mut (impl Read + Seek + ?Sized),
+    offset: u64,
+) -> std::io::Result<Option<u16>> {
+    let prefix = read_at(reader, offset, FS_DETECT_PROBE_SIZE)?;
+    Ok(fsmnt_parser_core::ext_backup_superblock_group(&prefix))
+}
+
 pub(crate) fn probe_at(
     reader: &mut (impl Read + Seek + ?Sized),
     offset: u64,
