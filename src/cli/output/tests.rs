@@ -1,16 +1,21 @@
-//! Unit tests for the report builders.
+//! Unit tests for the reports, in both of the forms they are read in.
 //!
-//! They assert the wire format itself — exact keys and values — because that
-//! is the promise `--json` makes: a field that changes meaning here is a
-//! schema break, and a test that only checked the Rust types would never
-//! notice one.
+//! The JSON tests assert the wire format itself — exact keys and values —
+//! because that is the promise `--json` makes: a field that changes meaning
+//! here is a schema break, and a test that only checked the Rust types would
+//! never notice one. The text tests assert whole renderings, character for
+//! character, for the same reason: the table is an interface too, and a
+//! column that shifts is a line somebody's `awk` stops matching.
 
 use serde_json::{Value, json};
 
 use fsmnt::device::{DetectedBootSector, HostDriveBusType, HostDriveId, HostDriveInfo};
 use fsmnt::{DriveLayout, ImageFormat, ImageLayout, LayoutKind, LayoutOrigin, LayoutPartition};
 
-use super::{DrivesDocument, PartitionsDocument, UnmountDocument, VolumeEntry};
+use super::{
+    DrivesDocument, MountReport, MountedEvent, OpenedEvent, PartitionsDocument, Report, SourceRef,
+    UnmountDocument, UnmountedEvent, VolumeEntry,
+};
 use crate::cli::source::Source;
 
 /// An MBR image with two entries, the second of which the image stops
@@ -51,6 +56,23 @@ fn mbr_layout() -> ImageLayout {
 /// Serialize a report, as a reader receives it.
 fn value(document: &impl serde::Serialize) -> Value {
     serde_json::to_value(document).expect("a report serializes")
+}
+
+/// Render a report the way `emit` writes it to a terminal.
+fn text(report: &impl Report) -> String {
+    let mut rendered = Vec::new();
+    report
+        .render_text(&mut rendered)
+        .expect("a rendering into memory cannot fail");
+    String::from_utf8(rendered).expect("the rendering is UTF-8")
+}
+
+/// The expected rendering, written one printed line per element.
+///
+/// Every printer ends its last line, so the join carries a trailing
+/// newline: a table that lost it would run into the next prompt.
+fn lines(lines: &[&str]) -> String {
+    format!("{}\n", lines.join("\n"))
 }
 
 #[test]
@@ -179,9 +201,10 @@ fn a_bare_medium_names_the_filesystem_that_fills_it() {
     );
 }
 
-#[test]
-fn a_drive_listing_carries_its_model_and_the_volumes_over_each_partition() {
-    let layout = DriveLayout {
+/// A GPT drive read from its backup header, whose second entry is bounded
+/// by nothing and carries no filesystem.
+fn gpt_layout() -> DriveLayout {
+    DriveLayout {
         sector_size: 512,
         sector_size_auto_detected: false,
         origin: LayoutOrigin::BackupTable,
@@ -209,12 +232,16 @@ fn a_drive_listing_carries_its_model_and_the_volumes_over_each_partition() {
                 head_absent: None,
             },
         ],
-    };
-    let source = Source::Drive(HostDriveId::new("0"));
-    let document = value(&PartitionsDocument::from_drive(
-        &source,
+    }
+}
+
+/// That drive's listing: one partition with a volume over it, and one whose
+/// volumes could not be resolved.
+fn gpt_document() -> PartitionsDocument {
+    PartitionsDocument::from_drive(
+        &Source::Drive(HostDriveId::new("0")),
         Some("Samsung SSD 990 PRO 2TB".to_string()),
-        &layout,
+        &gpt_layout(),
         |partition| {
             (partition.offset == 1_048_576).then(|| {
                 vec![VolumeEntry {
@@ -223,7 +250,12 @@ fn a_drive_listing_carries_its_model_and_the_volumes_over_each_partition() {
                 }]
             })
         },
-    ));
+    )
+}
+
+#[test]
+fn a_drive_listing_carries_its_model_and_the_volumes_over_each_partition() {
+    let document = value(&gpt_document());
 
     assert_eq!(
         document["source"],
@@ -263,8 +295,8 @@ fn a_drive_listing_carries_its_model_and_the_volumes_over_each_partition() {
     );
 }
 
-#[test]
-fn the_drives_document_reports_what_each_drive_says_about_itself() {
+/// Two drives: one this process can read, one it was refused.
+fn drives_document() -> DrivesDocument {
     let mut readable = HostDriveInfo::new(HostDriveId::new("0"), "/dev/nvme0n1".into());
     readable.size_bytes = Some(2_000_398_934_016);
     readable.sector_size = Some(512);
@@ -278,7 +310,12 @@ fn the_drives_document_reports_what_each_drive_says_about_itself() {
     denied.bus_type = Some(HostDriveBusType::Usb);
     denied.access_error = Some("access is denied".to_string());
 
-    let document = value(&DrivesDocument::new(&[readable, denied]));
+    DrivesDocument::new(&[readable, denied])
+}
+
+#[test]
+fn the_drives_document_reports_what_each_drive_says_about_itself() {
+    let document = value(&drives_document());
 
     assert_eq!(document["schema"], 1);
     assert_eq!(document["kind"], "drives");
@@ -312,5 +349,132 @@ fn an_unmount_is_one_document() {
     assert_eq!(
         value(&UnmountDocument::new("Z:")),
         json!({"schema": 1, "kind": "unmount", "mountpoint": "Z:", "unmounted": true}),
+    );
+}
+
+#[test]
+fn an_image_listing_prints_the_same_facts_as_a_table() {
+    let source = Source::Image("disk.bin".into());
+    assert_eq!(
+        text(&PartitionsDocument::from_image(&source, &mbr_layout())),
+        lines(&[
+            "disk.bin: raw image, 0 MB, sector size 512",
+            "MBR partition table",
+            "   #  TYPE                    SIZE         OFFSET  FILESYSTEM",
+            "   0  Linux                   0 MB           4096  Unknown",
+            "   1  NTFS/HPFS/exFAT         0 MB           8192  Ntfs  TRUNCATED (0 MB missing)",
+            "",
+            "Mount one with: fsmnt mount disk.bin <MOUNTPOINT> --partition <#>",
+        ]),
+    );
+}
+
+#[test]
+fn a_drive_listing_prints_the_volume_column_an_image_has_no_use_for() {
+    assert_eq!(
+        text(&gpt_document()),
+        lines(&[
+            "0: drive (Samsung SSD 990 PRO 2TB), 2000.3 GB, sector size 512",
+            "GPT partition table (recovered from the backup header in the last sector; the \
+             primary header at the front of the drive is damaged)",
+            "   #  NAME                  TYPE               SIZE         OFFSET  FILESYSTEM  \
+             VOLUME",
+            "   0  EFI system partition  EFI System       104 MB        1048576  Fat32       \
+             volume-5f2 (C:)",
+            "   1  -                     Unknown         unknown      316669952  unreadable  -",
+            "",
+            "Mount one with: fsmnt mount 0 <MOUNTPOINT> --partition <#>",
+        ]),
+        "the drive ID, the provenance of the table and the volumes are all read off the document"
+    );
+}
+
+#[test]
+fn the_drives_table_says_why_a_drive_could_not_be_read() {
+    assert_eq!(
+        text(&drives_document()),
+        lines(&[
+            "ID                 SIZE  BUS        MODEL                        ACCESS",
+            "0             2000.3 GB  NVMe       Samsung SSD 990 PRO 2TB      ok",
+            "1               unknown  USB        -                            inaccessible \
+             (access is denied)",
+        ]),
+    );
+    assert_eq!(
+        text(&DrivesDocument::new(&[])),
+        "No drives found.\n",
+        "an empty list is an answer, not an empty table"
+    );
+}
+
+#[test]
+fn an_unmount_names_the_mountpoint_it_released() {
+    assert_eq!(text(&UnmountDocument::new("Z:")), "Unmounted Z:.\n");
+}
+
+#[test]
+fn a_mounted_volume_says_who_is_holding_it_to_both_audiences() {
+    assert_eq!(
+        text(&MountedEvent::foreground("Z:", 76_532)),
+        "Volume mounted at Z:. Press Ctrl+C, or run 'fsmnt unmount Z:' from another shell, to \
+         unmount.\n",
+    );
+    assert_eq!(
+        text(&MountedEvent::detached("Z:", 76_532)),
+        "Volume mounted at Z: (pid 76532); run 'fsmnt unmount Z:' to unmount.\n",
+        "a detached mount is held by a process this command is about to outlive"
+    );
+
+    assert_eq!(
+        value(&MountedEvent::foreground("Z:", 76_532)),
+        json!({
+            "schema": 1,
+            "event": "mounted",
+            "mountpoint": "Z:",
+            "pid": 76_532,
+            "detached": false,
+        }),
+    );
+    assert_eq!(
+        value(&MountedEvent::detached("/mnt/evidence", 4021))["detached"],
+        true,
+        "the field a reader needs to know whose pid it just got"
+    );
+}
+
+#[test]
+fn the_end_of_a_mount_is_one_word_and_one_event() {
+    assert_eq!(text(&UnmountedEvent::new("Z:", None)), "Unmounted.\n");
+    assert_eq!(
+        value(&UnmountedEvent::new("Z:", None)),
+        json!({"schema": 1, "event": "unmounted", "mountpoint": "Z:", "best_effort": null}),
+    );
+}
+
+#[test]
+fn the_opened_event_prints_nothing_because_the_log_has_already_said_it() {
+    let report = MountReport {
+        source: SourceRef::new(&Source::Image("disk.bin".into())),
+        filesystem: "ntfs",
+        volname: "disk".to_string(),
+        fsname: "ntfs".to_string(),
+        offset: Some(8192),
+        partition: Some(1),
+        size_bytes: Some(24_576),
+        layout_origin: Some(LayoutOrigin::Table),
+        truncated_by: None,
+        head_absent: None,
+    };
+    let notices = vec!["opened through the backup superblock in group 1".to_string()];
+
+    assert_eq!(
+        text(&OpenedEvent::new(&report, notices.clone())),
+        "",
+        "its facts reached a person as the info and warn lines that precede it"
+    );
+    assert_eq!(
+        value(&OpenedEvent::new(&report, notices))["notices"],
+        json!(["opened through the backup superblock in group 1"]),
+        "which is exactly why the wire form repeats them"
     );
 }

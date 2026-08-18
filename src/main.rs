@@ -11,8 +11,8 @@
 //!
 //! Who is reading is one global flag, not a separate command tree:
 //! `--json` ([`cli::logging::LogOptions`]) turns every handler's output into
-//! the documents in [`cli::json`], and is carried to them as a
-//! [`cli::json::Output`] rather than consulted anywhere below the CLI.
+//! the documents in [`cli::output`], and is carried to them as a
+//! [`cli::output::Output`] rather than consulted anywhere below the CLI.
 
 mod cli;
 
@@ -449,7 +449,7 @@ fn main() -> std::process::ExitCode {
 
 /// Dispatch the parsed command line to its handler.
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let output = cli::json::Output::new(cli.log.json);
+    let output = cli::output::Output::new(cli.log.json);
 
     // `--detach`: hand the whole command to a background process and wait
     // here only until its volume is live.
@@ -458,13 +458,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // The background process has no console, so this is the only place
         // the volume can be announced — and the pid it carries is the one
         // holding the mount, not this process, which is about to exit.
-        if output.is_json() {
-            cli::json::print_event(&cli::json::MountedEvent::new(mountpoint, pid));
-        } else {
-            println!(
-                "Volume mounted at {mountpoint} (pid {pid}); run 'fsmnt unmount {mountpoint}' to unmount."
-            );
-        }
+        output.emit(&cli::output::MountedEvent::detached(mountpoint, pid));
         return Ok(());
     }
 

@@ -834,13 +834,17 @@ open, the volume is live, the volume is gone:
 ```console
 $ fsmnt --json mount disk.bin Z: --partition 1 2>/dev/null
 {"schema":1,"event":"opened","source":{"kind":"image","path":"disk.bin","id":null},"filesystem":"ntfs","volname":"disk","fsname":"ntfs","offset":8192,"partition":1,"size_bytes":24576,"layout_origin":"table","truncated_by":null,"head_absent":null,"notices":[]}
-{"schema":1,"event":"mounted","mountpoint":"Z:","pid":76532}
+{"schema":1,"event":"mounted","mountpoint":"Z:","pid":76532,"detached":false}
 {"schema":1,"event":"unmounted","mountpoint":"Z:","best_effort":null}
 ```
 
 `mounted` is the line to wait for: the volume is readable from that point,
 and `pid` is the process holding it — the background one under `--detach`,
-where the foreground command prints that single line and exits. `notices`
+where the foreground command prints that single line and exits. `detached`
+says which of the two it is, so a caller that spawned `fsmnt` knows whether
+the pid it just read is the process it is waiting on: `false` for a mount
+this command holds until it prints `unmounted`, `true` for one that outlives
+it. `notices`
 repeats in-band what the driver warned about on stderr (a backup superblock
 standing in for the primary, a degraded open), because a program deciding
 whether to trust a mount should not have to correlate two streams to find

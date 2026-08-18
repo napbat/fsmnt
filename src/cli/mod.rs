@@ -7,21 +7,22 @@
 //! to a background process, [`logging`] installs the subscriber every
 //! message goes through, and the helpers below are used by all of them.
 //!
-//! The division of output is deliberate: `println!` here is reserved for
-//! what the command *produces* — the tables, and the mount lifecycle lines
-//! a script may key on — while everything that describes how the command
-//! got there is a `tracing` event, so `-q`, `-v` and `--log-file` control
-//! it without changing what a pipeline reads.
+//! The division of output is deliberate: stdout is reserved for what the
+//! command *produces* — the tables, and the mount lifecycle lines a script
+//! may key on — while everything that describes how the command got there
+//! is a `tracing` event, so `-q`, `-v` and `--log-file` control it without
+//! changing what a pipeline reads.
 //!
-//! [`json`] is the same division stated for a program rather than a person:
-//! each handler builds one typed report and then renders it, so the table
-//! and the document are two views of one gathering rather than two paths
-//! through the media.
+//! Nothing here writes to stdout itself. What a command produces is one
+//! typed report, handed to [`output::Output::emit`], which is where the
+//! table and the JSON document part company — so the two are renderings of
+//! one gathering rather than two paths through the media, and a handler
+//! never has to know which of them it is producing.
 
 pub(crate) mod detach;
-pub(crate) mod json;
 pub(crate) mod logging;
 pub(crate) mod mount;
+pub(crate) mod output;
 pub(crate) mod partitions;
 pub(crate) mod scan;
 pub(crate) mod size;
@@ -36,7 +37,7 @@ pub(crate) use scan::handle_scan;
 
 use tracing::{info, warn};
 
-use json::{
+use output::{
     BestEffort, MountReport, MountedEvent, OpenedEvent, Output, UnmountDocument, UnmountedEvent,
 };
 
@@ -87,9 +88,7 @@ pub(crate) fn block_on_mount(
     for notice in &notices {
         warn!("{notice}");
     }
-    if output.is_json() {
-        json::print_event(&OpenedEvent::new(report, notices));
-    }
+    output.emit(&OpenedEvent::new(report, notices));
     if substitutions.is_some() {
         warn!(
             "best-effort reads are on — data the source cannot provide is served as zeros; a \
@@ -104,24 +103,13 @@ pub(crate) fn block_on_mount(
         &report.volname,
         report.size_bytes.unwrap_or(0),
         move || {
-            if output.is_json() {
-                // The pid is this process: it is the one holding the mount,
-                // and the one `fsmnt unmount` releases it from.
-                json::print_event(&MountedEvent::new(&mp_display, std::process::id()));
-            } else {
-                println!(
-                    "Volume mounted at {mp_display}. Press Ctrl+C, or run 'fsmnt unmount \
-                     {mp_display}' from another shell, to unmount."
-                );
-            }
+            // The pid is this process: it is the one holding the mount, and
+            // the one `fsmnt unmount` releases it from.
+            output.emit(&MountedEvent::foreground(&mp_display, std::process::id()));
         },
     )?;
-    if output.is_json() {
-        let best_effort = substitutions.as_deref().map(BestEffort::new);
-        json::print_event(&UnmountedEvent::new(mountpoint, best_effort));
-    } else {
-        println!("Unmounted.");
-    }
+    let best_effort = substitutions.as_deref().map(BestEffort::new);
+    output.emit(&UnmountedEvent::new(mountpoint, best_effort));
     if let Some(stats) = substitutions {
         report_substitutions(&stats);
     }
@@ -168,10 +156,7 @@ pub(crate) fn handle_unmount(
     output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     fsmnt::unmount(mountpoint)?;
-    match output {
-        Output::Json => json::print_document(&UnmountDocument::new(mountpoint)),
-        Output::Human => println!("Unmounted {mountpoint}."),
-    }
+    output.emit(&UnmountDocument::new(mountpoint));
     Ok(())
 }
 

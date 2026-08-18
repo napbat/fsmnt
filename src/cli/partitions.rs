@@ -8,17 +8,19 @@
 //! over it and an image does not.
 //!
 //! Each handler reads the medium once into a typed report
-//! ([`PartitionsDocument`], [`DrivesDocument`]) and then renders it — as the
-//! table below, or as the JSON that report already is. The columns are
-//! formatting over the same numbers a program receives, so the two can never
-//! disagree about what was found.
+//! ([`PartitionsDocument`], [`DrivesDocument`]) and emits it; the table
+//! below is that report's own human rendering, laid out over the same
+//! numbers a program receives, so the two can never disagree about what was
+//! found.
 
+use std::io::Write;
 use std::path::Path;
 
 use fsmnt::{LayoutKind, LayoutOrigin, LayoutPartition};
 
-use super::json::{
-    self, DriveEntry, DrivesDocument, Output, PartitionEntry, PartitionsDocument, VolumeEntry,
+use super::output::{
+    DriveEntry, DrivesDocument, Output, PartitionEntry, PartitionsDocument, Report, Shape,
+    VolumeEntry,
 };
 use super::source::{Source, resolve};
 use super::{format_media_size, format_size};
@@ -30,11 +32,7 @@ pub(crate) fn handle_drives(output: Output) -> Result<(), Box<dyn std::error::Er
     use fsmnt::HostDrives;
     use fsmnt::device::HostDriveEnumerator;
 
-    let document = DrivesDocument::new(&HostDrives::enumerate_drives()?);
-    match output {
-        Output::Json => json::print_document(&document),
-        Output::Human => print_drives(&document),
-    }
+    output.emit(&DrivesDocument::new(&HostDrives::enumerate_drives()?));
     Ok(())
 }
 
@@ -44,25 +42,29 @@ pub(crate) fn handle_drives(_output: Output) -> Result<(), Box<dyn std::error::E
     Err(super::NO_DRIVE_SUPPORT.into())
 }
 
-/// Print the drives as a table.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-fn print_drives(document: &DrivesDocument) {
-    if document.drives.is_empty() {
-        println!("No drives found.");
-        return;
-    }
+impl Report for DrivesDocument {
+    const SHAPE: Shape = Shape::Document;
 
-    println!(
-        "{:<10} {:>12}  {:<10} {:<28} ACCESS",
-        "ID", "SIZE", "BUS", "MODEL"
-    );
-    for drive in &document.drives {
-        println!("{}", drive_row(drive));
+    /// One line per drive, and for every one this process cannot read, the
+    /// reason in the `ACCESS` column rather than an omission.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        if self.drives.is_empty() {
+            return writeln!(out, "No drives found.");
+        }
+
+        writeln!(
+            out,
+            "{:<10} {:>12}  {:<10} {:<28} ACCESS",
+            "ID", "SIZE", "BUS", "MODEL"
+        )?;
+        for drive in &self.drives {
+            writeln!(out, "{}", drive_row(drive))?;
+        }
+        Ok(())
     }
 }
 
 /// One line of the drive table.
-#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn drive_row(drive: &DriveEntry) -> String {
     let size = drive
         .size_bytes
@@ -107,10 +109,7 @@ pub(crate) fn handle_partitions(
         Source::Image(path) => image_partitions(args, &source, path)?,
         Source::Drive(drive) => drive_partitions(args, &source, drive)?,
     };
-    match output {
-        Output::Json => json::print_document(&document),
-        Output::Human => print_listing(&source, &document),
-    }
+    output.emit(&document);
     Ok(())
 }
 
@@ -270,61 +269,72 @@ fn row(partition: &PartitionEntry) -> PartitionRow {
     }
 }
 
-/// Print the header, the table, and how to mount one of its entries.
-fn print_listing(source: &Source, listing: &PartitionsDocument) {
-    print_header(source, listing);
-    match &listing.table {
-        LayoutKind::Bare(detected) => {
-            println!(
-                "No partition table; the whole {} is {detected:?}",
-                source.describe()
-            );
-            println!("Mount it with: fsmnt mount {source} <MOUNTPOINT>");
-            return;
-        }
-        LayoutKind::Unknown => {
-            println!(
-                "Unrecognized layout: no partition table and no known filesystem at the start of \
-                 the {}.",
-                source.describe()
-            );
-            return;
-        }
-        LayoutKind::Gpt => {
-            if listing.origin == LayoutOrigin::BackupTable {
-                println!(
-                    "GPT partition table (recovered from the backup header in the last sector; \
-                     the primary header at the front of the {} is damaged)",
+impl Report for PartitionsDocument {
+    const SHAPE: Shape = Shape::Document;
+
+    /// The header, the table, and how to mount one of its entries.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        let source = &self.source;
+        write_header(out, self)?;
+        match &self.table {
+            LayoutKind::Bare(detected) => {
+                writeln!(
+                    out,
+                    "No partition table; the whole {} is {detected:?}",
+                    source.describe()
+                )?;
+                return writeln!(
+                    out,
+                    "Mount it with: fsmnt mount {} <MOUNTPOINT>",
+                    source.name()
+                );
+            }
+            LayoutKind::Unknown => {
+                return writeln!(
+                    out,
+                    "Unrecognized layout: no partition table and no known filesystem at the start \
+                     of the {}.",
                     source.describe()
                 );
-            } else {
-                println!("GPT partition table");
             }
+            LayoutKind::Gpt => {
+                if self.origin == LayoutOrigin::BackupTable {
+                    writeln!(
+                        out,
+                        "GPT partition table (recovered from the backup header in the last \
+                         sector; the primary header at the front of the {} is damaged)",
+                        source.describe()
+                    )?;
+                } else {
+                    writeln!(out, "GPT partition table")?;
+                }
+            }
+            LayoutKind::Mbr => writeln!(out, "MBR partition table")?,
+            LayoutKind::Scanned => writeln!(
+                out,
+                "SYNTHETIC partition table — reconstructed by scanning the media every {} bytes \
+                 for filesystem starts. No table was read from the {}: sizes are what each \
+                 filesystem claims for itself, there are no names or type GUIDs, and the numbers \
+                 hold only for this {} scanned with this stride.",
+                scan_stride(self),
+                source.describe(),
+                source.describe(),
+            )?,
         }
-        LayoutKind::Mbr => println!("MBR partition table"),
-        LayoutKind::Scanned => println!(
-            "SYNTHETIC partition table — reconstructed by scanning the media every {} bytes for \
-             filesystem starts. No table was read from the {}: sizes are what each filesystem \
-             claims for itself, there are no names or type GUIDs, and the numbers hold only for \
-             this {} scanned with this stride.",
-            scan_stride(listing),
-            source.describe(),
-            source.describe(),
-        ),
-    }
 
-    let type_header = if matches!(listing.table, LayoutKind::Scanned) {
-        "TYPE (from scan)"
-    } else {
-        "TYPE"
-    };
-    print_table(source, listing, type_header);
-    print_footer(source, listing);
+        let type_header = if matches!(self.table, LayoutKind::Scanned) {
+            "TYPE (from scan)"
+        } else {
+            "TYPE"
+        };
+        write_table(out, self, type_header)?;
+        write_footer(out, self)
+    }
 }
 
 /// The identity line: what the source is, how long, and in which sectors it
 /// was read.
-fn print_header(source: &Source, listing: &PartitionsDocument) {
+fn write_header(out: &mut dyn Write, listing: &PartitionsDocument) -> std::io::Result<()> {
     let detected = if listing.sector_size_auto_detected {
         " (auto-detected)"
     } else {
@@ -333,20 +343,26 @@ fn print_header(source: &Source, listing: &PartitionsDocument) {
     let what = match (listing.format, listing.model.as_deref()) {
         (Some(format), _) => format!("{format} image"),
         (None, Some(model)) => format!("drive ({model})"),
-        (None, None) => source.describe().to_string(),
+        (None, None) => listing.source.describe().to_string(),
     };
-    println!(
-        "{source}: {what}, {}, sector size {}{detected}",
+    writeln!(
+        out,
+        "{}: {what}, {}, sector size {}{detected}",
+        listing.source.name(),
         format_media_size(listing.size_bytes.unwrap_or_default()),
         listing.sector_size,
-    );
+    )
 }
 
-/// Print the column headers and every row.
+/// Write the column headers and every row.
 ///
 /// The header is measured and laid out as one more row, so a column can
 /// never come out narrower than its own title.
-fn print_table(source: &Source, listing: &PartitionsDocument, type_header: &str) {
+fn write_table(
+    out: &mut dyn Write,
+    listing: &PartitionsDocument,
+    type_header: &str,
+) -> std::io::Result<()> {
     let header = PartitionRow {
         ordinal: "#".to_string(),
         name: Some("NAME".to_string()),
@@ -366,14 +382,17 @@ fn print_table(source: &Source, listing: &PartitionsDocument, type_header: &str)
         type_name: column_width(measured().map(|row| Some(row.type_name.as_str()))),
         // Only the last column is left unpadded, so FILESYSTEM needs a width
         // whenever VOLUME follows it.
-        filesystem: matches!(source, Source::Drive(_))
+        filesystem: listing
+            .source
+            .is_drive()
             .then(|| column_width(measured().map(|row| Some(row.filesystem.as_str())))),
     };
 
-    println!("{}", format_row(&header, &widths));
+    writeln!(out, "{}", format_row(&header, &widths))?;
     for row in &rows {
-        println!("{}", format_row(row, &widths));
+        writeln!(out, "{}", format_row(row, &widths))?;
     }
+    Ok(())
 }
 
 /// Lay one row out across the columns this table has.
@@ -398,29 +417,33 @@ fn format_row(row: &PartitionRow, widths: &Widths) -> String {
 }
 
 /// How to mount one of the entries just listed.
-fn print_footer(source: &Source, listing: &PartitionsDocument) {
+fn write_footer(out: &mut dyn Write, listing: &PartitionsDocument) -> std::io::Result<()> {
+    let source = listing.source.name();
     let synthetic = matches!(listing.table, LayoutKind::Scanned);
     if listing.partitions.is_empty() {
         if synthetic {
             let stride = scan_stride(listing);
-            println!(
+            return writeln!(
+                out,
                 "(the scan found no filesystems; a start off a {stride}-byte boundary needs \
                  --stride 512)"
             );
-        } else {
-            println!("(no non-empty partition entries)");
         }
-        return;
+        return writeln!(out, "(no non-empty partition entries)");
     }
     if synthetic {
-        println!(
+        writeln!(
+            out,
             "\nMount one with: fsmnt mount {source} <MOUNTPOINT> --scan{} --partition <#>   \
              (synthetic numbering — from this scan, not from the {})",
             stride_flag(scan_stride(listing)),
-            source.describe(),
-        );
+            listing.source.describe(),
+        )
     } else {
-        println!("\nMount one with: fsmnt mount {source} <MOUNTPOINT> --partition <#>");
+        writeln!(
+            out,
+            "\nMount one with: fsmnt mount {source} <MOUNTPOINT> --partition <#>"
+        )
     }
 }
 

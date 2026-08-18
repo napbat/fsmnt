@@ -5,8 +5,8 @@
 use clap::Parser;
 use fsmnt::device::FilesystemRoot;
 
-use crate::cli::json::Output;
 use crate::cli::mount::check_options;
+use crate::cli::output::Output;
 use crate::cli::size::{SignedSizeExpr, SizeExpr};
 use crate::cli::source::{Source, SourceKind, resolve};
 use crate::{Cli, Commands, FilesystemMountOptions, MountArgs};
@@ -112,15 +112,24 @@ fn json_is_global_like_the_other_output_flags() {
     ] {
         let cli = Cli::try_parse_from(&argv).expect("--json is accepted everywhere");
         assert!(cli.log.json, "{argv:?}");
-        assert!(Output::new(cli.log.json).is_json(), "{argv:?}");
+        assert_eq!(
+            Output::new(cli.log.json),
+            Output::new(true),
+            "wherever it is written, the flag selects the same output: {argv:?}"
+        );
     }
 
     let cli = Cli::try_parse_from(["fsmnt", "partitions", "disk.bin"]).expect("no --json");
     assert!(!cli.log.json);
     assert_eq!(
         Output::new(cli.log.json),
-        Output::Human,
+        Output::new(false),
         "tables remain the default; nothing about them changes"
+    );
+    assert_ne!(
+        Output::new(true),
+        Output::new(false),
+        "and the two are different outputs, which is the whole of the choice"
     );
 }
 

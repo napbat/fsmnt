@@ -12,7 +12,7 @@ use tracing::info;
 
 use fsmnt::DirFilesystem;
 
-use super::json::{MountReport, Output, SourceRef, media_size};
+use super::output::{MountReport, Output, SourceRef, media_size};
 use super::size::DEFAULT_SECTOR_SIZE;
 use super::source::{Source, SourceKind, check_applicability, resolve};
 use super::{
