@@ -138,6 +138,37 @@ fn default_filesystem_root_is_typed() {
 }
 
 #[test]
+fn journal_replay_is_on_unless_declined() {
+    let cli = Cli::try_parse_from(["fsmnt", "mount-image", "image", "Z:"]).expect("default mount");
+    let Commands::MountImage { filesystem, .. } = cli.command else {
+        panic!("wrong command");
+    };
+    assert!(filesystem.open_options().journal_replay());
+    assert_eq!(
+        filesystem.open_options(),
+        fsmnt::device::FilesystemOpenOptions::new(),
+        "defaults must round-trip to the driver defaults"
+    );
+
+    let cli = Cli::try_parse_from([
+        "fsmnt",
+        "mount-image",
+        "image",
+        "Z:",
+        "--no-journal-replay",
+        "--fs-root",
+        "role:data",
+    ])
+    .expect("mount without replay");
+    let Commands::MountImage { filesystem, .. } = cli.command else {
+        panic!("wrong command");
+    };
+    let options = filesystem.open_options();
+    assert!(!options.journal_replay());
+    assert_eq!(options.root(), &FilesystemRoot::Role("data".to_string()));
+}
+
+#[test]
 fn malformed_filesystem_root_is_rejected_by_clap() {
     let result = Cli::try_parse_from([
         "fsmnt",

@@ -224,6 +224,26 @@ pub enum OpenImageError {
         /// Number of partitions the image actually exposes.
         available: usize,
     },
+    /// The selected offset holds an ext *backup* superblock, not the start
+    /// of a filesystem.
+    ///
+    /// Backup copies sit partway into an ext filesystem (with
+    /// `sparse_super`, at block groups 1, 3, 5, 7, 9, 25, 27, …). Opening
+    /// from one would locate every structure relative to the wrong place
+    /// and present an empty volume, so it is refused with the group number
+    /// as a hint that the real start is earlier.
+    #[error(
+        "offset {offset} in {path:?} holds an ext backup superblock (block group {group}), not the start of a filesystem; the primary lies earlier — list partitions with `fsmnt partitions {}`",
+        path.display()
+    )]
+    ExtBackupSuperblock {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Decoded-media offset that holds the backup copy.
+        offset: u64,
+        /// Block group the backup superblock belongs to.
+        group: u16,
+    },
     /// Reading or classifying the selected boot sector failed.
     #[error("failed to detect a filesystem at offset {offset} in {path:?}: {source}")]
     Detection {
@@ -299,6 +319,24 @@ impl ImageOpenOptions {
     #[must_use]
     pub fn with_filesystem_root(mut self, root: FilesystemRoot) -> Self {
         self.filesystem = self.filesystem.with_root(root);
+        self
+    }
+
+    /// Allow (default) or decline journal and orphan replay into an
+    /// in-memory overlay; see
+    /// [`FilesystemOpenOptions::with_journal_replay`]. The source is never
+    /// written either way.
+    #[must_use]
+    pub fn with_journal_replay(mut self, replay: bool) -> Self {
+        self.filesystem = self.filesystem.with_journal_replay(replay);
+        self
+    }
+
+    /// Replace every filesystem-level option (root selector, journal replay)
+    /// with `filesystem` at once.
+    #[must_use]
+    pub fn with_filesystem_options(mut self, filesystem: FilesystemOpenOptions) -> Self {
+        self.filesystem = filesystem;
         self
     }
 
@@ -399,6 +437,27 @@ pub fn open_image_with_options(
             detected,
         });
     }
+    if detected == DetectedBootSector::Unknown {
+        // Detection refuses ext backup superblocks; say so precisely rather
+        // than "no filesystem driver for Unknown" — the offset came from a
+        // magic-number scan more often than not, and the group number tells
+        // the user how far back the real start is.
+        let backup =
+            fsmnt_device::ext_backup_superblock_at(&mut image, offset).map_err(|source| {
+                OpenImageError::Detection {
+                    path: path.to_path_buf(),
+                    offset,
+                    source,
+                }
+            })?;
+        if let Some(group) = backup {
+            return Err(OpenImageError::ExtBackupSuperblock {
+                path: path.to_path_buf(),
+                offset,
+                group,
+            });
+        }
+    }
 
     let format = image.format();
     let reader = PartitionReader::new(image, offset, size_bytes);
@@ -482,6 +541,24 @@ impl PartitionOpenOptions {
     #[must_use]
     pub fn with_filesystem_root(mut self, root: FilesystemRoot) -> Self {
         self.filesystem = self.filesystem.with_root(root);
+        self
+    }
+
+    /// Allow (default) or decline journal and orphan replay into an
+    /// in-memory overlay; see
+    /// [`FilesystemOpenOptions::with_journal_replay`]. The source is never
+    /// written either way.
+    #[must_use]
+    pub fn with_journal_replay(mut self, replay: bool) -> Self {
+        self.filesystem = self.filesystem.with_journal_replay(replay);
+        self
+    }
+
+    /// Replace every filesystem-level option (root selector, journal replay)
+    /// with `filesystem` at once.
+    #[must_use]
+    pub fn with_filesystem_options(mut self, filesystem: FilesystemOpenOptions) -> Self {
+        self.filesystem = filesystem;
         self
     }
 

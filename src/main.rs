@@ -18,19 +18,35 @@ struct Cli {
     command: Commands,
 }
 
-/// Filesystem-root selection shared by the mounting subcommands.
+/// Filesystem-level choices shared by the mounting subcommands.
 #[derive(Args, Clone, Debug, Default)]
 struct FilesystemMountOptions {
-    /// Filesystem-owned root to mount: default, top-level, path:PATH,
-    /// id:NUMBER, index:NUMBER, name:NAME, or role:ROLE.
+    /// Filesystem-owned root to mount (Btrfs and APFS only — the
+    /// single-root formats NTFS, FAT, exFAT, ext and `BitLocker` accept just
+    /// `default`): default, top-level, path:PATH, id:NUMBER, index:NUMBER,
+    /// name:NAME, or role:ROLE.
     #[arg(long, value_name = "SELECTOR")]
     fs_root: Option<fsmnt::device::FilesystemRoot>,
+
+    /// Present the volume exactly as it sits on disk: skip ext journal and
+    /// orphan replay. Replay only ever builds an in-memory overlay — the
+    /// source is never written either way — so this selects the raw view
+    /// over the recovered one, e.g. to compare against carving results.
+    #[arg(long)]
+    no_journal_replay: bool,
 }
 
 impl FilesystemMountOptions {
     /// The requested root, or the driver's own default.
-    fn root(self) -> fsmnt::device::FilesystemRoot {
-        self.fs_root.unwrap_or_default()
+    fn root(&self) -> fsmnt::device::FilesystemRoot {
+        self.fs_root.clone().unwrap_or_default()
+    }
+
+    /// The driver-facing open options these flags describe.
+    fn open_options(&self) -> fsmnt::device::FilesystemOpenOptions {
+        fsmnt::device::FilesystemOpenOptions::new()
+            .with_root(self.root())
+            .with_journal_replay(!self.no_journal_replay)
     }
 }
 
@@ -211,7 +227,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             volname: volname.as_deref(),
             recovery_password,
             bek_file: bek_file.as_deref(),
-            filesystem_root: filesystem.root(),
+            filesystem: filesystem.open_options(),
         }),
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Commands::Drives => cli::handle_drives(),
@@ -240,7 +256,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             recovery_password,
             bek_file: bek_file.as_deref(),
             fstab: fstab.as_deref(),
-            filesystem_root: filesystem.root(),
+            filesystem: filesystem.open_options(),
         }),
     }
 }

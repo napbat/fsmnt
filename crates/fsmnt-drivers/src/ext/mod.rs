@@ -203,16 +203,19 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         Ok(fs)
     }
 
-    /// Fail the open unless the root directory (inode 2) is readable and is
-    /// a directory.
+    /// Fail the open unless the root directory (inode 2) is a directory
+    /// whose entries can actually be listed.
     ///
     /// A superblock alone does not prove the volume is usable: the group
     /// descriptors and inode tables are located relative to the superblock,
     /// so a plausible-looking superblock that is not the primary — an ext
     /// backup copy partway into a partition, or a stale one on reused media
-    /// — parses fine and then yields a mount with no readable files. In a
-    /// forensic context "mounted, empty" is easily misread as "no data";
-    /// refusing to open with a pointed message is the safer outcome.
+    /// — parses fine and then yields a mount with no readable files. A
+    /// truncated image has the same shape: the inode table near the start
+    /// survives while the root's data blocks are past the end. In a forensic
+    /// context "mounted, empty" is easily misread as "no data"; refusing to
+    /// open with a pointed message is the safer outcome, and after this
+    /// check a successful mount guarantees that at least the root lists.
     fn check_root_directory(&mut self) -> FsResult<()> {
         // The inode borrows `ext`, so decide inside the closure and hand
         // out only an owned verdict.
@@ -222,17 +225,30 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
                 .map_err(|e| e.to_string())
         });
         match verdict {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(FsError::Filesystem(format!(
-                "root inode {EXT4_ROOT_INO} is not a directory; the superblock at this offset does \
-                 not describe a usable filesystem (a backup superblock rather than the primary?)"
-            ))),
-            Err(e) => Err(FsError::Filesystem(format!(
-                "root directory (inode {EXT4_ROOT_INO}) is unreadable: {e}; the superblock at this \
-                 offset does not describe a usable filesystem (a backup superblock rather than the \
-                 primary?)"
-            ))),
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(FsError::Filesystem(format!(
+                    "root inode {EXT4_ROOT_INO} is not a directory; the superblock at this offset \
+                     does not describe a usable filesystem (a backup superblock rather than the \
+                     primary?)"
+                )));
+            }
+            Err(e) => {
+                return Err(FsError::Filesystem(format!(
+                    "root directory (inode {EXT4_ROOT_INO}) is unreadable: {e}; the superblock at \
+                     this offset does not describe a usable filesystem (a backup superblock rather \
+                     than the primary?)"
+                )));
+            }
         }
+        self.with_reader(|ext, reader| dir::list(ext, reader, EXT4_ROOT_INO, "/"))
+            .map(drop)
+            .map_err(|e| {
+                FsError::Filesystem(format!(
+                    "root directory cannot be listed: {e}; the volume is not usable from this \
+                     source (truncated image, or a superblock that is not the primary?)"
+                ))
+            })
     }
 
     /// Run journal (and, if still needed, orphan) replay, then strict-open

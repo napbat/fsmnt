@@ -37,8 +37,8 @@ pub(crate) struct MountImageOptions<'a> {
     pub(crate) recovery_password: Option<String>,
     /// `BitLocker` startup-key file, if supplied.
     pub(crate) bek_file: Option<&'a std::path::Path>,
-    /// Filesystem-owned root to expose.
-    pub(crate) filesystem_root: fsmnt::device::FilesystemRoot,
+    /// Filesystem-level open options: root selector and journal-replay choice.
+    pub(crate) filesystem: fsmnt::device::FilesystemOpenOptions,
 }
 
 /// Mount a supported filesystem image container.
@@ -47,7 +47,7 @@ pub(crate) fn handle_mount_image(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let image = options.image;
     let drivers = build_registry(options.recovery_password, options.bek_file)?;
-    let open_options = fsmnt::ImageOpenOptions::new().with_filesystem_root(options.filesystem_root);
+    let open_options = fsmnt::ImageOpenOptions::new().with_filesystem_options(options.filesystem);
     let open_options = match options.partition {
         Some(partition) => open_options.with_partition(partition),
         None => open_options.with_offset(options.offset),
@@ -105,8 +105,8 @@ pub(crate) struct MountDeviceOptions<'a> {
     pub(crate) bek_file: Option<&'a std::path::Path>,
     /// Guest fstab to compose child mounts from.
     pub(crate) fstab: Option<&'a str>,
-    /// Filesystem-owned root to expose.
-    pub(crate) filesystem_root: fsmnt::device::FilesystemRoot,
+    /// Filesystem-level open options: root selector and journal-replay choice.
+    pub(crate) filesystem: fsmnt::device::FilesystemOpenOptions,
 }
 
 /// Mount a partition from a physical drive.
@@ -138,7 +138,7 @@ pub(crate) fn handle_mount_device(
     };
     let open_options = fsmnt::PartitionOpenOptions::new()
         .with_source(selection)
-        .with_filesystem_root(options.filesystem_root);
+        .with_filesystem_options(options.filesystem);
     let opened = if let Some(fstab) = options.fstab {
         let opened = fsmnt::open_device_partition_with_fstab::<HostDrives>(
             &id,
