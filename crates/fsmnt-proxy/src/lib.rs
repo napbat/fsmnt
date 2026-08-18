@@ -36,7 +36,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 
 #[cfg(any(unix, windows))]
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Opcode: open a file/device and receive the raw handle.
 ///
@@ -154,7 +154,10 @@ pub fn open_with_proxy_fallback(path: &str, mode: OpenMode, flags: i32) -> io::R
             proxy_result
                 .inspect(|_| debug!(path, "opened through the privileged proxy"))
                 .map_err(|proxy_error| {
-                    warn!(
+                    // Enumeration probes every drive, so an absent proxy would
+                    // otherwise warn once per inaccessible drive; the caller
+                    // reports the access error it gets back.
+                    debug!(
                         path,
                         error = %proxy_error,
                         "could not open through the privileged proxy, reporting the direct access error"
