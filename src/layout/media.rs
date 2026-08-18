@@ -58,13 +58,16 @@ pub(crate) fn media_layout<R: Read + Seek>(
         .into_iter()
         .enumerate()
         .map(|(ordinal, entry)| LayoutPartition {
-            ordinal,
+            ordinal: Some(ordinal),
             offset: entry.offset,
             size_bytes: entry.size_bytes,
             missing_bytes: missing_bytes(entry.offset, entry.size_bytes, size_bytes),
             type_name: entry.type_name,
             name: entry.name,
             detected: detect_at(disk, entry.offset, size_bytes),
+            // A partition table describes bytes the medium carries; a
+            // volume that began before the medium has no entry in one.
+            head_absent: None,
         })
         .collect();
 
@@ -88,37 +91,39 @@ pub(crate) fn media_layout<R: Read + Seek>(
 /// no longer verifies, once a backup superblock names that offset as its
 /// filesystem's start; without that corroboration the copies are not
 /// mountable and never reach this list.
+///
+/// One kind of entry is listed without being selectable: a filesystem whose
+/// backups place its start *before* the medium
+/// ([`ScanHit::head_absent`](crate::ScanHit::head_absent)). It is worth
+/// seeing — it is often the largest thing on a salvaged slice — but there is
+/// no extent on this medium to hand `--partition`, so it carries no ordinal
+/// and its type text names the `--offset -N` command that does open it. The
+/// alternative, letting `--scan --partition K` resolve to it, would have to
+/// mean "partition 0 is the volume this medium is a piece of", which is not
+/// a partition of this medium at all.
 pub(crate) fn layout_from_hits(hits: &[ScanHit], size_bytes: Option<u64>) -> Vec<LayoutPartition> {
-    crate::mountable_hits(hits)
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, hit)| {
-            let offset = hit.mount_offset().unwrap_or(hit.offset);
+    let mut ordinals = 0_usize;
+    hits.iter()
+        .filter(|hit| hit.mount_offset().is_some() || hit.head_absent().is_some())
+        .map(|hit| {
+            let head_absent = hit.head_absent();
+            // A volume that began before the medium is listed at the start
+            // of the *volume*, which is where its own geometry counts from.
+            let offset = if head_absent.is_some() {
+                0
+            } else {
+                hit.mount_offset().unwrap_or(hit.offset)
+            };
             // 0 for a medium of unknown length carries the same meaning it
             // does for a whole-medium entry: runs to the end, extent unknown.
             let rest = size_bytes.map_or(0, |size| size.saturating_sub(offset));
             let claimed = hit.size_bytes.unwrap_or(rest);
-            let (type_name, detected) = match hit.kind {
-                ScanHitKind::Filesystem(detected) => {
-                    (Some(format!("{detected:?} (scan)")), Some(detected))
-                }
-                ScanHitKind::ExtBackupSuperblock { group, .. } => (
-                    Some(format!(
-                        "Ext (scan; primary damaged, backup at group {group})"
-                    )),
-                    Some(DetectedBootSector::Unknown),
-                ),
-                ScanHitKind::ExtPrimaryCopies { .. } => (
-                    Some(format!(
-                        "Ext (scan; descriptor table damaged, backup at group {})",
-                        hit.backup_superblocks
-                            .first()
-                            .map_or(0, |backup| backup.group)
-                    )),
-                    Some(DetectedBootSector::Ext),
-                ),
-                ScanHitKind::PartitionTable(_) => (None, None),
-            };
+            let (type_name, detected) = scanned_type(hit, head_absent);
+            let ordinal = head_absent.is_none().then(|| {
+                let ordinal = ordinals;
+                ordinals += 1;
+                ordinal
+            });
             LayoutPartition {
                 ordinal,
                 offset,
@@ -127,9 +132,46 @@ pub(crate) fn layout_from_hits(hits: &[ScanHit], size_bytes: Option<u64>) -> Vec
                 type_name,
                 name: None,
                 detected,
+                head_absent,
             }
         })
         .collect()
+}
+
+/// The `TYPE` text and detected filesystem for one scanned entry.
+fn scanned_type(
+    hit: &ScanHit,
+    head_absent: Option<u64>,
+) -> (Option<String>, Option<DetectedBootSector>) {
+    if let Some(before) = head_absent {
+        let group = hit.backup_superblock_group().unwrap_or(1);
+        return (
+            Some(format!(
+                "Ext (scan; begins {before} bytes into the filesystem — mount with --offset \
+                 -{before} --backup-superblock {group})"
+            )),
+            Some(DetectedBootSector::Ext),
+        );
+    }
+    match hit.kind {
+        ScanHitKind::Filesystem(detected) => (Some(format!("{detected:?} (scan)")), Some(detected)),
+        ScanHitKind::ExtBackupSuperblock { group, .. } => (
+            Some(format!(
+                "Ext (scan; primary damaged, backup at group {group})"
+            )),
+            Some(DetectedBootSector::Unknown),
+        ),
+        ScanHitKind::ExtPrimaryCopies { .. } => (
+            Some(format!(
+                "Ext (scan; descriptor table damaged, backup at group {})",
+                hit.backup_superblocks
+                    .first()
+                    .map_or(0, |backup| backup.group)
+            )),
+            Some(DetectedBootSector::Ext),
+        ),
+        ScanHitKind::PartitionTable(_) => (None, None),
+    }
 }
 
 /// How much of the extent `offset..offset + size_bytes` the medium lacks.

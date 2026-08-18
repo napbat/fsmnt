@@ -9,6 +9,14 @@
 //! known, which clap parses as a separate argument, so parsing and
 //! resolution are two steps: [`SizeExpr::from_str`] validates the spelling
 //! and [`SizeExpr::resolve`] turns it into bytes.
+//!
+//! One place needs a *signed* size — `--offset -469762048`, meaning the
+//! medium begins that many bytes into the filesystem rather than the
+//! filesystem beginning that far into the medium. [`SignedSizeExpr`] is a
+//! [`SizeExpr`] with a direction; everything that cannot mean anything
+//! negative (a sector size, a stride) keeps taking the unsigned type, so a
+//! minus sign in those places is still a parse error rather than a silently
+//! discarded one.
 
 use std::fmt;
 use std::str::FromStr;
@@ -57,6 +65,70 @@ impl fmt::Display for SizeExpr {
         match self {
             Self::Bytes(bytes) => write!(f, "{bytes}"),
             Self::Sectors(sectors) => write!(f, "{sectors}s"),
+        }
+    }
+}
+
+/// A size expression that may be written with a leading `-`.
+///
+/// The sign is a *direction*, not a negative quantity: `--offset -448MiB`
+/// says the medium begins 448 MiB into its filesystem, which is the mirror
+/// image of `--offset 448MiB` saying the filesystem begins 448 MiB into the
+/// medium. The magnitude is an ordinary [`SizeExpr`], so every spelling —
+/// bytes, binary and decimal multiples, sector counts — works on both
+/// sides of zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SignedSizeExpr {
+    /// Whether the expression was written with a leading `-`.
+    negative: bool,
+    /// The size itself, sign removed.
+    magnitude: SizeExpr,
+}
+
+impl SignedSizeExpr {
+    /// Whether the expression was written with a leading `-`.
+    pub(crate) const fn is_negative(self) -> bool {
+        self.negative
+    }
+
+    /// The size without its sign, which is what
+    /// [`SizeExpr::resolve`] turns into bytes. Callers ask for the sign
+    /// separately so that no code path can resolve one of these to a byte
+    /// count and forget which direction it pointed in.
+    pub(crate) const fn magnitude(self) -> SizeExpr {
+        self.magnitude
+    }
+}
+
+impl fmt::Display for SignedSizeExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.negative {
+            write!(f, "-")?;
+        }
+        write!(f, "{}", self.magnitude)
+    }
+}
+
+impl FromStr for SignedSizeExpr {
+    type Err = SizeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        // `-0` is zero: there is no head to declare absent, and refusing it
+        // would only make a computed argument fail for a boundary case.
+        match trimmed.strip_prefix('-') {
+            Some(rest) => {
+                let magnitude: SizeExpr = rest.parse()?;
+                let zero = matches!(magnitude, SizeExpr::Bytes(0) | SizeExpr::Sectors(0));
+                Ok(Self {
+                    negative: !zero,
+                    magnitude,
+                })
+            }
+            None => Ok(Self {
+                negative: false,
+                magnitude: trimmed.parse()?,
+            }),
         }
     }
 }
@@ -135,12 +207,12 @@ fn unit_multiplier(unit: &str) -> Option<u64> {
     })
 }
 
-/// clap value parser for `--offset`.
+/// clap value parser for `--offset`, which accepts a leading `-`.
 ///
 /// # Errors
 ///
 /// Returns the parse failure's message when the expression is malformed.
-pub(crate) fn parse_size_expr(value: &str) -> Result<SizeExpr, String> {
+pub(crate) fn parse_signed_size_expr(value: &str) -> Result<SignedSizeExpr, String> {
     value
         .parse()
         .map_err(|error: SizeParseError| error.to_string())
@@ -203,7 +275,68 @@ pub(crate) fn format_size_precise(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SizeExpr, SizeParseError, format_size_precise, parse_sector_size};
+    use super::{SignedSizeExpr, SizeExpr, SizeParseError, format_size_precise, parse_sector_size};
+
+    #[test]
+    fn a_leading_minus_turns_an_offset_into_an_absent_head() {
+        for (argument, magnitude) in [
+            ("-469762048", SizeExpr::Bytes(469_762_048)),
+            ("-448MiB", SizeExpr::Bytes(469_762_048)),
+            ("-917504s", SizeExpr::Sectors(917_504)),
+            (" -448 MiB ", SizeExpr::Bytes(469_762_048)),
+        ] {
+            let expr: SignedSizeExpr = argument.parse().expect(argument);
+            assert!(expr.is_negative(), "{argument} is a negative offset");
+            assert_eq!(expr.magnitude(), magnitude, "{argument}");
+        }
+        assert_eq!(
+            "-917504s"
+                .parse::<SignedSizeExpr>()
+                .expect("sectors")
+                .magnitude()
+                .resolve(512),
+            Ok(469_762_048),
+            "the sign does not change how a sector count resolves"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_offset_still_means_a_place_inside_the_medium() {
+        let expr: SignedSizeExpr = "258MiB".parse().expect("size expression");
+        assert!(!expr.is_negative());
+        assert_eq!(expr.magnitude(), SizeExpr::Bytes(270_532_608));
+        assert_eq!(expr.to_string(), "270532608");
+        assert_eq!(
+            "-448MiB"
+                .parse::<SignedSizeExpr>()
+                .expect("negative")
+                .to_string(),
+            "-469762048"
+        );
+    }
+
+    #[test]
+    fn negative_zero_is_just_zero() {
+        let expr: SignedSizeExpr = "-0".parse().expect("zero");
+        assert!(
+            !expr.is_negative(),
+            "there is no head to declare absent, so the sign says nothing"
+        );
+        assert_eq!(expr.magnitude().resolve(512), Ok(0));
+    }
+
+    #[test]
+    fn a_sign_on_its_own_is_not_a_size() {
+        assert_eq!("-".parse::<SignedSizeExpr>(), Err(SizeParseError::Empty));
+        assert!(matches!(
+            "-1.5M".parse::<SignedSizeExpr>(),
+            Err(SizeParseError::UnknownUnit(_))
+        ));
+        assert!(
+            parse_sector_size("-4096").is_err(),
+            "a sector size has no direction to state"
+        );
+    }
 
     #[test]
     fn plain_numbers_are_bytes() {

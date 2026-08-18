@@ -298,7 +298,13 @@ pub(crate) fn drive_length(info: Option<&HostDriveInfo>, reader: &mut impl Seek)
 /// entry nor the drive states a length — the same "unknown" the rest of the
 /// device layer uses for a whole drive it cannot measure.
 pub(crate) fn scanned_extent(layout: &DriveLayout, partition: usize) -> Option<(u64, u64)> {
-    let selected: &LayoutPartition = layout.partitions.get(partition)?;
+    // By ordinal, not by position: a scanned layout may list an entry with
+    // no ordinal (a volume whose start precedes the drive), and that entry
+    // must not shift the numbers of the ones a caller can select.
+    let selected: &LayoutPartition = layout
+        .partitions
+        .iter()
+        .find(|entry| entry.ordinal == Some(partition))?;
     let available = selected.available_bytes();
     let length = if available > 0 {
         available

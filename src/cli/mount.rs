@@ -132,7 +132,13 @@ fn mount_image(
     }
     options = match args.partition {
         Some(partition) => options.with_partition(partition),
-        None => options.with_offset(requested_offset(args)?),
+        None => match requested_location(args)? {
+            Location::Offset(offset) => options.with_offset(offset),
+            Location::HeadAbsent(bytes) => {
+                warn_head_absent(bytes, args.filesystem.best_effort_reads);
+                options.with_head_absent(bytes)
+            }
+        },
     };
 
     let opened = match args.fstab.as_deref() {
@@ -174,12 +180,51 @@ fn mount_image(
     )
 }
 
-/// The byte offset `--offset` asks for, or the start of the media.
-fn requested_offset(args: &MountArgs) -> Result<u64, Box<dyn std::error::Error>> {
+/// Where `--offset` puts the filesystem relative to the medium.
+///
+/// The two directions are different enough to be worth separate names: an
+/// offset selects a window inside bytes that exist, an absent head declares
+/// that bytes in front of the medium do not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Location {
+    /// The filesystem starts this many bytes into the medium.
+    Offset(u64),
+    /// The medium starts this many bytes into the filesystem.
+    HeadAbsent(u64),
+}
+
+/// The location `--offset` asks for, or the start of the media.
+fn requested_location(args: &MountArgs) -> Result<Location, Box<dyn std::error::Error>> {
     let Some(offset) = args.offset else {
-        return Ok(0);
+        return Ok(Location::Offset(0));
     };
-    Ok(offset.resolve(args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE))?)
+    let bytes = offset
+        .magnitude()
+        .resolve(args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE))?;
+    Ok(if offset.is_negative() {
+        Location::HeadAbsent(bytes)
+    } else {
+        Location::Offset(bytes)
+    })
+}
+
+/// Say, before the volume appears, that part of this filesystem was never
+/// acquired.
+///
+/// A mount that succeeds looks like a mount that found everything. It did
+/// not: whatever lived in the absent head — the primary superblock, the
+/// inode tables and file data of the first block groups — is gone, and a
+/// report written from this volume has to say so.
+fn warn_head_absent(bytes: u64, best_effort_reads: bool) {
+    let reads = if best_effort_reads {
+        "are served as zeros and counted"
+    } else {
+        "fail"
+    };
+    tracing::warn!(
+        "the medium begins {bytes} bytes into this filesystem; those bytes are absent — metadata \
+         and files that lived there are gone, and reads into them {reads}"
+    );
 }
 
 /// Mount a filesystem on a physical drive.
@@ -262,7 +307,7 @@ fn open_drive_location(
 ) -> Result<fsmnt::OpenedPartition, Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
 
-    if let Some(offset) = args.offset {
+    if args.offset.is_some() {
         // The image composer accepts any location because it re-derives the
         // siblings from the layout; the device one is written against an
         // ordinal, and an offset is not one.
@@ -273,8 +318,23 @@ fn open_drive_location(
                     .into(),
             );
         }
-        let offset = offset.resolve(args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE))?;
-        return fsmnt::open_device_at_offset::<HostDrives>(drive, offset, drivers, options);
+        // A negative offset is not a place on the drive: the drive is the
+        // tail of a filesystem that started before it, so the opener is
+        // given offset 0 and told how much of the volume is missing.
+        return match requested_location(args)? {
+            Location::Offset(offset) => {
+                fsmnt::open_device_at_offset::<HostDrives>(drive, offset, drivers, options)
+            }
+            Location::HeadAbsent(bytes) => {
+                warn_head_absent(bytes, args.filesystem.best_effort_reads);
+                fsmnt::open_device_at_offset::<HostDrives>(
+                    drive,
+                    0,
+                    drivers,
+                    options.with_head_absent(bytes),
+                )
+            }
+        };
     }
 
     let partition = match args.partition {

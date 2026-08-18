@@ -319,7 +319,7 @@ fn a_drive_layout_from_a_scan_declares_itself_synthetic() {
     // The MBR itself is a hit, but it is not mountable, so ordinal 0 is the
     // first *filesystem* the scan found.
     let first = &layout.partitions[0];
-    assert_eq!(first.ordinal, 0);
+    assert_eq!(first.ordinal, Some(0));
     assert_eq!(first.offset, ntfs_offset());
     assert_eq!(first.detected, Some(DetectedBootSector::Ntfs));
     assert!(first.name.is_none(), "a scan has no partition names");

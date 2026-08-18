@@ -26,9 +26,10 @@ use tracing::debug;
 
 use fsmnt_core::TargetFilesystem;
 use fsmnt_device::{
-    DetectedBootSector, DriverRegistry, FilesystemOpenOptions, FilesystemRoot, HostDriveEnumerator,
-    HostDriveId, HostDriveInfo, HostVolumeResolver, PartitionAddress, PartitionReader,
-    PhysicalExtent, ReadSubstitutions, SectorReader, SourceOrigin, SourceSelection,
+    AbsentHead, DetectedBootSector, DeviceReader, DriverRegistry, FilesystemOpenOptions,
+    FilesystemRoot, HostDriveEnumerator, HostDriveId, HostDriveInfo, HostVolumeResolver,
+    LeadingGapReader, PartitionAddress, PartitionReader, PhysicalExtent, ReadSubstitutions,
+    SectorReader, SourceOrigin, SourceSelection,
 };
 
 use crate::layout::{DEFAULT_SECTOR_SIZE, DriveLayoutOptions, LayoutOrigin};
@@ -70,6 +71,7 @@ pub struct PartitionOpenOptions {
     source: SourceSelection,
     sector_size: Option<u32>,
     scan_stride: Option<u64>,
+    head_absent: u64,
     best_effort_reads: bool,
     filesystem: FilesystemOpenOptions,
 }
@@ -83,9 +85,41 @@ impl PartitionOpenOptions {
             source: SourceSelection::Auto,
             sector_size: None,
             scan_stride: None,
+            head_absent: 0,
             best_effort_reads: false,
             filesystem: FilesystemOpenOptions::new(),
         }
+    }
+
+    /// State that the drive begins `bytes` into its filesystem: the volume
+    /// started before this device does.
+    ///
+    /// The counterpart of
+    /// [`ImageOpenOptions::with_head_absent`](crate::ImageOpenOptions::with_head_absent)
+    /// for a live device — a card reader showing one eMMC partition of a
+    /// volume that spans more of the chip, say. Only
+    /// [`open_device_at_offset`] honours it, and only at offset 0: the
+    /// filesystem begins before the drive, so there is no offset on the
+    /// drive that is its start. Combined with a partition ordinal or with
+    /// [`with_scan`](Self::with_scan) the open is refused, because both
+    /// name an extent *inside* the drive.
+    ///
+    /// The primary superblock is among the absent bytes, so pair it with
+    /// [`FilesystemOpenOptions::with_ext_backup_superblock`]; reads into the
+    /// head fail unless
+    /// [`with_best_effort_reads`](Self::with_best_effort_reads) turns them
+    /// into counted zeros.
+    #[must_use]
+    pub const fn with_head_absent(mut self, bytes: u64) -> Self {
+        self.head_absent = bytes;
+        self
+    }
+
+    /// Bytes of the filesystem that precede the drive, or 0 when the drive
+    /// starts where its filesystem does.
+    #[must_use]
+    pub const fn head_absent(&self) -> u64 {
+        self.head_absent
     }
 
     /// Zero-fill what the device cannot provide instead of failing the read
@@ -294,6 +328,12 @@ pub fn open_device_partition_with_options<E: HostVolumeResolver>(
     drivers: &DriverRegistry,
     options: PartitionOpenOptions,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
+    if options.head_absent > 0 {
+        return Err(head_absent_conflict(
+            options.head_absent,
+            "a partition ordinal",
+        ));
+    }
     if let Some(stride) = options.scan_stride {
         return open_scanned_partition::<E>(drive, partition, stride, drivers, options);
     }
@@ -316,8 +356,9 @@ pub fn open_device_partition_with_options<E: HostVolumeResolver>(
 ///
 /// Returns an error if the drive cannot be opened, an explicit logical
 /// volume was requested, the offset is at or past the end of the drive, the
-/// offset holds a partition table rather than a filesystem, or no registered
-/// driver can open what is there.
+/// offset holds a partition table rather than a filesystem, an absent head
+/// was combined with a non-zero offset, or no registered driver can open
+/// what is there.
 pub fn open_device_at_offset<E: HostVolumeResolver>(
     drive: &HostDriveId,
     offset: u64,
@@ -328,6 +369,7 @@ pub fn open_device_at_offset<E: HostVolumeResolver>(
     let PartitionOpenOptions {
         source,
         sector_size: requested_sector_size,
+        head_absent,
         filesystem,
         ..
     } = options;
@@ -337,6 +379,9 @@ pub fn open_device_at_offset<E: HostVolumeResolver>(
              --volume {id}"
         )
         .into());
+    }
+    if head_absent > 0 && offset > 0 {
+        return Err(head_absent_conflict(head_absent, "a positive byte offset"));
     }
 
     let info = E::get_drive_info(drive).ok();
@@ -351,17 +396,21 @@ pub fn open_device_at_offset<E: HostVolumeResolver>(
         )
         .into());
     }
-    let length = size_bytes.map_or(u64::MAX, |size| size - offset);
+    // An absent head lengthens the volume by exactly the bytes the drive
+    // does not carry: the extent starts at 0 of the *filesystem*, not of
+    // the device.
+    let length = size_bytes.map_or(u64::MAX, |size| (size - offset).saturating_add(head_absent));
     debug!(
         drive = %drive,
         offset,
         length,
+        head_absent,
         sector_size,
         selection = ?source,
         "opening raw drive bytes at a caller-supplied offset"
     );
 
-    let detected = detect_at_offset(reader, offset, length, sector_size)?;
+    let detected = detect_at_offset(reader, offset, length, sector_size, head_absent)?;
     if matches!(
         detected,
         DetectedBootSector::MbrPartitioned | DetectedBootSector::GptPartitioned
@@ -378,6 +427,7 @@ pub fn open_device_at_offset<E: HostVolumeResolver>(
         sector_size,
         // Nothing was read from a table, so there is no provenance to claim.
         origin: None,
+        head_absent,
     };
     open_raw_partitions::<E>(
         &located,
@@ -485,6 +535,7 @@ fn open_scanned_partition<E: HostVolumeResolver>(
         extent: PhysicalExtent::new(drive.clone(), offset, length),
         sector_size: layout.sector_size,
         origin: Some(LayoutOrigin::Scan { stride }),
+        head_absent: 0,
     };
     open_raw_partitions::<E>(
         &located,
@@ -494,6 +545,21 @@ fn open_scanned_partition<E: HostVolumeResolver>(
         &filesystem,
         &policy,
     )
+}
+
+/// Refuse an absent head that was combined with a location inside the
+/// drive.
+///
+/// A filesystem that begins before the device cannot also begin at one of
+/// its extents, and picking one of the two claims for the caller would put
+/// every structure at the wrong offset.
+fn head_absent_conflict(head_absent: u64, location: &str) -> Box<dyn std::error::Error> {
+    format!(
+        "the drive was declared to begin {head_absent} bytes into its filesystem, which puts the \
+         filesystem's start before the device; {location} names a location on the drive instead, \
+         and the two cannot both be where the filesystem is"
+    )
+    .into()
 }
 
 /// The `--stride` a hint has to repeat, or nothing when it is the default.
@@ -510,16 +576,42 @@ fn stride_flag(stride: u64) -> String {
 /// The probe goes through the same bounded, sector-aligned view the
 /// filesystem will be opened in, because raw block-device handles reject
 /// reads that are not whole sectors.
-fn detect_at_offset<R: Read + Seek>(
+///
+/// When the drive begins inside its filesystem, byte 0 of the volume is one
+/// of the bytes it does not carry, so the probe reports `Unknown` rather
+/// than failing: the caller's `--backup-superblock` request is what selects
+/// the driver in that case (see [`ext_backup::detection_with_backup_request`]).
+fn detect_at_offset<R: Read + Seek + Send + 'static>(
     reader: R,
     offset: u64,
     length: u64,
     sector_size: u32,
+    head_absent: u64,
 ) -> std::io::Result<DetectedBootSector> {
     let length = whole_sectors(length, sector_size);
-    let window = PartitionReader::new(reader, offset, length);
+    let window = PartitionReader::new(gapped_reader(reader, head_absent)?, offset, length);
     let mut window = SectorReader::new(window, length, sector_size)?;
-    fsmnt_device::detect_boot_sector_at(&mut window, 0)
+    match fsmnt_device::detect_boot_sector_at(&mut window, 0) {
+        Ok(detected) => Ok(detected),
+        Err(error) if AbsentHead::in_error(&error).is_some() => Ok(DetectedBootSector::Unknown),
+        Err(error) => Err(error),
+    }
+}
+
+/// Present a drive as the volume it is a tail of, when `head_absent` says
+/// the filesystem began before it; otherwise hand the drive back unchanged.
+///
+/// The two cases have to produce one type, so both are boxed: the extra
+/// indirection costs one virtual call per read on a path that is already
+/// doing device I/O.
+pub(crate) fn gapped_reader<R: Read + Seek + Send + 'static>(
+    reader: R,
+    head_absent: u64,
+) -> std::io::Result<Box<dyn DeviceReader>> {
+    if head_absent == 0 {
+        return Ok(Box::new(reader));
+    }
+    Ok(Box::new(LeadingGapReader::new(reader, head_absent)?))
 }
 
 /// The sector size to read a drive in: the caller's override, else what the
@@ -552,6 +644,11 @@ pub(crate) struct LocatedPartition {
     /// Where the entry describing it was read from, or `None` for a
     /// caller-supplied byte offset.
     pub(crate) origin: Option<LayoutOrigin>,
+    /// Bytes of the filesystem that precede the drive, when the caller said
+    /// the device begins inside its volume. 0 everywhere a partition table
+    /// or a scan located the extent, since those describe bytes the drive
+    /// really carries.
+    pub(crate) head_absent: u64,
 }
 
 /// Resolve one partition ordinal on `drive` to its extent.
@@ -595,6 +692,7 @@ pub(crate) fn locate_partitions<E: HostDriveEnumerator>(
                 extent: PhysicalExtent::new(drive.clone(), partition.offset, length),
                 sector_size: layout.sector_size,
                 origin: Some(layout.origin),
+                head_absent: 0,
             }
         })
         .collect())

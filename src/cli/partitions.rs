@@ -264,7 +264,12 @@ fn logical_volumes(drive: &fsmnt::device::HostDriveId, partition: &LayoutPartiti
 /// Turn one layout entry into a printable row.
 fn row(partition: &LayoutPartition, volume: Option<String>) -> PartitionRow {
     PartitionRow {
-        ordinal: partition.ordinal.to_string(),
+        // An entry with no ordinal is listed but not selectable: `-` is the
+        // same placeholder `fsmnt scan` uses for a row no `--partition` can
+        // name, and the TYPE column carries the command that does open it.
+        ordinal: partition
+            .ordinal
+            .map_or_else(|| "-".to_string(), |ordinal| ordinal.to_string()),
         name: partition.name.clone(),
         type_name: partition
             .type_name

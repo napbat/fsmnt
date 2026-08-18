@@ -12,10 +12,10 @@ use std::sync::Arc;
 use tracing::debug;
 
 use fsmnt_device::{
-    DeviceMember, DeviceReader, DeviceSet, DriverRegistry, FilesystemMemberId,
-    FilesystemOpenOptions, HostDriveId, HostVolumeResolver, LogicalVolumeId, PartitionAddress,
-    PartitionReader, PhysicalExtent, ReadSubstitutions, ResolvedMemberDiscovery, SectorReader,
-    SourceMemberId, SourceOrigin, TolerantReader, select_logical_volume,
+    AbsentHead, DetectedBootSector, DeviceMember, DeviceReader, DeviceSet, DriverRegistry,
+    FilesystemMemberId, FilesystemOpenOptions, HostDriveId, HostVolumeResolver, LogicalVolumeId,
+    PartitionAddress, PartitionReader, PhysicalExtent, ReadSubstitutions, ResolvedMemberDiscovery,
+    SectorReader, SourceMemberId, SourceOrigin, TolerantReader, select_logical_volume,
 };
 
 use super::{
@@ -278,6 +278,10 @@ fn open_raw_member<E: HostVolumeResolver>(
     let reader = E::open_drive(located.extent.drive())?;
     let zone_reporter = E::physical_zone_reporter(&located.extent)?;
     let length = whole_sectors(located.extent.length(), located.sector_size);
+    // A drive that begins inside its filesystem is presented as the whole
+    // volume, absent head included, so the parser's own offsets land where
+    // it expects them; every other member carries only bytes that exist.
+    let reader = super::gapped_reader(reader, located.head_absent)?;
     let partition = PartitionReader::new(reader, located.extent.offset(), length);
     let reader = SectorReader::new(partition, length, located.sector_size)?;
     let mut member = DeviceMember::new(
@@ -304,8 +308,18 @@ fn open_devices(
     // Bounded to the member so a dead sector 0 can still be classified from
     // the format's backup copies (see `detect_boot_sector_within`).
     let length = devices.primary_mut().length();
-    let detected =
-        fsmnt_device::detect_boot_sector_within(devices.primary_mut().reader_mut(), 0, length)?;
+    // A volume whose head the device never carried has nothing at byte 0 to
+    // classify; that is not a failure of the medium, and the caller's
+    // backup-superblock request is what names the driver instead.
+    let detected = match fsmnt_device::detect_boot_sector_within(
+        devices.primary_mut().reader_mut(),
+        0,
+        length,
+    ) {
+        Ok(detected) => detected,
+        Err(error) if AbsentHead::in_error(&error).is_some() => DetectedBootSector::Unknown,
+        Err(error) => return Err(error.into()),
+    };
     std::io::Seek::seek(
         devices.primary_mut().reader_mut(),
         std::io::SeekFrom::Start(0),

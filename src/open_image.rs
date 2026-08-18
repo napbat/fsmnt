@@ -17,8 +17,9 @@ use tracing::debug;
 
 use fsmnt_core::{FsError, TargetFilesystem};
 use fsmnt_device::{
-    DetectedBootSector, DeviceReader, DriverRegistry, FilesystemOpenOptions, FilesystemRoot,
-    ImageFormat, ImageOpenError, ImageReader, PartitionReader, ReadSubstitutions, TolerantReader,
+    AbsentHead, DetectedBootSector, DeviceReader, DriverRegistry, FilesystemOpenOptions,
+    FilesystemRoot, ImageFormat, ImageOpenError, ImageReader, LeadingGapReader, PartitionReader,
+    ReadSubstitutions, TolerantReader,
 };
 
 use crate::ext_backup;
@@ -177,6 +178,45 @@ pub enum OpenImageError {
         /// Decoded-media offset of that copy.
         backup_offset: u64,
     },
+    /// A head the medium does not carry was combined with a location
+    /// inside it.
+    ///
+    /// [`ImageOpenOptions::with_head_absent`] says the filesystem starts
+    /// *before* byte 0 of the image; a partition ordinal, a scanned
+    /// ordinal, or a positive offset each say it starts somewhere *within*
+    /// it. Both cannot be true, and guessing which one the caller meant
+    /// would put every structure at the wrong place.
+    #[error(
+        "the image was declared to begin {head_absent} bytes into its filesystem, which puts the \
+         filesystem's start before byte 0; {location} names a location inside the image instead, \
+         and the two cannot both be where the filesystem is"
+    )]
+    HeadAbsentConflictsWithLocation {
+        /// Bytes of the filesystem that precede the image.
+        head_absent: u64,
+        /// The conflicting way of saying where the filesystem is.
+        location: &'static str,
+    },
+    /// The image begins inside its filesystem, so there is nothing at
+    /// offset 0 to detect, and no backup superblock was named to open it
+    /// through.
+    ///
+    /// By construction the primary superblock (or boot sector) is one of
+    /// the bytes that were never acquired. ext scatters copies of its
+    /// superblock through the volume, so the volume is still openable —
+    /// but only once the caller says which copy to use.
+    #[error(
+        "{path:?} begins {head_absent} bytes into its filesystem, so the primary superblock is \
+         among the bytes it does not carry and nothing at offset 0 can be classified; open it \
+         through a surviving copy with `--backup-superblock GROUP` (`fsmnt scan` names the \
+         groups whose backups are present)"
+    )]
+    HeadAbsentPrimaryUnreadable {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Bytes of the filesystem that precede the image.
+        head_absent: u64,
+    },
     /// Reading or classifying the selected boot sector failed.
     #[error("failed to detect a filesystem at offset {offset} in {path:?}: {source}")]
     Detection {
@@ -216,6 +256,7 @@ fn primary_location(filesystem_start: Option<u64>) -> String {
 #[derive(Clone, Debug)]
 pub struct ImageOpenOptions {
     offset: u64,
+    head_absent: u64,
     partition: Option<usize>,
     sector_size: Option<u32>,
     scan_stride: Option<u64>,
@@ -230,6 +271,7 @@ impl ImageOpenOptions {
     pub const fn new() -> Self {
         Self {
             offset: 0,
+            head_absent: 0,
             partition: None,
             sector_size: None,
             scan_stride: None,
@@ -270,6 +312,44 @@ impl ImageOpenOptions {
     #[must_use]
     pub const fn with_offset(mut self, offset: u64) -> Self {
         self.offset = offset;
+        self
+    }
+
+    /// State that the image begins `bytes` into its filesystem: the
+    /// filesystem's own first `bytes` bytes were never acquired.
+    ///
+    /// The mirror image of [`with_offset`](Self::with_offset). An offset
+    /// says "the filesystem starts this far into the image"; this says the
+    /// image starts this far into the *filesystem* — a slice cut out of a
+    /// larger volume, which `fsmnt scan` reports as "the filesystem starts
+    /// N bytes before this medium". The image is then presented as the
+    /// whole volume, with the first `bytes` absent, so structures the
+    /// filesystem addresses by its own geometry land where it expects them
+    /// instead of `bytes` too early.
+    ///
+    /// The primary superblock is among the absent bytes by construction, so
+    /// this is only useful together with
+    /// [`FilesystemOpenOptions::with_ext_backup_superblock`], which names a
+    /// surviving copy to open through; without one the open fails with
+    /// [`OpenImageError::HeadAbsentPrimaryUnreadable`]. Reads that reach
+    /// into the head fail with the absent-head message unless
+    /// [`with_best_effort_reads`](Self::with_best_effort_reads) is on, which
+    /// serves them as zeros counted in
+    /// [`ReadSubstitutions::absent_bytes`](fsmnt_device::ReadSubstitutions::absent_bytes).
+    /// In practice that means best-effort reads too, not just a backup
+    /// group: the ext driver looks at the primary superblock at byte 1024
+    /// even when it has been told to take its metadata from a copy, and
+    /// byte 1024 is one of the bytes a slice like this does not carry.
+    ///
+    /// Mutually exclusive with a non-zero [`with_offset`](Self::with_offset),
+    /// with [`with_partition`](Self::with_partition), and with
+    /// [`with_scan`](Self::with_scan): each of those names a location
+    /// *inside* the image, and the filesystem cannot both begin before the
+    /// image and somewhere within it. Combining them fails with
+    /// [`OpenImageError::HeadAbsentConflictsWithLocation`].
+    #[must_use]
+    pub const fn with_head_absent(mut self, bytes: u64) -> Self {
+        self.head_absent = bytes;
         self
     }
 
@@ -332,6 +412,13 @@ impl ImageOpenOptions {
     #[must_use]
     pub const fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Bytes of the filesystem that precede the image, or 0 when the image
+    /// starts where its filesystem does.
+    #[must_use]
+    pub const fn head_absent(&self) -> u64 {
+        self.head_absent
     }
 
     /// Partition ordinal to open, if one was selected.
@@ -418,12 +505,22 @@ pub fn open_image_with_options(
     let path = path.as_ref();
     let ImageOpenOptions {
         offset,
+        head_absent,
         partition,
         sector_size,
         scan_stride,
         best_effort_reads,
         filesystem,
     } = options;
+    if head_absent > 0 {
+        if let Some(location) = conflicting_location(offset, partition, scan_stride) {
+            return Err(OpenImageError::HeadAbsentConflictsWithLocation {
+                head_absent,
+                location,
+            });
+        }
+        return open_image_head_absent(path, drivers, head_absent, best_effort_reads, &filesystem);
+    }
     let layout::LocatedImagePartition {
         mut image,
         offset,
@@ -506,6 +603,115 @@ pub fn open_image_with_options(
         format,
         substitutions,
         layout_origin,
+    })
+}
+
+/// The way of naming a location inside the image that a caller combined
+/// with an absent head, or `None` when nothing conflicts.
+const fn conflicting_location(
+    offset: u64,
+    partition: Option<usize>,
+    scan_stride: Option<u64>,
+) -> Option<&'static str> {
+    if partition.is_some() {
+        Some("a partition ordinal (`--partition`)")
+    } else if scan_stride.is_some() {
+        Some("a scanned ordinal (`--scan`)")
+    } else if offset > 0 {
+        Some("a positive byte offset (`--offset`)")
+    } else {
+        None
+    }
+}
+
+/// Open a filesystem the image begins *inside*: its first `head_absent`
+/// bytes were never acquired.
+///
+/// The image is presented as the whole volume through a
+/// [`LeadingGapReader`], so the filesystem addresses its structures at the
+/// offsets its own geometry names. Two consequences follow, and both are
+/// deliberate. Detection at offset 0 has nothing to read — the primary
+/// superblock is one of the absent bytes — so an absent-head failure is
+/// taken as "unknown" and the caller's backup-superblock request selects
+/// the driver, exactly as it does for a head that was zeroed rather than
+/// never captured. And no partition table is consulted at all: an image
+/// that starts mid-filesystem has no table of its own to read.
+fn open_image_head_absent(
+    path: &std::path::Path,
+    drivers: &DriverRegistry,
+    head_absent: u64,
+    best_effort_reads: bool,
+    filesystem: &FilesystemOpenOptions,
+) -> Result<OpenedImage, OpenImageError> {
+    let detection_error = |source| OpenImageError::Detection {
+        path: path.to_path_buf(),
+        offset: 0,
+        source,
+    };
+    let image = ImageReader::open(path)?;
+    let format = image.format();
+    let carried_bytes = image.len();
+    let volume_bytes = head_absent.saturating_add(carried_bytes);
+    let gapped = LeadingGapReader::new(image, head_absent).map_err(detection_error)?;
+
+    // The tolerant wrapper goes on *before* detection, not after it as the
+    // ordinary path does: with best-effort reads the absent head is zeros
+    // from the first probe onwards, which is what lets a small gap — one
+    // that stops short of the superblock at byte 1024 — still classify.
+    let (mut source, substitutions): (Box<dyn DeviceReader>, Option<Arc<ReadSubstitutions>>) =
+        if best_effort_reads {
+            let (tolerant, stats) =
+                TolerantReader::new(gapped, volume_bytes).map_err(detection_error)?;
+            (Box::new(tolerant), Some(stats))
+        } else {
+            (Box::new(gapped), None)
+        };
+
+    let detected = match fsmnt_device::detect_boot_sector_within(&mut source, 0, volume_bytes) {
+        Ok(detected) => detected,
+        Err(error) if AbsentHead::in_error(&error).is_some() => DetectedBootSector::Unknown,
+        Err(error) => return Err(detection_error(error)),
+    };
+    let detected = ext_backup::detection_with_backup_request(detected, filesystem);
+    debug!(
+        path = %path.display(),
+        head_absent,
+        carried_bytes,
+        volume_bytes,
+        detected = ?detected,
+        best_effort_reads,
+        "opening an image that begins inside its own filesystem"
+    );
+    if detected == DetectedBootSector::Unknown {
+        return Err(OpenImageError::HeadAbsentPrimaryUnreadable {
+            path: path.to_path_buf(),
+            head_absent,
+        });
+    }
+
+    let reader = PartitionReader::new(source, 0, volume_bytes);
+    let opened = drivers
+        .open_with_options(Box::new(reader), detected, filesystem)
+        .map_err(|source| OpenImageError::Filesystem {
+            path: path.to_path_buf(),
+            offset: 0,
+            detected,
+            source,
+        })?;
+    let truncated_by = truncation::missing_filesystem_bytes(opened.total_size(), volume_bytes);
+    Ok(OpenedImage {
+        filesystem: opened,
+        detected,
+        offset: 0,
+        size_bytes: volume_bytes,
+        declared_size_bytes: volume_bytes,
+        truncated_by,
+        format,
+        substitutions,
+        // No table was read, and no scan was run: the caller stated where
+        // the volume begins relative to the image, which is not a
+        // provenance any layout can claim.
+        layout_origin: None,
     })
 }
 

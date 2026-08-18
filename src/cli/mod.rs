@@ -105,10 +105,24 @@ fn report_substitutions(stats: &fsmnt::device::ReadSubstitutions) {
         info!("best-effort reads: every byte that was read was present in the source");
         return;
     }
+    // Bytes in front of the medium are named separately, and only when
+    // there are any: they were not lost to a defect or a short dump, the
+    // acquisition simply began after the filesystem did, and a report has
+    // to be able to say which of the three happened.
+    let absent = stats.absent_bytes();
+    let head = if absent == 0 {
+        String::new()
+    } else {
+        format!(
+            ", {} before the start of the medium (the filesystem began before the acquisition)",
+            format_size_precise(absent),
+        )
+    };
     warn!(
         "best-effort reads: {} of the media that was read was not there and came back as zeros \
-         — {} past the end of the source, {} in sectors that failed to read ({} read error(s))",
-        format_size_precise(stats.missing_bytes() + stats.errored_bytes()),
+         — {} past the end of the source{head}, {} in sectors that failed to read ({} read \
+         error(s))",
+        format_size_precise(stats.missing_bytes() + stats.errored_bytes() + absent),
         format_size_precise(stats.missing_bytes()),
         format_size_precise(stats.errored_bytes()),
         stats.read_errors(),

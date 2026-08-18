@@ -481,9 +481,14 @@ impl FstabSiblings for ImageSiblings<'_> {
         Ok(layout
             .partitions
             .iter()
-            .map(|partition| ImageAddress {
-                offset: partition.offset,
-                partition: Some(partition.ordinal),
+            // An entry with no ordinal is not openable by one: it is a
+            // volume the scan found evidence of whose start lies before
+            // this image, so it is nobody's sibling here.
+            .filter_map(|partition| {
+                partition.ordinal.map(|ordinal| ImageAddress {
+                    offset: partition.offset,
+                    partition: Some(ordinal),
+                })
             })
             .collect())
     }
