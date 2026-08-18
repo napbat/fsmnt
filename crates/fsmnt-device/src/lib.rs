@@ -39,6 +39,7 @@ mod image;
 mod partition_reader;
 mod sector_reader;
 mod source;
+mod tolerant_reader;
 
 pub use detection::{
     detect_backup_boot_sector_at, detect_boot_sector_at, detect_boot_sector_within,
@@ -74,3 +75,4 @@ pub use source::{
     SourceOrigin, SourceSelection, VolumeSelectionError, assemble_raw_volume,
     select_logical_volume,
 };
+pub use tolerant_reader::{ReadSubstitutions, TolerantReader};
