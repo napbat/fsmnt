@@ -17,7 +17,7 @@ use std::str::FromStr;
 use clap::{ArgGroup, Args, Parser, Subcommand};
 
 use cli::logging::LogOptions;
-use cli::size::{SizeExpr, parse_sector_size, parse_size_expr};
+use cli::size::{SignedSizeExpr, parse_sector_size, parse_signed_size_expr};
 
 /// Mount filesystem sources as read-only virtual volumes (FUSE on Unix,
 /// Dokan on Windows).
@@ -229,10 +229,19 @@ struct MountArgs {
     /// table describes: bytes (`270532608`), a binary or decimal multiple
     /// (`258MiB`, `1M`, `270MB`), or sectors of `--sector-size`
     /// (`528384s`). On a drive this is a physical offset, past any logical
-    /// volume the operating system lays over it. `fsmnt scan SOURCE` finds
-    /// them. Images and drives.
-    #[arg(long, value_name = "SIZE", value_parser = parse_size_expr, conflicts_with = "partition")]
-    offset: Option<SizeExpr>,
+    /// volume the operating system lays over it. A NEGATIVE offset
+    /// (`-469762048`, `-448MiB`) reverses the relationship: the medium
+    /// begins that many bytes into the filesystem, which is what `fsmnt
+    /// scan SOURCE` prints for a slice cut out of a larger volume. `fsmnt
+    /// scan SOURCE` finds them. Images and drives.
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_signed_size_expr,
+        conflicts_with = "partition",
+        allow_hyphen_values = true
+    )]
+    offset: Option<SignedSizeExpr>,
 
     /// Resolve `--partition` against a SYNTHETIC table reconstructed by
     /// scanning the media for filesystem starts (`fsmnt partitions SOURCE

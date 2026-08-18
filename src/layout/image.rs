@@ -314,15 +314,23 @@ pub(crate) fn locate_image_partition(
     options: ImageLayoutOptions,
 ) -> Result<LocatedImagePartition, OpenImageError> {
     let ImageLayoutView { image, layout } = read_image_layout(path, options)?;
-    let selected =
-        layout
-            .partitions
-            .get(partition)
-            .ok_or_else(|| OpenImageError::PartitionNotFound {
-                path: path.to_path_buf(),
-                partition,
-                available: layout.partitions.len(),
-            })?;
+    // Looked up by ordinal rather than by position, because a scanned
+    // layout can list an entry that carries no ordinal at all (a volume
+    // that began before the medium); its presence must not renumber the
+    // entries a caller can actually select.
+    let selected = layout
+        .partitions
+        .iter()
+        .find(|entry| entry.ordinal == Some(partition))
+        .ok_or_else(|| OpenImageError::PartitionNotFound {
+            path: path.to_path_buf(),
+            partition,
+            available: layout
+                .partitions
+                .iter()
+                .filter(|entry| entry.ordinal.is_some())
+                .count(),
+        })?;
     if selected.offset >= layout.size_bytes {
         return Err(OpenImageError::OffsetOutOfRange {
             path: path.to_path_buf(),

@@ -132,7 +132,22 @@ fn print_hits(args: &ScanArgs, source: &Source, hits: &[ScanHit]) {
         );
     }
 
+    // A filesystem this medium begins *inside* has no offset here to mount
+    // at, so it never gets a `#` — but it is mountable, and the command
+    // that does it is worth spelling out in full.
+    let begins_inside = hits
+        .iter()
+        .find_map(|hit| Some((hit, hit.head_absent()?, hit.backup_superblock_group()?)));
+
     let Some(first) = hits.iter().find(|hit| hit.mount_offset().is_some()) else {
+        if let Some((_, before, group)) = begins_inside {
+            println!(
+                "\nNo row above is the start of a filesystem, but this medium is a slice of one. \
+                 Mount it with:\n  fsmnt mount {source} <MOUNTPOINT> {}",
+                head_absent_flags(before, group),
+            );
+            return;
+        }
         // Every row above is evidence *about* a filesystem rather than the
         // start of one, so there is no offset to offer. Saying that is more
         // use than a mount command with nothing to put in it.
@@ -155,6 +170,13 @@ fn print_hits(args: &ScanArgs, source: &Source, hits: &[ScanHit]) {
          --partition <#>   (# is synthetic — from this scan, not from the {})",
         source.describe(),
     );
+    if let Some((_, before, group)) = begins_inside {
+        println!(
+            "\nOne row above has no #: its filesystem starts before this medium. Mount that one \
+             with:\n  fsmnt mount {source} <MOUNTPOINT> {}",
+            head_absent_flags(before, group),
+        );
+    }
 }
 
 /// The offset expressed in sectors, or `-` when it is not a whole number of
@@ -228,13 +250,34 @@ fn orphan_backup_note(
     }
     let _ = match (filesystem_start, start_before_medium) {
         (Some(start), _) => write!(note, "; filesystem start would be at {start}"),
+        // There is no offset on this medium to mount at — the start is
+        // behind its first byte — so the note carries the flags that say
+        // so instead, the way the damaged-primary note carries its own.
         (None, Some(before)) => write!(
             note,
-            "; the filesystem starts {before} bytes before this medium — the image begins inside it"
+            "; the filesystem starts {before} bytes before this medium — the image begins inside \
+             it; mount with {}",
+            head_absent_flags(
+                before,
+                hit.backup_superblock_group().unwrap_or(u32::from(group))
+            ),
         ),
         (None, None) => write!(note, "; its filesystem starts before this medium"),
     };
     note
+}
+
+/// The flags that open a volume the medium begins inside: the absent head,
+/// the surviving copy to read the metadata from, and the two options that
+/// make the rest of it recoverable.
+///
+/// `--salvage` and `--best-effort-reads` are part of the suggestion rather
+/// than an afterthought because neither is optional in practice here: the
+/// root directory usually lived in the absent head, and every read that
+/// reaches into it has to come back as counted zeros for the sweep to get
+/// past it.
+fn head_absent_flags(before: u64, group: u32) -> String {
+    format!("--offset -{before} --backup-superblock {group} --salvage --best-effort-reads")
 }
 
 /// What a run of unconfirmed primary superblocks says.
@@ -391,12 +434,23 @@ mod tests {
                 (3_623_878_656, 27),
             ]),
         };
-        assert_eq!(orphan.mount_offset(), None);
+        assert_eq!(
+            orphan.mount_offset(),
+            None,
+            "no offset on this medium is the start of that filesystem"
+        );
+        assert_eq!(
+            orphan.head_absent(),
+            Some(469_762_048),
+            "but the distance back to its start is known, and that is the way in"
+        );
+        assert_eq!(orphan.backup_superblock_group(), Some(5));
         assert_eq!(type_column(&orphan), "Ext (backup only)");
         assert_eq!(
             note_column(&orphan),
             "backup superblock of group 5, corroborated by groups 7, 9, 25, 27; the filesystem \
-             starts 469762048 bytes before this medium — the image begins inside it"
+             starts 469762048 bytes before this medium — the image begins inside it; mount with \
+             --offset -469762048 --backup-superblock 5 --salvage --best-effort-reads"
         );
     }
 

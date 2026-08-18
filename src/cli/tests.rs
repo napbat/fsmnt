@@ -6,7 +6,7 @@ use clap::Parser;
 use fsmnt::device::FilesystemRoot;
 
 use crate::cli::mount::check_options;
-use crate::cli::size::SizeExpr;
+use crate::cli::size::{SignedSizeExpr, SizeExpr};
 use crate::cli::source::{Source, SourceKind, resolve};
 use crate::{Cli, Commands, FilesystemMountOptions, MountArgs};
 
@@ -114,7 +114,10 @@ fn a_location_is_stated_once() {
 
     let args = mount(&["fsmnt", "mount", "disk.bin", "Z:", "--offset", "32768"]);
     assert_eq!(args.partition, None);
-    assert_eq!(args.offset, Some(SizeExpr::Bytes(32_768)));
+    assert_eq!(
+        args.offset.map(SignedSizeExpr::magnitude),
+        Some(SizeExpr::Bytes(32_768))
+    );
 
     let args = mount(&["fsmnt", "mount", "disk.bin", "Z:"]);
     assert_eq!(args.partition, None);
@@ -240,13 +243,53 @@ fn offsets_accept_size_suffixes_and_sector_counts() {
         ("528384s", SizeExpr::Sectors(528_384)),
     ] {
         let args = mount(&["fsmnt", "mount", "disk.bin", "Z:", "--offset", argument]);
-        assert_eq!(args.offset, Some(expected), "--offset {argument}");
+        let offset = args.offset.expect("offset");
+        assert!(!offset.is_negative(), "--offset {argument}");
+        assert_eq!(offset.magnitude(), expected, "--offset {argument}");
     }
 
     assert!(
         Cli::try_parse_from(["fsmnt", "mount", "disk.bin", "Z:", "--offset", "258 flurbs"])
             .is_err(),
         "an unknown unit is rejected by clap"
+    );
+}
+
+#[test]
+fn a_negative_offset_says_the_medium_begins_inside_the_filesystem() {
+    for (argument, expected) in [
+        ("-469762048", SizeExpr::Bytes(469_762_048)),
+        ("-448MiB", SizeExpr::Bytes(469_762_048)),
+        ("-917504s", SizeExpr::Sectors(917_504)),
+    ] {
+        let args = mount(&["fsmnt", "mount", "vendor.img", "Z:", "--offset", argument]);
+        let offset = args.offset.expect("offset");
+        assert!(
+            offset.is_negative(),
+            "--offset {argument} is a head, not a place"
+        );
+        assert_eq!(offset.magnitude(), expected, "--offset {argument}");
+    }
+
+    // The sign changes nothing about which options may accompany it: a
+    // location is still stated once.
+    assert!(
+        Cli::try_parse_from([
+            "fsmnt",
+            "mount",
+            "vendor.img",
+            "Z:",
+            "--offset",
+            "-1M",
+            "--partition",
+            "0",
+        ])
+        .is_err(),
+        "--partition and a negative --offset are still two answers to one question"
+    );
+    assert!(
+        Cli::try_parse_from(["fsmnt", "mount", "vendor.img", "Z:", "--offset", "-"]).is_err(),
+        "a sign with no size is not an offset"
     );
 }
 
@@ -264,7 +307,7 @@ fn a_sector_count_offset_is_resolved_against_the_sector_size() {
     ]);
     assert_eq!(args.sector_size, Some(65_536));
     assert_eq!(
-        args.offset.expect("offset").resolve(65_536),
+        args.offset.expect("offset").magnitude().resolve(65_536),
         Ok(268_435_456)
     );
 }

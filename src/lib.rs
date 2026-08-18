@@ -89,7 +89,7 @@
 //! use fsmnt::{ImageOpenOptions, drivers, image_layout, open_image_with_options};
 //!
 //! for partition in image_layout("disk.bin")?.partitions {
-//!     println!("{} {:?}", partition.ordinal, partition.detected);
+//!     println!("{:?} {:?}", partition.ordinal, partition.detected);
 //! }
 //! let options = ImageOpenOptions::new().with_partition(3);
 //! let opened = open_image_with_options("disk.bin", &drivers::default_registry(), options)?;

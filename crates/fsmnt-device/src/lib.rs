@@ -12,6 +12,8 @@
 //! - [`ImageContainer`] / [`ImageReader`] — a common decoded-media contract
 //!   plus automatic raw/EWF/VHD/VHDX image opening.
 //! - [`PartitionReader`] — a reader windowed to one partition's extent.
+//! - [`LeadingGapReader`] — a volume whose first bytes the medium never
+//!   carried, for an acquisition that began inside the filesystem.
 //! - [`HostVolumeResolver`] / [`LogicalVolume`] — the graph edge from a
 //!   physical partition extent to one or more operating-system logical block
 //!   views, including stacked and multi-disk storage.
@@ -37,6 +39,7 @@ mod drive;
 mod driver;
 mod fscrypt;
 mod image;
+mod leading_gap_reader;
 mod partition_reader;
 mod sector_reader;
 mod source;
@@ -70,6 +73,7 @@ pub use fsmnt_parser_core::partition::{
     GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry, read_gpt_header,
 };
 pub use image::{ImageContainer, ImageFormat, ImageOpenError, ImageReader};
+pub use leading_gap_reader::{AbsentHead, LeadingGapReader};
 pub use partition_reader::PartitionReader;
 pub use sector_reader::SectorReader;
 pub use source::{

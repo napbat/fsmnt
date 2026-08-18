@@ -232,7 +232,10 @@ drive:
 - `--offset SIZE` opens raw media at a byte offset, for media no partition
   table describes. On a drive the offset is *physical*: it counts from the
   first byte of the drive, past any logical volume the operating system has
-  laid over it, so `--volume` is refused alongside it.
+  laid over it, so `--volume` is refused alongside it. A **negative** offset
+  reverses the relationship — the medium begins that many bytes into the
+  filesystem (see
+  [Damaged and partial images](#damaged-and-partial-images)).
 - `--scan --partition N` counts the filesystems a scan of the media finds
   instead of the entries of any table (see
   [Damaged and partial images](#damaged-and-partial-images)).
@@ -256,7 +259,7 @@ disk.bin is a disk image` — rather than being quietly ignored.
 | option | directory | image | drive |
 |---|:---:|:---:|:---:|
 | `--partition N` | – | ✓ | ✓ |
-| `--offset SIZE` | – | ✓ | ✓ |
+| `--offset SIZE` (or `-SIZE`) | – | ✓ | ✓ |
 | `--scan`, `--stride BYTES` | – | ✓ | ✓ |
 | `--sector-size BYTES` | – | ✓ | ✓ |
 | `--raw`, `--volume ID`, `--member DRIVE:PARTITION` | – | – | ✓ |
@@ -396,6 +399,52 @@ fsmnt mount dump.bin Z: --offset 270532608
 fsmnt mount dump.bin Z: --offset 258MiB
 fsmnt mount dump.bin Z: --offset 528384s     # sectors of --sector-size (512 by default)
 ```
+
+**The acquisition began inside the filesystem.** Sometimes the medium is not
+a container the filesystem sits *in* — it is a slice cut out of one: a single
+eMMC partition of an ext4 that spans more of the chip, or a `dd` that started
+late. `scan` recognises this from the backup superblocks that survived,
+because each one records its own block group and a group's distance from the
+start of its filesystem is arithmetic:
+
+```
+   -   201326592  Ext (backup only)  3.9 GB  backup superblock of group 5, corroborated by groups 7, 9, 25, 27; the filesystem starts 469762048 bytes before this medium — the image begins inside it; mount with --offset -469762048 --backup-superblock 5 --salvage --best-effort-reads
+```
+
+A **negative** `--offset` says exactly that, in the same spellings as a
+positive one (`-469762048`, `-448MiB`, `-917504s`): the medium begins that
+many bytes into the filesystem. `fsmnt` then presents the whole volume, with
+those leading bytes marked *absent* — not zeros, not an end of file, but a
+range the evidence never carried — so every structure is addressed at the
+offset the filesystem's own geometry names instead of 448 MiB too early. The
+alternative, padding a copy of the image with 448 MiB of zeros, works too and
+duplicates 7.7 GB of evidence to do it.
+
+```sh
+fsmnt mount android_vendor.img X: --offset -469762048 \
+    --backup-superblock 5 --salvage --best-effort-reads
+```
+
+```
+warn: the medium begins 469762048 bytes into this filesystem; those bytes are absent — metadata and files that lived there are gone, and reads into them are served as zeros and counted
+…
+warn: best-effort reads: 8 MB of the media that was read was not there and came back as zeros — 0 bytes past the end of the source, 8 MB before the start of the medium (the filesystem began before the acquisition), 0 bytes in sectors that failed to read (0 read error(s))
+```
+
+On that 7.7 GB vendor image the sweep recovers 48,433 inodes and 539 MB of
+file data out of a volume whose primary superblock, group descriptor table
+and root directory were all in the 448 MiB nobody acquired. The other three
+flags are not optional here: the primary metadata is absent by construction,
+so `--backup-superblock` names a copy that survived, `--salvage` reaches the
+files the lost directory tree pointed at, and `--best-effort-reads` turns
+reads into the head into counted zeros — without it the ext driver's own look
+at the primary superblock fails the open, saying which bytes are absent.
+Bytes served for the absent head are counted apart from a short dump and a
+bad sector, because "never acquired" is a different fact from "damaged".
+
+Such a filesystem is listed by `partitions --scan` but carries no `#`: there
+is no extent on this medium to hand `--partition`, so the row is unnumbered
+and its type text names the command that does open it.
 
 **Say what a sector is.** `--sector-size BYTES` (a power of two of at least
 512, on `mount`, `partitions`, and `scan`) sets both the unit for an

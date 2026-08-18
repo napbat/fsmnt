@@ -170,7 +170,7 @@ fn mbr_images_are_enumerated_with_types_sizes_and_detected_filesystems() {
     assert_eq!(layout.partitions.len(), 2);
 
     let data = &layout.partitions[0];
-    assert_eq!(data.ordinal, 0);
+    assert_eq!(data.ordinal, Some(0));
     assert_eq!(data.offset, u64::from(DATA_START_LBA) * 512);
     assert_eq!(data.size_bytes, u64::from(DATA_SECTORS) * 512);
     assert_eq!(data.type_name.as_deref(), Some("Linux"));
@@ -178,7 +178,7 @@ fn mbr_images_are_enumerated_with_types_sizes_and_detected_filesystems() {
     assert_eq!(data.detected, Some(DetectedBootSector::Unknown));
 
     let ntfs = &layout.partitions[1];
-    assert_eq!(ntfs.ordinal, 1);
+    assert_eq!(ntfs.ordinal, Some(1));
     assert_eq!(ntfs.offset, ntfs_offset() as u64);
     assert_eq!(ntfs.size_bytes, u64::from(NTFS_SECTORS) * 512);
     assert_eq!(ntfs.type_name.as_deref(), Some("NTFS/HPFS/exFAT"));
@@ -562,7 +562,7 @@ fn a_layout_reconstructed_by_scanning_is_marked_synthetic_and_mountable() {
         &path,
         &registry(),
         ImageOpenOptions::new()
-            .with_partition(ntfs.ordinal)
+            .with_partition(ntfs.ordinal.expect("a table entry is selectable"))
             .with_scan(512),
     )
     .expect("mount by synthetic ordinal");

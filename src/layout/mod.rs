@@ -95,11 +95,18 @@ pub enum LayoutOrigin {
 /// One mountable extent within a decoded medium or drive.
 #[derive(Clone, Debug)]
 pub struct LayoutPartition {
-    /// Position in the listing, counting non-empty entries from 0. This is
+    /// Position in the listing, counting selectable entries from 0. This is
     /// the number `--partition` and
     /// [`ImageOpenOptions::with_partition`](crate::ImageOpenOptions::with_partition)
     /// take.
-    pub ordinal: usize,
+    ///
+    /// `None` for an entry that exists to be *seen* rather than selected:
+    /// a scanned filesystem whose start lies before the medium
+    /// ([`head_absent`](Self::head_absent)) has no extent on it to open, so
+    /// numbering it would offer a mount that cannot be performed. Such
+    /// entries are skipped when the ordinals are counted, so the numbers
+    /// the rest of the listing carries are unaffected by their presence.
+    pub ordinal: Option<usize>,
     /// Byte offset of the partition start within the medium.
     pub offset: u64,
     /// Length of the partition in bytes, as declared by the partition table
@@ -127,6 +134,17 @@ pub struct LayoutPartition {
     /// Filesystem detected at the partition start, or `None` when those
     /// bytes could not be read (a truncated or partition-table-only image).
     pub detected: Option<DetectedBootSector>,
+    /// Bytes of this filesystem that lie *before* the medium, for a scanned
+    /// entry whose backup superblocks say their volume began earlier than
+    /// the acquisition did.
+    ///
+    /// `None` for everything a partition table describes and for every
+    /// scanned start the medium really carries. When it is `Some`, the
+    /// entry's `offset` is 0 — the start of the *volume*, not of the medium
+    /// — and the way in is `--offset -N` plus a surviving backup
+    /// superblock, not a partition ordinal (see
+    /// [`ordinal`](Self::ordinal)).
+    pub head_absent: Option<u64>,
 }
 
 impl LayoutPartition {
@@ -156,13 +174,14 @@ mod tests {
 
     fn partition(offset: u64, size_bytes: u64, image_size: u64) -> LayoutPartition {
         LayoutPartition {
-            ordinal: 0,
+            ordinal: Some(0),
             offset,
             size_bytes,
             missing_bytes: missing_bytes(offset, size_bytes, Some(image_size)),
             type_name: None,
             name: None,
             detected: None,
+            head_absent: None,
         }
     }
 

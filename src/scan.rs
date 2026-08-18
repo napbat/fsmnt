@@ -38,6 +38,8 @@
 //!   [`Mbr::is_plausible_table`]). What fails those tests is still
 //!   reported — as what it actually is, folded into one line.
 
+mod hit;
+
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -50,6 +52,8 @@ use fsmnt_device::{
     ext_root_inode_plausible, ext_start_check, ext_superblock_info, is_btrfs_primary_superblock,
     parse_boot_sector,
 };
+
+pub use hit::{ExtBackupSuperblock, ScanHit, ScanHitKind, mountable_hits};
 
 /// Default distance between candidate positions.
 ///
@@ -100,120 +104,6 @@ impl Default for ScanOptions {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// What a scan found at one offset.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ScanHit {
-    /// Byte offset in the medium. For a filesystem this is the offset to
-    /// hand to `fsmnt mount SOURCE --offset`; for a backup superblock it is
-    /// where the copy itself sits, not where its filesystem starts.
-    pub offset: u64,
-    /// What the bytes at `offset` are.
-    pub kind: ScanHitKind,
-    /// Size the structure claims for its filesystem, where the format states
-    /// one. Not a measurement — a truncated image reports the size the
-    /// superblock was written with.
-    pub size_bytes: Option<u64>,
-    /// Backup superblocks found inside this filesystem, in offset order.
-    /// Only ever populated for an ext filesystem hit.
-    pub backup_superblocks: Vec<ExtBackupSuperblock>,
-}
-
-impl ScanHit {
-    /// The offset `fsmnt mount SOURCE --offset` would take for this hit, if
-    /// it is mountable at all.
-    ///
-    /// A partition table is not mountable, and a stray backup superblock is
-    /// mountable only at the filesystem start it implies — never at its own
-    /// offset, which the ext driver refuses on purpose. Superblock copies
-    /// that no backup corroborates are not mountable either: nothing says a
-    /// filesystem begins where they sit.
-    #[must_use]
-    pub fn mount_offset(&self) -> Option<u64> {
-        match self.kind {
-            ScanHitKind::Filesystem(_) => Some(self.offset),
-            ScanHitKind::ExtBackupSuperblock {
-                filesystem_start, ..
-            } => filesystem_start,
-            ScanHitKind::ExtPrimaryCopies { .. } => {
-                (!self.backup_superblocks.is_empty()).then_some(self.offset)
-            }
-            ScanHitKind::PartitionTable(_) => None,
-        }
-    }
-}
-
-/// The hits a scan numbers for `fsmnt mount SOURCE --scan --partition N`:
-/// every hit with a [`mount_offset`](ScanHit::mount_offset), in scan order.
-///
-/// The number is **synthetic** — it comes from this scan of this medium with
-/// these options, not from any partition table on it — so it holds only for
-/// the same medium scanned with the same stride. It is a convenience over
-/// pasting the offset, not an identity of the volume.
-///
-/// Evidence a scan cannot act on is deliberately absent: a partition table,
-/// a backup superblock whose filesystem starts before this medium, and a
-/// superblock copy nothing corroborates all appear in the hit list and none
-/// of them gets a number, because there is no offset to hand a mount.
-#[must_use]
-pub fn mountable_hits(hits: &[ScanHit]) -> Vec<&ScanHit> {
-    hits.iter()
-        .filter(|hit| hit.mount_offset().is_some())
-        .collect()
-}
-
-/// The kind of structure a [`ScanHit`] identifies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScanHitKind {
-    /// The start of a filesystem of this type.
-    Filesystem(DetectedBootSector),
-    /// A partition table, which describes filesystems rather than being one.
-    PartitionTable(DetectedBootSector),
-    /// Backup superblock(s) of an ext filesystem whose primary this scan did
-    /// not confirm.
-    ///
-    /// [`ScanHit::offset`] is the first copy; the other copies of the same
-    /// filesystem that agree on the start are in
-    /// [`ScanHit::backup_superblocks`].
-    ExtBackupSuperblock {
-        /// Block group the first copy belongs to.
-        group: u16,
-        /// Offset its filesystem would have started at, or `None` when that
-        /// would fall before the start of the media.
-        filesystem_start: Option<u64>,
-        /// Bytes by which the implied start precedes the medium — the medium
-        /// is a slice that begins inside the filesystem. `Some` exactly when
-        /// `filesystem_start` is `None`.
-        start_before_medium: Option<u64>,
-    },
-    /// Copies of an ext primary superblock (group 0) with no filesystem
-    /// behind them: block 0 journalled inside a filesystem, or a start whose
-    /// metadata is damaged.
-    ///
-    /// A copy fails either of the two tests a start passes — no group
-    /// descriptor table follows it, or one does but the root inode it points
-    /// at is not a directory, which is what block 0 and block 1 journalled
-    /// together look like.
-    ///
-    /// [`ScanHit::offset`] is the first, `last_offset` the last, `copies` how
-    /// many. Backups that name `offset` as their filesystem's start land in
-    /// [`ScanHit::backup_superblocks`], and only then is the hit mountable.
-    ExtPrimaryCopies {
-        /// How many copies were folded into this one hit.
-        copies: usize,
-        /// Offset of the last copy, so the run's extent is on record.
-        last_offset: u64,
-    },
-}
-
-/// An ext superblock copy found inside a filesystem the scan also located.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ExtBackupSuperblock {
-    /// Byte offset of the copy in the decoded media.
-    pub offset: u64,
-    /// Block group it belongs to.
-    pub group: u16,
 }
 
 /// Why a scan could not complete.

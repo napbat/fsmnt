@@ -5,10 +5,14 @@
 //! early, or a drive with a handful of bad sectors, into a volume where
 //! whole files (or the directory tree) are "unreadable" even though nearly
 //! all their bytes are right there. [`TolerantReader`] substitutes zeros for
-//! the bytes it cannot get — past the source's end, or in a sector that
-//! fails to read — so the parser keeps going and the caller can copy out
-//! what exists. Every substitution is counted in [`ReadSubstitutions`],
-//! because zeros are not data and a report must say how many there were.
+//! the bytes it cannot get — past the source's end, in a sector that fails
+//! to read, or in front of a medium that begins inside its own filesystem
+//! ([`LeadingGapReader`]) — so the parser keeps going and the caller can
+//! copy out what exists. Every substitution is counted in
+//! [`ReadSubstitutions`], because zeros are not data and a report must say
+//! how many there were, and the three reasons are counted apart because a
+//! short dump, a failing drive and an acquisition that started late are
+//! three different things to have to write down.
 //!
 //! This is opt-in: substituted zeros can look like an empty file or a
 //! zeroed directory block, and the default open would rather fail loudly.
@@ -19,6 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracing::{debug, trace};
+
+use crate::leading_gap_reader::AbsentHead;
 
 /// Granularity at which a failing read is written off as zeros: one
 /// sector, so a bad-sector error costs 512 bytes, not the whole request.
@@ -42,6 +48,10 @@ pub struct ReadSubstitutions {
     /// Coalesced ranges served as zeros because the source reported an I/O
     /// error.
     errored: Mutex<Ranges>,
+    /// Coalesced ranges served as zeros because they lie *before* the first
+    /// byte the medium carries — the acquisition began inside the
+    /// filesystem, so these bytes were never captured.
+    absent: Mutex<Ranges>,
     /// Number of I/O errors that were absorbed (every occurrence, since a
     /// sector that fails on every read is still one bad sector but the
     /// count says how often it was hit).
@@ -96,6 +106,20 @@ impl ReadSubstitutions {
         self.errored.lock().map_or(0, |ranges| ranges.total())
     }
 
+    /// Distinct bytes served as zeros because they lie in front of the
+    /// medium: the filesystem began before the acquisition did, so those
+    /// bytes — and whatever metadata or file content lived in them — were
+    /// never captured.
+    ///
+    /// Kept apart from [`missing_bytes`](Self::missing_bytes) and
+    /// [`errored_bytes`](Self::errored_bytes) because the cause is
+    /// different in kind: nothing here is damaged and nothing failed, the
+    /// evidence simply starts later than the volume does.
+    #[must_use]
+    pub fn absent_bytes(&self) -> u64 {
+        self.absent.lock().map_or(0, |ranges| ranges.total())
+    }
+
     /// I/O errors that were absorbed.
     #[must_use]
     pub fn read_errors(&self) -> u64 {
@@ -105,13 +129,14 @@ impl ReadSubstitutions {
     /// Whether anything at all was substituted.
     #[must_use]
     pub fn any(&self) -> bool {
-        self.missing_bytes() > 0 || self.errored_bytes() > 0
+        self.missing_bytes() > 0 || self.errored_bytes() > 0 || self.absent_bytes() > 0
     }
 
     fn record(&self, why: Substituted, start: u64, end: u64) {
         let ranges = match why {
             Substituted::Missing => &self.missing,
             Substituted::Errored => &self.errored,
+            Substituted::Absent => &self.absent,
         };
         if let Ok(mut ranges) = ranges.lock() {
             ranges.add(start, end);
@@ -126,6 +151,8 @@ enum Substituted {
     Missing,
     /// The source returned an I/O error.
     Errored,
+    /// In front of the first byte the medium carries.
+    Absent,
 }
 
 impl Substituted {
@@ -134,6 +161,7 @@ impl Substituted {
         match self {
             Self::Missing => "past the end of the source",
             Self::Errored => "the source failed to read the sector",
+            Self::Absent => "before the start of the medium",
         }
     }
 }
@@ -239,6 +267,20 @@ impl<R: Read + Seek> TolerantReader<R> {
         self.position = end;
         count
     }
+
+    /// How many of the `n` bytes wanted at the current position lie in a
+    /// medium's absent head, when that — rather than a defect — is what
+    /// the failure was.
+    ///
+    /// The whole head is known to be missing, so unlike a bad sector there
+    /// is nothing to rediscover 512 bytes at a time: everything up to the
+    /// end of the gap can be written off in one substitution.
+    fn absent_prefix(&self, error: &io::Error, n: usize) -> Option<usize> {
+        let gap = AbsentHead::in_error(error)?.gap();
+        let absent = gap.checked_sub(self.position)?;
+        let count = usize::try_from(absent).unwrap_or(n).min(n);
+        (count > 0).then_some(count)
+    }
 }
 
 impl<R: Read + Seek> Read for TolerantReader<R> {
@@ -272,7 +314,14 @@ impl<R: Read + Seek> Read for TolerantReader<R> {
                 Ok(read)
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(0),
-            Err(_) => {
+            Err(error) => {
+                // Bytes in front of the medium were never acquired, which
+                // is not a defect of the source; they get their own bucket
+                // so the report can say the acquisition started late
+                // rather than that the drive is failing.
+                if let Some(count) = self.absent_prefix(&error, n) {
+                    return Ok(self.zero_fill(buf, count, Substituted::Absent));
+                }
                 // Write off one sector (bounded by the request) as zeros and
                 // let the caller continue past the bad spot.
                 let granule = usize::try_from(ERROR_ZERO_FILL_GRANULE).unwrap_or(n);
@@ -393,6 +442,34 @@ mod tests {
         reader.read_exact(&mut again).unwrap();
         assert_eq!(stats.errored_bytes(), 1024);
         assert_eq!(stats.read_errors(), 4);
+    }
+
+    #[test]
+    fn an_absent_head_is_counted_apart_from_bad_sectors_and_short_dumps() {
+        use crate::LeadingGapReader;
+
+        // 60 bytes of medium that begin 40 bytes into a 100-byte volume.
+        let medium = Cursor::new((0..60u8).collect::<Vec<_>>());
+        let gapped = LeadingGapReader::new(medium, 40).expect("length");
+        let (mut reader, stats) = TolerantReader::new(gapped, 100).unwrap();
+        assert_eq!(reader.len(), 100);
+
+        let mut all = Vec::new();
+        reader.read_to_end(&mut all).unwrap();
+        assert_eq!(all.len(), 100, "the whole volume is served");
+        assert!(all[..40].iter().all(|&b| b == 0), "the head reads as zeros");
+        assert_eq!(&all[40..50], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(stats.absent_bytes(), 40);
+        assert_eq!(stats.missing_bytes(), 0, "nothing is past the end");
+        assert_eq!(stats.errored_bytes(), 0, "nothing failed to read");
+        assert_eq!(stats.read_errors(), 0, "an absent head is not an error");
+        assert!(stats.any());
+
+        // Re-reading the head counts the same bytes once, like the others.
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut again = vec![0u8; 40];
+        reader.read_exact(&mut again).unwrap();
+        assert_eq!(stats.absent_bytes(), 40);
     }
 
     #[test]
