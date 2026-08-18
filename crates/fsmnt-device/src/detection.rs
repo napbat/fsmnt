@@ -4,7 +4,7 @@ use nostdio::{Read, Seek, SeekFrom};
 
 use crate::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
-    FS_DETECT_PROBE_SIZE, is_btrfs_primary_superblock,
+    ExtBackupSuperblock, FS_DETECT_PROBE_SIZE, is_btrfs_primary_superblock,
 };
 
 pub(crate) struct DetectionProbe {
@@ -47,8 +47,22 @@ pub fn ext_backup_superblock_at(
     reader: &mut (impl Read + Seek + ?Sized),
     offset: u64,
 ) -> std::io::Result<Option<u16>> {
+    Ok(ext_backup_superblock_info_at(reader, offset)?.map(|info| info.group))
+}
+
+/// Like [`ext_backup_superblock_at`], but also reports the geometry the
+/// copy records, so the caller can compute where the filesystem starts
+/// with [`ExtBackupSuperblock::filesystem_start`].
+///
+/// # Errors
+///
+/// Returns an error when the seek or read at `offset` fails.
+pub fn ext_backup_superblock_info_at(
+    reader: &mut (impl Read + Seek + ?Sized),
+    offset: u64,
+) -> std::io::Result<Option<ExtBackupSuperblock>> {
     let prefix = read_at(reader, offset, FS_DETECT_PROBE_SIZE)?;
-    Ok(fsmnt_parser_core::ext_backup_superblock_group(&prefix))
+    Ok(fsmnt_parser_core::ext_backup_superblock_info(&prefix))
 }
 
 pub(crate) fn probe_at(

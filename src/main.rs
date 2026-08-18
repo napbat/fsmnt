@@ -34,6 +34,20 @@ struct FilesystemMountOptions {
     /// over the recovered one, e.g. to compare against carving results.
     #[arg(long)]
     no_journal_replay: bool,
+
+    /// Open an ext volume through the metadata backed up in this block
+    /// group instead of the primary copy at the start (ext keeps copies in
+    /// groups 1, 3, 5, 7, 9, 25, … — the same escape hatch as
+    /// `e2fsck -b`). Use when the primary superblock or group-descriptor
+    /// table is damaged.
+    #[arg(long, value_name = "GROUP")]
+    backup_superblock: Option<u32>,
+
+    /// Recover ext files whose directory tree is damaged or missing: mount
+    /// anyway and add a `.fsmnt-salvage` directory listing every in-use
+    /// inode found by sweeping the readable block groups as `inode-N`.
+    #[arg(long)]
+    salvage: bool,
 }
 
 impl FilesystemMountOptions {
@@ -47,6 +61,8 @@ impl FilesystemMountOptions {
         fsmnt::device::FilesystemOpenOptions::new()
             .with_root(self.root())
             .with_journal_replay(!self.no_journal_replay)
+            .with_ext_backup_superblock(self.backup_superblock)
+            .with_salvage(self.salvage)
     }
 }
 

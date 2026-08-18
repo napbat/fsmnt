@@ -532,6 +532,26 @@ impl Ext {
         self.group_count
     }
 
+    /// Total number of inode slots (`s_inodes_count`), used and free alike.
+    ///
+    /// Inode numbers are 1-based, so the valid range is
+    /// `1..=inode_count()`. Recovery tools that sweep the inode tables
+    /// rather than the directory tree need this bound.
+    #[must_use]
+    pub fn inode_count(&self) -> u32 {
+        self.inodes_count
+    }
+
+    /// Inode slots per block group (`s_inodes_per_group`).
+    ///
+    /// Together with [`inode_count`](Self::inode_count) this maps an inode
+    /// number to the block group whose inode table holds it, which lets a
+    /// sweep skip the rest of a group whose table is unreadable.
+    #[must_use]
+    pub fn inodes_per_group(&self) -> u32 {
+        self.inodes_per_group
+    }
+
     /// 128-bit filesystem UUID.
     #[must_use]
     pub fn uuid(&self) -> &[u8; 16] {

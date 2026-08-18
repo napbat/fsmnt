@@ -51,8 +51,14 @@ evidence handling:
   ext *backup* superblocks (they carry their block-group number, primaries
   carry 0), and the ext driver reads the root directory before it reports
   success — so an offset that merely lands on a superblock copy partway
-  into a partition fails with a message naming the backup's group instead
-  of mounting an empty volume that could be misread as "no data".
+  into a partition fails with a message naming the backup's group, and the
+  byte offset the filesystem actually starts at, instead of mounting an
+  empty volume that could be misread as "no data". Where a copy is what you
+  want — because the primary is damaged — `--backup-superblock GROUP` asks
+  for it explicitly, and `--salvage` opens a volume whose directory tree is
+  unusable; see [Damaged ext metadata](#damaged-ext-metadata-backup-superblocks-and-salvage).
+  Both read through the same read-only path: the backup bytes are
+  substituted in memory, never written back.
 
 ## Prerequisites
 
@@ -216,6 +222,73 @@ The single-volume formats (NTFS, FAT, exFAT, ext, BitLocker) take `default`
 only; any other selector is rejected at open time with
 `filesystem driver "ext" does not support root selector …`, so `--fs-root`
 is effectively a Btrfs/APFS option (its `--help` says so).
+
+### Damaged ext metadata: backup superblocks and salvage
+
+ext2/3/4 keep a copy of the superblock, and of the whole group-descriptor
+table, in later block groups — with `sparse_super`, in groups 1, 3, 5, 7,
+9, 25, 27, 49, 81, … Two flags put those copies to work, and two error
+messages point you at them.
+
+```sh
+fsmnt mount-image dump.bin Z: --offset 270532608 --backup-superblock 1
+fsmnt mount-image dump.bin Z: --partition 10 --salvage
+fsmnt mount-device 0 Z: --partition 2 --salvage
+```
+
+`--backup-superblock GROUP` opens the volume through group `GROUP`'s copy
+instead of the primary at the start — the same escape hatch as
+`e2fsck -b`, for a wiped, overwritten, or bad-sectored first block. The
+copy is validated before use (it has to name that group and its own
+geometry has to place the group where the copy was found), and the
+superblock plus the descriptor table that follows it are presented at the
+primary locations for the duration of the mount; nothing is written back.
+On a `META_BG` filesystem the descriptor blocks are scattered rather than
+kept in one backup run, so only the superblock is substituted.
+
+Two messages tell you when to reach for it:
+
+- An offset that lands on a *copy* is refused, and says where the real
+  start is — computed from the geometry the copy itself records:
+
+  ```text
+  offset 404749312 in "dump.bin" holds an ext backup superblock (block group 1);
+  the filesystem starts at offset 270532608 — mount that, or list partitions with …
+  ```
+
+- An offset with *nothing* readable at it is probed one block group
+  further in, so a destroyed primary is told apart from a wrong offset:
+
+  ```text
+  no filesystem at offset 0 in "system.bin", but an ext backup superblock for it
+  exists at 134217728 (group 1); retry with `--backup-superblock 1`
+  ```
+
+`--salvage` handles the other failure: metadata that is fine, but a
+directory tree that is not. mkfs places directories at the end of an
+Android system or vendor image, so a truncated dump keeps most file
+*content* while losing the tree that names it — and fsmnt otherwise
+refuses to mount, because a volume whose root cannot be listed would
+present as empty. With `--salvage` it mounts anyway and adds a synthetic
+top-level directory:
+
+```text
+Z:\.fsmnt-salvage\inode-229      # every in-use inode, by number
+Z:\.fsmnt-salvage\inode-105\...  # recovered directories list their real names
+```
+
+The entries come from sweeping the inode tables of every readable block
+group — regular files and directories that are still linked and not
+deleted — and reads go through the ordinary inode path, so extents, block
+maps and inline data all behave normally. A block group whose inode table
+is past the end of a truncated image simply contributes nothing. The
+sweep runs on the first listing of `.fsmnt-salvage`, so a mount that never
+opens it costs nothing, and whatever of the real tree still works is
+served alongside it as usual.
+
+Both flags are ext-only; another driver rejects them rather than quietly
+ignoring the request. They combine with `--partition`, `--offset` and
+`--no-journal-replay`.
 
 ### BitLocker
 

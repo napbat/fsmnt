@@ -13,7 +13,7 @@ use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFil
 use fsmnt_device::{
     BlockZone, BlockZoneCondition, BlockZoneType, DetectedBootSector, DeviceMember, DeviceReader,
     DeviceSet, FilesystemDriver, FilesystemMemberDiscovery, FilesystemMemberId,
-    FilesystemOpenOptions, FilesystemRoot,
+    FilesystemOpenOptions, FilesystemRoot, reject_unsupported_recovery,
 };
 
 use crate::identity;
@@ -493,6 +493,7 @@ impl FilesystemDriver for BtrfsDriver {
         _detected: DetectedBootSector,
         options: &FilesystemOpenOptions,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
+        reject_unsupported_recovery(self.name(), options)?;
         Ok(Box::new(BtrfsFilesystem::new_with_root(
             reader,
             options.root(),
@@ -515,6 +516,7 @@ impl FilesystemDriver for BtrfsDriver {
         _detected: DetectedBootSector,
         options: &FilesystemOpenOptions,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
+        reject_unsupported_recovery(self.name(), options)?;
         Ok(Box::new(BtrfsFilesystem::from_device_sources_with_root(
             btrfs_device_sources(devices)?,
             options.root(),

@@ -48,6 +48,7 @@ pub const FS_DETECT_PROBE_SIZE: usize = 2048;
 pub const BOOT_SIGNATURE: u16 = 0xAA55;
 
 const EXT_SUPERBLOCK_OFFSET: usize = 1024;
+const SB_S_FIRST_DATA_BLOCK: usize = 0x14;
 const SB_S_LOG_BLOCK_SIZE: usize = 0x18;
 const SB_S_BLOCKS_PER_GROUP: usize = 0x20;
 const SB_S_INODES_PER_GROUP: usize = 0x28;
@@ -129,13 +130,87 @@ fn probe_ext(buf: &[u8]) -> bool {
 /// the filesystem".
 #[must_use]
 pub fn ext_backup_superblock_group(buf: &[u8]) -> Option<u16> {
+    ext_backup_superblock_info(buf).map(|info| info.group)
+}
+
+/// An ext **backup** superblock together with the geometry needed to work
+/// out where its filesystem begins.
+///
+/// Produced by [`ext_backup_superblock_info`]. Every field is read from the
+/// copy itself, so the numbers describe the filesystem the copy belongs to
+/// even when nothing else of it is readable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExtBackupSuperblock {
+    /// `s_block_group_nr` — the block group this copy belongs to. Always
+    /// non-zero; group 0 is the primary and is not reported here.
+    pub group: u16,
+    /// Block size in bytes (`1024 << s_log_block_size`).
+    pub block_size: u32,
+    /// `s_blocks_per_group`.
+    pub blocks_per_group: u32,
+    /// `s_first_data_block`: 1 for 1 KiB blocks, 0 otherwise.
+    pub first_data_block: u32,
+}
+
+impl ExtBackupSuperblock {
+    /// Byte distance from the start of the filesystem to the first block of
+    /// [`group`](Self::group), i.e. to this backup copy.
+    ///
+    /// `None` on arithmetic overflow, which only a nonsensical copy can
+    /// produce.
+    #[must_use]
+    pub fn group_start_bytes(&self) -> Option<u64> {
+        u64::from(self.group)
+            .checked_mul(u64::from(self.blocks_per_group))?
+            .checked_add(u64::from(self.first_data_block))?
+            .checked_mul(u64::from(self.block_size))
+    }
+
+    /// Where the filesystem starts, given that this copy was found by a
+    /// probe at `probe_offset`.
+    ///
+    /// Probes read the superblock at `probe_offset + 1024`, matching a
+    /// filesystem start, whereas a backup copy occupies its block group's
+    /// first block from byte zero — hence the `+ 1024` correction before
+    /// stepping back over the groups that precede it.
+    ///
+    /// `None` when the recorded geometry places the start before the
+    /// beginning of the source, which means the copy is stale or
+    /// coincidental rather than a backup of a filesystem living here.
+    #[must_use]
+    pub fn filesystem_start(&self, probe_offset: u64) -> Option<u64> {
+        let superblock_offset = u64::try_from(EXT_SUPERBLOCK_OFFSET).ok()?;
+        probe_offset
+            .checked_add(superblock_offset)?
+            .checked_sub(self.group_start_bytes()?)
+    }
+}
+
+/// If `buf` (the first bytes at a candidate offset) holds an ext **backup**
+/// superblock, describe it.
+///
+/// Returns `None` for a primary superblock and for anything that is not a
+/// plausible ext superblock. The geometry travels with the copy, so a
+/// caller can turn "no filesystem here" into "this is group N's copy and
+/// the filesystem starts at byte X" — see
+/// [`ExtBackupSuperblock::filesystem_start`].
+#[must_use]
+pub fn ext_backup_superblock_info(buf: &[u8]) -> Option<ExtBackupSuperblock> {
     if !ext_superblock_plausible(buf) {
         return None;
     }
-    match read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR) {
-        0 => None,
-        group => Some(group),
-    }
+    let group = match read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR) {
+        0 => return None,
+        group => group,
+    };
+    // `ext_superblock_plausible` already gated s_log_block_size to 0..=6.
+    let block_size = 1024_u32 << read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_LOG_BLOCK_SIZE);
+    Some(ExtBackupSuperblock {
+        group,
+        block_size,
+        blocks_per_group: read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCKS_PER_GROUP),
+        first_data_block: read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_FIRST_DATA_BLOCK),
+    })
 }
 
 /// `nx_magic` of an APFS container superblock — the bytes `NXSB`.
