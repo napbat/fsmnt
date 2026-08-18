@@ -420,3 +420,70 @@ mod device {
         assert_eq!(fstab.as_deref(), Some("/etc/fstab.forensic"));
     }
 }
+
+#[test]
+fn scan_ordinals_require_partition_and_exclude_offset() {
+    let cli = Cli::try_parse_from([
+        "fsmnt",
+        "mount-image",
+        "disk.bin",
+        "Z:",
+        "--scan",
+        "--partition",
+        "2",
+        "--stride",
+        "512",
+    ])
+    .expect("mount by synthetic ordinal");
+    let Commands::MountImage {
+        scan,
+        stride,
+        partition,
+        ..
+    } = cli.command
+    else {
+        panic!("wrong command");
+    };
+    assert!(scan);
+    assert_eq!(stride, 512);
+    assert_eq!(partition, Some(2));
+
+    assert!(
+        Cli::try_parse_from(["fsmnt", "mount-image", "disk.bin", "Z:", "--scan"]).is_err(),
+        "--scan without --partition has nothing to resolve"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "fsmnt",
+            "mount-image",
+            "disk.bin",
+            "Z:",
+            "--scan",
+            "--partition",
+            "0",
+            "--offset",
+            "4096",
+        ])
+        .is_err(),
+        "--scan and --offset are different ways of saying where"
+    );
+    assert!(
+        Cli::try_parse_from(["fsmnt", "mount-image", "disk.bin", "Z:", "--stride", "512"]).is_err(),
+        "--stride only means something for --scan"
+    );
+
+    let cli = Cli::try_parse_from([
+        "fsmnt",
+        "partitions",
+        "disk.bin",
+        "--scan",
+        "--stride",
+        "512",
+    ])
+    .expect("synthetic listing");
+    let Commands::Partitions { scan, stride, .. } = cli.command else {
+        panic!("wrong command");
+    };
+    assert!(scan);
+    assert_eq!(stride, 512);
+}

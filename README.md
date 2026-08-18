@@ -241,6 +241,31 @@ suppressed so a multi-gigabyte partition does not report every stray `0xAA55`
 in its file data; ext superblocks are exempt, because one inside another
 filesystem's claimed extent means the extent is wrong.
 
+**Or let the scan stand in for the table — labelled as such.** `partitions
+IMAGE --scan` ignores whatever table the image carries and prints a
+partition table *reconstructed* from a scan, and `mount-image --scan
+--partition N` mounts by that numbering (both take `--stride`; the numbers
+in `scan`'s `#` column are the same ones):
+
+```
+SYNTHETIC partition table — reconstructed by scanning the media every 4096 bytes for filesystem starts. No table was read from the image: sizes are what each filesystem claims for itself, there are no names or type GUIDs, and the numbers hold only for this image scanned with this stride.
+   #  TYPE (from scan)                                 SIZE         OFFSET  FILESYSTEM
+   0  Ext (scan)                                     3.3 GB      270532608  Ext
+   1  Ext (scan)                                     2.2 GB      903872512  Ext
+   2  Ext (scan)                                     1.5 GB     3625975808  Ext  TRUNCATED (121 MB missing)
+```
+
+The word *synthetic* is deliberate and it follows the data around: the
+listing says it, the mount prints a `notice:` saying which numbering the
+ordinal came from, and library callers get it as a typed value —
+`ImageLayout::origin` is a `LayoutOrigin` (`Table`, `BackupTable`,
+`Scan { stride }`, or `None`), the kind is `ImageLayoutKind::Scanned`, and
+an image opened by ordinal carries `OpenedImage::layout_origin` — so
+nothing downstream can mistake a scan-built table for one the media
+carried. A filesystem the scan knows only from a backup superblock is an
+entry too, at the start the copy implies; mounting it produces the
+`--backup-superblock` guidance rather than nothing.
+
 **Write offsets the way your notes have them.** `--offset` takes plain bytes,
 binary multiples (`K`/`M`/`G`/`T`, or the explicit `KiB`/`MiB`/`GiB`/`TiB`),
 decimal ones (`KB`/`MB`/`GB`/`TB`), and sector counts with an `s` suffix.
@@ -353,6 +378,13 @@ superblock standing in for the primary, a journal replayed into the overlay,
 replay declined on a dirty volume, salvage mode, best-effort reads — so a
 scripted mount's log records under what conditions the evidence was viewed.
 Library users get the same list from `TargetFilesystem::notices()`.
+
+**Large files, damaged files.** Files are read in chunks at the position
+the OS asks for (every driver implements a positioned read), so copying a
+multi-gigabyte file out of an image costs one pass — not one full re-read
+per chunk — and an inode that lies about its size (a corrupt one on a
+damaged volume can claim petabytes) fails just that read instead of taking
+the mounted volume down with an allocation failure.
 
 **Not covered.** A missing segment of an EWF set (`.E02` absent from an
 `.E01` chain) still fails at open — the EWF decoder needs every segment.
