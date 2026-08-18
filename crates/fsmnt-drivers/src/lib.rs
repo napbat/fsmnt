@@ -60,6 +60,7 @@
 mod adapter;
 mod apfs;
 mod bitlocker;
+mod boot_backup;
 mod btrfs;
 mod exfat;
 mod ext;

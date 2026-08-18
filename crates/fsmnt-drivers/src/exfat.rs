@@ -22,6 +22,7 @@ use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
 
 use crate::adapter::{found, read_up_to};
+use crate::boot_backup;
 use crate::identity;
 
 /// Map an [`ExFatError`] onto the closest [`FsError`] variant.
@@ -64,6 +65,8 @@ fn metadata_of(entry: &ExFatEntrySet) -> FsMetadata {
 pub struct ExFatFilesystem<T: Read + Seek> {
     reader: T,
     exfat: ExFat,
+    /// How the volume was opened, when that departed from the normal path.
+    notices: Vec<String>,
 }
 
 impl<T: Read + Seek> ExFatFilesystem<T> {
@@ -82,7 +85,11 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
         exfat
             .load_metadata(&mut reader)
             .map_err(|e| map_exfat_error(e, "<metadata>"))?;
-        Ok(Self { reader, exfat })
+        Ok(Self {
+            reader,
+            exfat,
+            notices: Vec::new(),
+        })
     }
 
     /// The underlying parser handle, for callers that need `exFAT`-specific
@@ -223,6 +230,10 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
     fn volume_uuid(&self) -> Option<String> {
         Some(identity::fat_serial(self.exfat.volume_serial_number()))
     }
+
+    fn notices(&self) -> Vec<String> {
+        self.notices.clone()
+    }
 }
 
 /// [`FilesystemDriver`] for `exFAT` volumes.
@@ -237,12 +248,28 @@ impl FilesystemDriver for ExFatDriver {
         detected == DetectedBootSector::ExFat
     }
 
+    /// Opens the volume normally when sector 0 is a healthy boot sector, and
+    /// through the format's backup boot region when it is not (see
+    /// [`crate::boot_backup`]); the fallback is reported through
+    /// [`TargetFilesystem::notices`].
     fn open(
         &self,
-        reader: Box<dyn DeviceReader>,
+        mut reader: Box<dyn DeviceReader>,
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        Ok(Box::new(ExFatFilesystem::new(reader)?))
+        let backup = boot_backup::find_if_primary_damaged(&mut reader, boot_backup::Family::ExFat)
+            .map_err(FsError::Io)?;
+        reader
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(FsError::Io)?;
+        match backup {
+            Some(backup) => {
+                let mut fs = ExFatFilesystem::new(backup.apply(reader))?;
+                fs.notices.push(backup.notice());
+                Ok(Box::new(fs))
+            }
+            None => Ok(Box::new(ExFatFilesystem::new(reader)?)),
+        }
     }
 }
 

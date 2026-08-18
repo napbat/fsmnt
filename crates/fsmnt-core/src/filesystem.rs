@@ -288,6 +288,19 @@ pub trait TargetFilesystem: Send {
     fn volume_uuid(&self) -> Option<String> {
         None
     }
+
+    /// Advisory messages about *how* the volume was opened: a fallback that
+    /// was taken (a backup boot sector or superblock stood in for a damaged
+    /// primary), a degraded mode that is in effect (salvage listing, journal
+    /// replay declined), or a limitation of the source (truncated media).
+    ///
+    /// Read-only tooling must surface these — a mount that quietly used a
+    /// backup structure is a mount whose view may differ from the primary's,
+    /// and an evidence handler needs to know that. The default is no
+    /// notices; drivers that take such paths override it.
+    fn notices(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Normalize a filesystem path: convert backslashes to forward slashes and

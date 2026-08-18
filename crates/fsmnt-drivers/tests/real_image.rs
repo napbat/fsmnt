@@ -215,6 +215,38 @@ fn ext_open_without_replay_presents_on_disk_state() {
 }
 
 #[test]
+fn exfat_opens_through_backup_boot_region_when_sector_zero_is_damaged() {
+    let Some(mut image) = fixture("fs-exfat", "testfs1") else {
+        eprintln!("skipping: fs-exfat/testdata/testfs1 not generated");
+        return;
+    };
+
+    // Destroy the main boot sector; the 12-sector backup region at sector 12
+    // is intact. Detection must still classify the volume, and the driver
+    // must open it through the copy and say so.
+    image[..512].fill(0);
+    let detected = detect(&image);
+    assert_eq!(
+        detected,
+        DetectedBootSector::ExFat,
+        "backup boot region must classify a volume with a dead sector 0"
+    );
+
+    let mut fs = default_registry()
+        .open(Box::new(Cursor::new(image)), detected)
+        .expect("exFAT must open through its backup boot region");
+    let entries = fs.read_dir("/").expect("root should list");
+    assert!(!entries.is_empty(), "root listing should not be empty");
+    let notices = fs.notices();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.contains("backup copy at byte 6144")),
+        "the fallback must be reported: {notices:?}",
+    );
+}
+
+#[test]
 fn registry_rejects_type_with_no_driver() {
     // A zeroed image classifies as Unknown, which no driver claims.
     let image = vec![0u8; FS_DETECT_PROBE_SIZE];

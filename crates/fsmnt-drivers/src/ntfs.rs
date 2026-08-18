@@ -17,6 +17,7 @@ use fsmnt_core::{
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 
 use crate::adapter::found;
+use crate::boot_backup;
 use crate::identity;
 use fsmnt_parser_core::iter::FsTryIterator;
 
@@ -33,6 +34,8 @@ fn ntfs_time_to_datetime(nt: NtfsTime) -> Option<DateTime<Utc>> {
 pub struct NtfsFilesystem<T: Read + Seek> {
     reader: T,
     ntfs: Ntfs,
+    /// How the volume was opened, when that departed from the normal path.
+    notices: Vec<String>,
 }
 
 impl<T: Read + Seek> NtfsFilesystem<T> {
@@ -52,7 +55,11 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
         ntfs.read_upcase_table(&mut reader)
             .map_err(|e| FsError::Filesystem(format!("failed to read upcase table: {e}")))?;
 
-        Ok(Self { reader, ntfs })
+        Ok(Self {
+            reader,
+            ntfs,
+            notices: Vec::new(),
+        })
     }
 
     /// The underlying parser handle, for callers that need NTFS-specific
@@ -325,6 +332,10 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
     fn volume_uuid(&self) -> Option<String> {
         Some(identity::ntfs_serial(self.ntfs.serial_number()))
     }
+
+    fn notices(&self) -> Vec<String> {
+        self.notices.clone()
+    }
 }
 
 /// [`FilesystemDriver`] for NTFS volumes.
@@ -339,12 +350,28 @@ impl FilesystemDriver for NtfsDriver {
         detected == DetectedBootSector::Ntfs
     }
 
+    /// Opens the volume normally when sector 0 is a healthy boot sector, and
+    /// through the format's backup boot region when it is not (see
+    /// [`crate::boot_backup`]); the fallback is reported through
+    /// [`TargetFilesystem::notices`].
     fn open(
         &self,
-        reader: Box<dyn DeviceReader>,
+        mut reader: Box<dyn DeviceReader>,
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        Ok(Box::new(NtfsFilesystem::new(reader)?))
+        let backup = boot_backup::find_if_primary_damaged(&mut reader, boot_backup::Family::Ntfs)
+            .map_err(FsError::Io)?;
+        reader
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(FsError::Io)?;
+        match backup {
+            Some(backup) => {
+                let mut fs = NtfsFilesystem::new(backup.apply(reader))?;
+                fs.notices.push(backup.notice());
+                Ok(Box::new(fs))
+            }
+            None => Ok(Box::new(NtfsFilesystem::new(reader)?)),
+        }
     }
 }
 

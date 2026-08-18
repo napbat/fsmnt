@@ -44,6 +44,13 @@ pub(crate) fn block_on_mount(
     total_bytes: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mp_display = mountpoint.to_string();
+    // Anything the driver did that departs from a plain open — a backup
+    // boot sector or superblock standing in for the primary, a degraded
+    // mode — is said out loud before the volume appears, so a scripted
+    // mount leaves that fact in its log.
+    for notice in fs.notices() {
+        eprintln!("notice: {notice}");
+    }
     println!("Mounting {kind} volume at {mountpoint}...");
     fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
         println!(

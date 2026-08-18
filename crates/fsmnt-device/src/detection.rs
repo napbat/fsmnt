@@ -26,7 +26,94 @@ pub fn detect_boot_sector_at(
     reader: &mut (impl Read + Seek + ?Sized),
     offset: u64,
 ) -> std::io::Result<DetectedBootSector> {
-    Ok(probe_at(reader, offset)?.detected)
+    let detected = probe_at(reader, offset)?.detected;
+    if detected != DetectedBootSector::Unknown {
+        return Ok(detected);
+    }
+    Ok(detect_backup_boot_sector_at(reader, offset, None)?.unwrap_or(DetectedBootSector::Unknown))
+}
+
+/// Like [`detect_boot_sector_at`], for a volume known to span exactly
+/// `length` bytes from `offset` (a partition, a bounded image window).
+///
+/// The bound enables one more fallback: NTFS keeps a copy of its boot
+/// sector in the volume's *last* sector, which can only be found when the
+/// end is known.
+///
+/// # Errors
+///
+/// Returns an error when a required seek or read operation fails.
+pub fn detect_boot_sector_within(
+    reader: &mut (impl Read + Seek + ?Sized),
+    offset: u64,
+    length: u64,
+) -> std::io::Result<DetectedBootSector> {
+    let detected = probe_at(reader, offset)?.detected;
+    if detected != DetectedBootSector::Unknown {
+        return Ok(detected);
+    }
+    Ok(detect_backup_boot_sector_at(reader, offset, Some(length))?
+        .unwrap_or(DetectedBootSector::Unknown))
+}
+
+/// Sector sizes at which backup boot regions are looked for.
+const BACKUP_SECTOR_SIZES: [u64; 2] = [512, 4096];
+
+/// Classify a volume whose sector 0 is unreadable by its backup boot
+/// region: FAT32 mirrors sectors 0–2 at sector 6, exFAT mirrors its 12-sector
+/// boot region at sector 12, and NTFS keeps its boot sector in the last
+/// sector of the volume (probed only when `length` is known).
+///
+/// A backup that reports a different sector size than the one it was found
+/// at is a coincidence and is ignored. Returns `Ok(None)` when no backup
+/// stands up. Drivers perform the same lookup and open the volume through
+/// the copy, so a positive result here dispatches to a driver that can
+/// actually read the volume.
+///
+/// # Errors
+///
+/// Returns an error when a required seek or read operation fails.
+pub fn detect_backup_boot_sector_at(
+    reader: &mut (impl Read + Seek + ?Sized),
+    offset: u64,
+    length: Option<u64>,
+) -> std::io::Result<Option<DetectedBootSector>> {
+    for sector_size in BACKUP_SECTOR_SIZES {
+        // FAT32: `BPB_BkBootSec` is 6 in every formatter's output.
+        let fat = read_at(reader, offset + 6 * sector_size, FS_DETECT_PROBE_SIZE)?;
+        if DetectedBootSector::from_bytes(&fat) == DetectedBootSector::Fat32
+            && bpb_bytes_per_sector(&fat) == sector_size
+        {
+            return Ok(Some(DetectedBootSector::Fat32));
+        }
+        // exFAT: backup boot region at sector 12; `BytesPerSectorShift` at 0x6C.
+        let exfat = read_at(reader, offset + 12 * sector_size, FS_DETECT_PROBE_SIZE)?;
+        if DetectedBootSector::from_bytes(&exfat) == DetectedBootSector::ExFat
+            && exfat.len() > 0x6C
+            && (1u64 << exfat[0x6C]) == sector_size
+        {
+            return Ok(Some(DetectedBootSector::ExFat));
+        }
+        // NTFS: last sector of the volume.
+        if let Some(last) = length.and_then(|length| length.checked_sub(sector_size)) {
+            let ntfs = read_at(reader, offset + last, FS_DETECT_PROBE_SIZE)?;
+            if DetectedBootSector::from_bytes(&ntfs) == DetectedBootSector::Ntfs
+                && bpb_bytes_per_sector(&ntfs) == sector_size
+            {
+                return Ok(Some(DetectedBootSector::Ntfs));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `BPB_BytsPerSec` of a FAT/NTFS boot sector (`u16` at 0x0B); 0 for a
+/// buffer too short to hold it.
+fn bpb_bytes_per_sector(sector: &[u8]) -> u64 {
+    if sector.len() < 0x0D {
+        return 0;
+    }
+    u64::from(u16::from_le_bytes([sector[0x0B], sector[0x0C]]))
 }
 
 /// If `offset` holds an ext **backup** superblock, return the block group

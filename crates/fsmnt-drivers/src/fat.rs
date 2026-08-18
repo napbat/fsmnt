@@ -18,6 +18,7 @@ use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::iter::FsTryIterator;
 
 use crate::adapter::{found, found_and, read_up_to};
+use crate::boot_backup;
 use crate::identity;
 
 /// Timestamps and DOS attribute bits read from a directory entry.
@@ -78,6 +79,8 @@ fn attrs_of(entry: &fs_fat::FatDirEntry) -> EntryAttrs {
 pub struct FatFilesystem<T: Read + Seek> {
     reader: T,
     fat: Fat,
+    /// How the volume was opened, when that departed from the normal path.
+    notices: Vec<String>,
 }
 
 impl<T: Read + Seek> FatFilesystem<T> {
@@ -89,7 +92,11 @@ impl<T: Read + Seek> FatFilesystem<T> {
     /// FAT32.
     pub fn new(mut reader: T) -> FsResult<Self> {
         let fat = Fat::new(&mut reader).map_err(|e| map_fat_error(e, "<root>"))?;
-        Ok(Self { reader, fat })
+        Ok(Self {
+            reader,
+            fat,
+            notices: Vec::new(),
+        })
     }
 
     /// The underlying parser handle, for callers that need FAT-specific
@@ -294,6 +301,10 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
     fn volume_uuid(&self) -> Option<String> {
         Some(identity::fat_serial(self.fat.serial_number()))
     }
+
+    fn notices(&self) -> Vec<String> {
+        self.notices.clone()
+    }
 }
 
 /// [`FilesystemDriver`] for FAT12, FAT16 and FAT32 volumes.
@@ -311,12 +322,28 @@ impl FilesystemDriver for FatDriver {
         )
     }
 
+    /// Opens the volume normally when sector 0 is a healthy boot sector, and
+    /// through the format's backup boot region when it is not (see
+    /// [`crate::boot_backup`]); the fallback is reported through
+    /// [`TargetFilesystem::notices`].
     fn open(
         &self,
-        reader: Box<dyn DeviceReader>,
+        mut reader: Box<dyn DeviceReader>,
         _detected: DetectedBootSector,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
-        Ok(Box::new(FatFilesystem::new(reader)?))
+        let backup = boot_backup::find_if_primary_damaged(&mut reader, boot_backup::Family::Fat)
+            .map_err(FsError::Io)?;
+        reader
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(FsError::Io)?;
+        match backup {
+            Some(backup) => {
+                let mut fs = FatFilesystem::new(backup.apply(reader))?;
+                fs.notices.push(backup.notice());
+                Ok(Box::new(fs))
+            }
+            None => Ok(Box::new(FatFilesystem::new(reader)?)),
+        }
     }
 }
 
