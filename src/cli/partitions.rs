@@ -1,0 +1,225 @@
+//! The inspection subcommands: `drives` and `partitions`.
+
+use std::path::Path;
+
+use super::format_size;
+
+/// List physical drives.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub(crate) fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+    use fsmnt::device::HostDriveEnumerator;
+
+    let drives = HostDrives::enumerate_drives()?;
+    if drives.is_empty() {
+        println!("No drives found.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:>12}  {:<10} {:<28} ACCESS",
+        "ID", "SIZE", "BUS", "MODEL"
+    );
+    for d in drives {
+        let size = d
+            .size_bytes
+            .map_or_else(|| "unknown".to_string(), format_size);
+        let bus = d
+            .bus_type
+            .map_or_else(|| "-".to_string(), |b| b.to_string());
+        let model = d.model.as_deref().unwrap_or("-");
+        let access = if d.accessible {
+            "ok".to_string()
+        } else {
+            format!(
+                "inaccessible ({})",
+                d.access_error.as_deref().unwrap_or("unknown"),
+            )
+        };
+        println!(
+            "{:<10} {size:>12}  {bus:<10} {model:<28} {access}",
+            d.id.to_string()
+        );
+    }
+    Ok(())
+}
+
+/// List the partitions of a drive ID or a disk image.
+///
+/// The positional argument is overloaded, so decide which it is before
+/// touching either backend; see [`is_image_target`].
+pub(crate) fn handle_partitions(target: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if is_image_target(target) {
+        image_partitions(Path::new(target))
+    } else {
+        drive_partitions(target)
+    }
+}
+
+/// Whether `target` names an image file rather than a physical drive.
+///
+/// Drive IDs are bare tokens (`0`, `sda`, `disk2`, `nvme0n1`): they never
+/// contain a path separator and never have a file extension, so anything
+/// that does — or that already exists as a file — is an image path.
+pub(super) fn is_image_target(target: &str) -> bool {
+    let path = Path::new(target);
+    path.is_file() || target.contains(['/', '\\']) || path.extension().is_some()
+}
+
+/// List the partitions inside a disk image.
+fn image_partitions(image: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::ImageLayoutKind;
+
+    let layout = fsmnt::image_layout(image)?;
+    println!(
+        "{}: {} image, {}, sector size {}",
+        image.display(),
+        layout.format,
+        format_size(layout.size_bytes),
+        layout.sector_size,
+    );
+
+    match layout.kind {
+        ImageLayoutKind::Gpt => {
+            println!("GPT partition table");
+            println!(
+                "{:>4}  {:<24} {:<22} {:>12} {:>14}  FILESYSTEM",
+                "#", "NAME", "TYPE", "SIZE", "OFFSET"
+            );
+            for partition in &layout.partitions {
+                println!(
+                    "{:>4}  {:<24} {:<22} {:>12} {:>14}  {}",
+                    partition.ordinal,
+                    partition.name.as_deref().unwrap_or("-"),
+                    partition.type_name.as_deref().unwrap_or("Unknown"),
+                    format_size(partition.size_bytes),
+                    partition.offset,
+                    detected_label(partition.detected),
+                );
+            }
+        }
+        ImageLayoutKind::Mbr => {
+            println!("MBR partition table");
+            println!(
+                "{:>4}  {:<22} {:>12} {:>14}  FILESYSTEM",
+                "#", "TYPE", "SIZE", "OFFSET"
+            );
+            for partition in &layout.partitions {
+                println!(
+                    "{:>4}  {:<22} {:>12} {:>14}  {}",
+                    partition.ordinal,
+                    partition.type_name.as_deref().unwrap_or("Unknown"),
+                    format_size(partition.size_bytes),
+                    partition.offset,
+                    detected_label(partition.detected),
+                );
+            }
+        }
+        ImageLayoutKind::Bare(detected) => {
+            println!("No partition table; the whole image is {detected:?}");
+            println!(
+                "Mount it with: fsmnt mount-image {} <MOUNTPOINT>",
+                image.display()
+            );
+            return Ok(());
+        }
+        ImageLayoutKind::Unknown => {
+            println!("Unrecognized image layout: no partition table and no known filesystem.");
+            return Ok(());
+        }
+    }
+
+    if layout.partitions.is_empty() {
+        println!("(no non-empty partition entries)");
+    } else {
+        println!(
+            "\nMount one with: fsmnt mount-image {} <MOUNTPOINT> --partition <#>",
+            image.display()
+        );
+    }
+    Ok(())
+}
+
+/// Column text for a partition's detected filesystem.
+fn detected_label(detected: Option<fsmnt::device::DetectedBootSector>) -> String {
+    detected.map_or_else(|| "unreadable".to_string(), |d| format!("{d:?}"))
+}
+
+/// List the partitions on a physical drive.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+fn drive_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::HostDrives;
+    use fsmnt::device::{Disk, DiskLayout, HostDriveEnumerator, HostDriveId};
+
+    let id = HostDriveId::new(drive);
+    let info = HostDrives::get_drive_info(&id).ok();
+    let sector_size = info.as_ref().and_then(|i| i.sector_size).unwrap_or(512);
+    let reader = HostDrives::open_drive(&id)?;
+    let mut disk = Disk::with_sector_size(reader, sector_size)?;
+    let sector = disk.sector_size();
+
+    match disk.layout().clone() {
+        DiskLayout::Gpt { header } => {
+            println!("GPT disk (sector size {sector})");
+            println!("{:>4}  {:<26} {:>12}  FILESYSTEM", "#", "TYPE", "SIZE");
+            let count = usize::try_from(header.num_partition_entries.get()).unwrap_or(usize::MAX);
+            let mut ordinal = 0;
+            for i in 0..count {
+                let Ok(entry) = disk.gpt_partition(i) else {
+                    continue;
+                };
+                if entry.is_empty() {
+                    continue;
+                }
+                let offset = entry.start_offset(sector);
+                let size = entry.size_bytes(sector);
+                let detected = disk.detect_boot_sector_at(offset).ok();
+                println!(
+                    "{ordinal:>4}  {:<26} {:>12}  {}",
+                    entry.type_name().unwrap_or("Unknown"),
+                    format_size(size),
+                    detected_label(detected),
+                );
+                ordinal += 1;
+            }
+        }
+        DiskLayout::Mbr { .. } => {
+            println!("MBR disk (sector size {sector})");
+            println!("{:>4}  {:<10} {:>12}  FILESYSTEM", "#", "TYPE", "SIZE");
+            let extents: Vec<(u8, u64, u64)> = disk
+                .mbr_partitions()
+                .map(|e| {
+                    (
+                        e.partition_type,
+                        e.start_offset(sector),
+                        e.size_bytes(sector),
+                    )
+                })
+                .collect();
+            for (i, (ptype, offset, size)) in extents.iter().enumerate() {
+                let detected = disk.detect_boot_sector_at(*offset).ok();
+                println!(
+                    "{i:>4}  0x{ptype:02X}       {:>12}  {}",
+                    format_size(*size),
+                    detected_label(detected),
+                );
+            }
+        }
+        DiskLayout::Bare(fs_type) => {
+            println!("No partition table; whole disk is {fs_type:?}");
+        }
+        DiskLayout::Unknown => {
+            println!("Unrecognized disk layout.");
+        }
+    }
+    Ok(())
+}
+
+/// Physical drives cannot be enumerated on this platform.
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn drive_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+    Err(format!(
+        "'{drive}' is not an image file, and physical drives cannot be enumerated on this platform"
+    )
+    .into())
+}

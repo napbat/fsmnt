@@ -92,7 +92,7 @@ fsmnt = "latest"          # or "0.1.0"; same as "github:napbat/fsmnt" = "latest"
 
 [tasks.mount-evidence]
 description = "Mount the evidence image read-only"
-run = "fsmnt mount-image evidence.E01 /mnt/evidence --offset 1048576"
+run = "fsmnt mount-image evidence.E01 /mnt/evidence --partition 2"
 ```
 
 The archive contains both `fsmnt` and `fsmnt-proxy-server`, and both land on
@@ -140,10 +140,13 @@ Windows compiles the bundled Dokan sources with MSVC.
 ```sh
 fsmnt drives                 # list physical drives with size, bus, and access state
 fsmnt partitions 0           # list partitions on drive 0, with detected filesystem
+fsmnt partitions disk.bin    # same listing for a disk image, with GPT names
 ```
 
 Drive IDs are what `fsmnt drives` prints: `0` on Windows, `sda` on Linux,
-`disk2` on macOS.
+`disk2` on macOS. `partitions` takes either a drive ID or the path to a raw,
+EWF, VHD, or VHDX image; anything that names an existing file, contains a
+path separator, or has a file extension is read as an image.
 
 ### Mount a partition from a device
 
@@ -169,9 +172,11 @@ key again. Useful flags:
 
 ```sh
 fsmnt mount-image disk.img Z:
+fsmnt partitions disk.bin                     # see what a whole-disk image holds
+fsmnt mount-image disk.bin Z: --partition 3
+fsmnt mount-image evidence.E01 /mnt/evidence --partition 2
+fsmnt mount-image "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\Win11-dev.vhdx" Z: --partition 3
 fsmnt mount-image disk.img /mnt/img --offset 1048576
-fsmnt mount-image evidence.E01 /mnt/evidence --offset 1048576
-fsmnt mount-image "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\Win11-dev.vhdx" Z: --offset 1048576
 ```
 
 Raw images, EWF v1/v2 physical evidence (`.E01`/`.Ex01`), legacy VHD, and VHDX
@@ -182,10 +187,14 @@ differencing VHD/VHDX images are decoded by the repository-native readers;
 locators. Sparse blocks and VHDX log entries are read or replayed on demand,
 without attaching the image or writing to any layer.
 
-The decoded image must start at the filesystem itself. For a full partitioned
-disk image, including a typical Hyper-V system disk, pass the partition's byte
-offset with `--offset`; the offset always addresses decoded virtual media, not
-container storage.
+A whole-disk image — a typical Hyper-V system disk, an eMMC or SD-card dump —
+does not start at a filesystem. List what it contains with
+`fsmnt partitions IMAGE`, which prints each partition's ordinal, GPT name,
+type, size, byte offset, and detected filesystem, then mount one by its
+ordinal with `--partition N`. The filesystem is bounded to that partition's
+extent, and the numbering matches `mount-device --partition`. `--offset`
+remains for raw media no partition table describes; it always addresses
+decoded virtual media, not container storage.
 
 ### Choosing what to expose
 
@@ -248,7 +257,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 and `fsmnt_device::DriverRegistry` is the plug-in point — register your own
 `FilesystemDriver` alongside or instead of the built-in ones and hand the
 registry to `open_device_partition` or `open_image`. `ImageOpenOptions` selects
-an offset in decoded media and the filesystem-owned root. Every container
+either a partition ordinal or an offset in decoded media, plus the
+filesystem-owned root; `image_layout` returns the same enumeration the
+`partitions` command prints, so a listed ordinal is what `with_partition`
+takes. Every container
 implements the object-safe `fsmnt_device::ImageContainer` trait, so raw, EWF,
 VHD, and VHDX readers share one typed virtual-media boundary. The umbrella
 open functions return `OpenImageError`, retaining the failed path, decoded
