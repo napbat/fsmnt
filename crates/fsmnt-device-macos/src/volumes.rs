@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use fsmnt_device::{
     HostDriveResult, HostVolumeResolver, LogicalVolume, LogicalVolumeId, PhysicalExtent,
 };
+use tracing::debug;
 
 use crate::drives::{MacOsHostDrives, open_device};
 use crate::iokit;
@@ -14,7 +15,7 @@ impl HostVolumeResolver for MacOsHostDrives {
     type VolumeReader = std::fs::File;
 
     fn logical_volumes(extent: &PhysicalExtent) -> HostDriveResult<Vec<LogicalVolume>> {
-        Ok(iokit::logical_media_for_extent(extent)
+        let volumes: Vec<LogicalVolume> = iokit::logical_media_for_extent(extent)
             .into_iter()
             .map(|media| {
                 let device_path = preferred_device_path(&media.bsd_name);
@@ -30,7 +31,23 @@ impl HostVolumeResolver for MacOsHostDrives {
                 }
                 volume
             })
-            .collect())
+            .collect();
+
+        debug!(
+            drive = %extent.drive(),
+            offset = extent.offset(),
+            count = volumes.len(),
+            "logical-volume candidates for extent"
+        );
+        for volume in &volumes {
+            debug!(
+                volume = %volume.id(),
+                mount_points = ?volume.mount_points(),
+                "logical-volume candidate"
+            );
+        }
+
+        Ok(volumes)
     }
 
     fn open_logical_volume(volume: &LogicalVolume) -> HostDriveResult<Self::VolumeReader> {

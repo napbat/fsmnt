@@ -35,6 +35,9 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 
+#[cfg(any(unix, windows))]
+use tracing::{debug, warn};
+
 /// Opcode: open a file/device and receive the raw handle.
 ///
 /// Wire format: `OP_OPEN + u8 mode + i32 flags + u16 path_len + path`
@@ -139,12 +142,25 @@ pub use windows::{ProxyClient, server};
 #[cfg(any(unix, windows))]
 pub fn open_with_proxy_fallback(path: &str, mode: OpenMode, flags: i32) -> io::Result<File> {
     match open_direct(path, mode, flags) {
-        Ok(file) => Ok(file),
+        Ok(file) => {
+            debug!(path, "opened directly");
+            Ok(file)
+        }
         Err(direct_error) if direct_error.kind() == io::ErrorKind::PermissionDenied => {
+            debug!(path, "direct open was denied, asking the privileged proxy");
             let proxy_result = ProxyClient::connect(DEFAULT_ENDPOINT)
                 .and_then(|mut client| client.open_with(path, mode, flags))
                 .map(|opened| opened.file);
-            proxy_result.map_err(|_| direct_error)
+            proxy_result
+                .inspect(|_| debug!(path, "opened through the privileged proxy"))
+                .map_err(|proxy_error| {
+                    warn!(
+                        path,
+                        error = %proxy_error,
+                        "could not open through the privileged proxy, reporting the direct access error"
+                    );
+                    direct_error
+                })
         }
         Err(error) => Err(error),
     }

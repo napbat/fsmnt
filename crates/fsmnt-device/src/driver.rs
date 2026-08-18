@@ -10,6 +10,7 @@ use fsmnt_core::{FsError, FsResult, TargetFilesystem};
 use nostdio::{Read, Seek};
 use std::fmt;
 use std::str::FromStr;
+use tracing::debug;
 
 use crate::{DetectedBootSector, DeviceMember, DeviceSet};
 
@@ -576,6 +577,7 @@ impl DriverRegistry {
     ///
     /// Returns an error if no registered driver supports `detected`, if the
     /// selected driver rejects the supplied device set, or if parsing fails.
+    #[tracing::instrument(skip_all, fields(members = devices.len(), detected = ?detected))]
     pub fn open_devices(
         &self,
         mut devices: DeviceSet,
@@ -610,6 +612,7 @@ impl DriverRegistry {
     ///
     /// Returns an error if probing fails, no driver recognizes the source, or
     /// the selected driver cannot open the requested filesystem root.
+    #[tracing::instrument(skip_all, fields(members = devices.len(), detected = ?detected))]
     pub fn open_devices_with_options_resolved(
         &self,
         mut devices: DeviceSet,
@@ -642,6 +645,12 @@ impl DriverRegistry {
     ) -> FsResult<Option<ResolvedMemberDiscovery>> {
         for driver in &self.drivers {
             if let Some(discovery) = driver.discover_members(member, detected)? {
+                debug!(
+                    driver = driver.name(),
+                    detected = ?discovery.detected(),
+                    required = discovery.required_members().len(),
+                    "driver identified the members of a multi-device filesystem"
+                );
                 return Ok(Some(ResolvedMemberDiscovery {
                     driver_name: driver.name(),
                     discovery,
@@ -658,6 +667,12 @@ impl DriverRegistry {
     ) -> FsResult<Option<(&'a dyn FilesystemDriver, DetectedBootSector)>> {
         for driver in &self.drivers {
             if let Some(resolved) = driver.probe_devices(devices, detected)? {
+                debug!(
+                    driver = driver.name(),
+                    detected = ?detected,
+                    resolved = ?resolved,
+                    "driver claimed the device set"
+                );
                 return Ok(Some((driver.as_ref(), resolved)));
             }
         }

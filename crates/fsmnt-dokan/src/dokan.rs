@@ -17,6 +17,7 @@ use dokan::{
     FileTimeOperation, FillDataResult, FindData, IO_SECURITY_CONTEXT, MountFlags, MountOptions,
     OperationInfo, OperationResult, VolumeInfo,
 };
+use tracing::{debug, trace, warn};
 use widestring::{U16CStr, U16CString};
 use windows_sys::Win32::{
     Foundation::{STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL},
@@ -82,12 +83,17 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         CTRL_C_EVENT | CTRL_BREAK_EVENT => {
             // The process keeps running, so the mount loop gets to unmount
             // and return on its own.
+            debug!(ctrl_type, "console interrupt received, requesting unmount");
             STOP.store(true, Ordering::SeqCst);
             1 // handled
         }
         CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
             // For these events the process is terminated as soon as the
             // handler returns, so wait here until the volume is released.
+            debug!(
+                ctrl_type,
+                "console shutdown event received, waiting for teardown"
+            );
             STOP.store(true, Ordering::SeqCst);
             let deadline = Instant::now() + TEARDOWN_WAIT;
             while !UNMOUNTED.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -140,6 +146,7 @@ pub fn mount(
 
     let mut mounter = FileSystemMounter::new(&handler, &wide_path, &options);
     let file_system = mounter.mount()?;
+    debug!(mountpoint, fsname, volname, "volume mounted");
 
     on_mount();
 
@@ -162,6 +169,7 @@ pub fn mount(
                 std::thread::sleep(Duration::from_millis(100));
             }
             if STOP.load(Ordering::SeqCst) {
+                debug!("stop requested, removing the mount point");
                 let _ = dokan::unmount(&wide_path);
             }
         })
@@ -176,6 +184,7 @@ pub fn mount(
     dokan::shutdown();
     // Leave a directory mountpoint reusable rather than dangling.
     clear_dangling_directory_mountpoint(mountpoint);
+    debug!(mountpoint, "volume unmounted");
     UNMOUNTED.store(true, Ordering::SeqCst);
     unsafe {
         SetConsoleCtrlHandler(Some(ctrl_handler), 0);
@@ -203,6 +212,10 @@ pub fn unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
     dokan::init();
     let removed = remove_mount_point(&wide_path, mountpoint);
     dokan::shutdown();
+    debug!(
+        mountpoint,
+        removed, "asked the driver to remove the mount point"
+    );
 
     if removed {
         // Removal is asynchronous: wait for the volume to actually go, so
@@ -266,7 +279,9 @@ fn clear_dangling_directory_mountpoint(mountpoint: &str) -> bool {
     if !dangling {
         return false;
     }
+    debug!(mountpoint, "clearing a stale directory mountpoint");
     if std::fs::remove_dir(mountpoint).is_err() {
+        debug!(mountpoint, "the stale mountpoint could not be removed");
         return false;
     }
     let _ = std::fs::create_dir(mountpoint);
@@ -445,6 +460,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
         }
 
         let path = to_internal_path(file_name);
+        trace!(path = %path, "create or open");
 
         if path.is_empty() {
             return Ok(CreateFileInfo {
@@ -475,12 +491,15 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
         context: &'c Self::Context,
     ) -> OperationResult<u32> {
         let offset = u64::try_from(offset).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        trace!(path = %context.path, offset, len = buffer.len(), "read");
         let count = {
             let mut fs = self.fs.lock().unwrap();
             fs.read_at(&context.path, offset, buffer).map_err(|error| {
-                eprintln!(
-                    "fsmnt-dokan: failed to read {:?} at offset {offset}: {error}",
-                    context.path
+                warn!(
+                    path = %context.path,
+                    offset,
+                    error = %error,
+                    "failed to read from the mounted volume"
                 );
                 STATUS_UNSUCCESSFUL
             })?
@@ -494,6 +513,7 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
         _info: &OperationInfo<'c, 'h, Self>,
         context: &'c Self::Context,
     ) -> OperationResult<FileInfo> {
+        trace!(path = %context.path, "file information");
         if context.path.is_empty() {
             return Ok(root_file_info());
         }
@@ -512,9 +532,14 @@ impl<'c, 'h: 'c> FileSystemHandler<'c, 'h> for DokanFs {
         _context: &'c Self::Context,
     ) -> OperationResult<()> {
         let path = to_internal_path(file_name);
+        trace!(path = %path, "list directory");
         let mut fs = self.fs.lock().unwrap();
         let entries = fs.read_dir(&path).map_err(|error| {
-            eprintln!("fsmnt-dokan: failed to list {path:?}: {error}");
+            warn!(
+                path = %path,
+                error = %error,
+                "failed to list the contents of a directory"
+            );
             STATUS_UNSUCCESSFUL
         })?;
         let visible = filter_entries(&entries);

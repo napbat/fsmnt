@@ -16,6 +16,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     ReplyOpen, Request,
 };
+use tracing::{debug, trace, warn};
 
 /// Convert `Option<DateTime<Utc>>` to [`SystemTime`], falling back to the
 /// Unix epoch when `None`.
@@ -69,6 +70,7 @@ pub fn mount(
     ];
 
     let session = fuser::spawn_mount2(fuse_fs, mountpoint, &config)?;
+    debug!(mountpoint, fsname, volname, "volume mounted");
 
     on_mount();
 
@@ -80,18 +82,23 @@ pub fn mount(
     loop {
         match rx.recv_timeout(LIVENESS_POLL) {
             // A termination signal arrived.
-            Ok(()) => break,
+            Ok(()) => {
+                debug!(mountpoint, "termination signal received, unmounting");
+                break;
+            }
             // Waking up regularly means an unmount from outside this
             // process ends the mount too, instead of leaving it blocked
             // on a signal that will never come.
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if !is_mounted(mountpoint) {
+                    debug!(mountpoint, "volume unmounted from outside this process");
                     break;
                 }
             }
             // No signal can arrive any more; keep watching the volume.
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 if !is_mounted(mountpoint) {
+                    debug!(mountpoint, "volume unmounted from outside this process");
                     break;
                 }
                 std::thread::sleep(LIVENESS_POLL);
@@ -102,6 +109,7 @@ pub fn mount(
     // Dropping the session unmounts the volume (and is a no-op once it has
     // been unmounted from elsewhere).
     drop(session);
+    debug!(mountpoint, "volume unmounted");
     Ok(())
 }
 
@@ -152,12 +160,23 @@ pub fn unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
             .arg(mountpoint)
             .output()
         {
-            Ok(output) if output.status.success() => return Ok(()),
-            Ok(output) => failures.push(format!("{program}: {}", helper_failure(&output))),
+            Ok(output) if output.status.success() => {
+                debug!(mountpoint, helper = %program, "unmounted");
+                return Ok(());
+            }
+            Ok(output) => {
+                let failure = helper_failure(&output);
+                debug!(helper = %program, error = %failure, "unmount helper failed");
+                failures.push(format!("{program}: {failure}"));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                debug!(helper = %program, "unmount helper is not installed");
                 failures.push(format!("{program}: not installed"));
             }
-            Err(error) => failures.push(format!("{program}: {error}")),
+            Err(error) => {
+                debug!(helper = %program, error = %error, "unmount helper could not be run");
+                failures.push(format!("{program}: {error}"));
+            }
         }
     }
 
@@ -335,6 +354,7 @@ fn root_attr() -> FileAttr {
 
 impl Filesystem for FuseFs {
     fn lookup(&self, _req: &Request, parent: fuser::INodeNo, name: &OsStr, reply: ReplyEntry) {
+        trace!(parent = parent.0, name = %name.to_string_lossy(), "look up entry");
         let Some(name_str) = name.to_str() else {
             reply.error(fuser::Errno::ENOENT);
             return;
@@ -355,6 +375,7 @@ impl Filesystem for FuseFs {
         _fh: Option<fuser::FileHandle>,
         reply: ReplyAttr,
     ) {
+        trace!(ino = i.0, "file attributes");
         if i.0 == ROOT_INO {
             reply.attr(&ATTR_TTL, &root_attr());
             return;
@@ -395,6 +416,7 @@ impl Filesystem for FuseFs {
         _lock: Option<fuser::LockOwner>,
         reply: ReplyData,
     ) {
+        trace!(ino = i.0, offset, len = size, "read");
         let mut g = self.state.lock().unwrap();
         let Some(path) = g.inodes.path(i.0).map(String::from) else {
             reply.error(fuser::Errno::ENOENT);
@@ -410,11 +432,20 @@ impl Filesystem for FuseFs {
             return;
         }
         data.resize(requested, 0);
-        let Ok(count) = g.fs.read_at(&path, offset, &mut data) else {
+        let read = g.fs.read_at(&path, offset, &mut data).inspect_err(|error| {
+            warn!(
+                path = %path,
+                offset,
+                error = %error,
+                "failed to read from the mounted volume"
+            );
+        });
+        let Ok(count) = read else {
             reply.error(fuser::Errno::EIO);
             return;
         };
         let Some(data) = data.get(..count) else {
+            warn!(path = %path, offset, "a read reported more bytes than the buffer holds");
             reply.error(fuser::Errno::EIO);
             return;
         };
@@ -429,12 +460,20 @@ impl Filesystem for FuseFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        trace!(ino = i.0, offset, "list directory");
         let mut g = self.state.lock().unwrap();
         let Some(path) = g.inodes.path(i.0).map(String::from) else {
             reply.error(fuser::Errno::ENOENT);
             return;
         };
-        let Ok(entries) = g.fs.read_dir(&path) else {
+        let listed = g.fs.read_dir(&path).inspect_err(|error| {
+            warn!(
+                path = %path,
+                error = %error,
+                "failed to list the contents of a directory"
+            );
+        });
+        let Ok(entries) = listed else {
             reply.error(fuser::Errno::EIO);
             return;
         };

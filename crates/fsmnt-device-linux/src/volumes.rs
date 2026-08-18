@@ -8,6 +8,7 @@ use fsmnt_device::{
     BlockZoneReporter, HostDriveId, HostDriveResult, HostVolumeResolver, LogicalVolume,
     LogicalVolumeId, PhysicalExtent,
 };
+use tracing::debug;
 
 use crate::drives::{LinuxHostDrives, open_device};
 use crate::zones::reporter_for_path;
@@ -27,10 +28,27 @@ impl HostVolumeResolver for LinuxHostDrives {
         leaves.sort();
         leaves.dedup();
 
-        Ok(leaves
+        let volumes: Vec<LogicalVolume> = leaves
             .into_iter()
             .map(|name| logical_volume(&name, extent))
-            .collect())
+            .collect();
+
+        debug!(
+            drive = %extent.drive(),
+            offset = extent.offset(),
+            partition = %partition,
+            count = volumes.len(),
+            "logical-volume candidates for extent"
+        );
+        for volume in &volumes {
+            debug!(
+                volume = %volume.id(),
+                mount_points = ?volume.mount_points(),
+                "logical-volume candidate"
+            );
+        }
+
+        Ok(volumes)
     }
 
     fn physical_zone_reporter(

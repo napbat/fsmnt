@@ -8,6 +8,7 @@ edition.workspace = true
 [target.'cfg(windows)'.dependencies]
 fsmnt-device = { workspace = true }
 fsmnt-proxy = { workspace = true }
+tracing = { workspace = true }
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",

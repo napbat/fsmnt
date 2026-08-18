@@ -15,6 +15,7 @@ use fsmnt_core::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use tracing::debug;
 
 use crate::adapter::{found, read_at_through};
 use crate::boot_backup;
@@ -54,6 +55,14 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
 
         ntfs.read_upcase_table(&mut reader)
             .map_err(|e| FsError::Filesystem(format!("failed to read upcase table: {e}")))?;
+
+        debug!(
+            cluster_size = ntfs.cluster_size(),
+            sector_size = ntfs.sector_size(),
+            file_record_size = ntfs.file_record_size(),
+            size_bytes = ntfs.size(),
+            "opened an NTFS volume"
+        );
 
         Ok(Self {
             reader,

@@ -16,6 +16,7 @@ use fsmnt_core::{
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::iter::FsTryIterator;
+use tracing::debug;
 
 use crate::adapter::{found, found_and, read_at_through, read_up_to};
 use crate::boot_backup;
@@ -92,6 +93,14 @@ impl<T: Read + Seek> FatFilesystem<T> {
     /// FAT32.
     pub fn new(mut reader: T) -> FsResult<Self> {
         let fat = Fat::new(&mut reader).map_err(|e| map_fat_error(e, "<root>"))?;
+        debug!(
+            fat_type = ?fat.fat_type(),
+            cluster_size = fat.cluster_size(),
+            sector_size = fat.sector_size(),
+            total_clusters = fat.total_clusters(),
+            size_bytes = fat.size(),
+            "opened a FAT volume"
+        );
         Ok(Self {
             reader,
             fat,

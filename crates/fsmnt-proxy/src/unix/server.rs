@@ -12,6 +12,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
 
+use tracing::{info, warn};
+
 use crate::{MAX_PATH_LEN, OP_OPEN, OpenMode, STATUS_ERR, STATUS_OK};
 
 /// Listen for connections and handle them in threads.
@@ -40,22 +42,22 @@ pub fn listen(endpoint: &str) -> io::Result<()> {
         let _ = std::fs::set_permissions(endpoint, perms);
     }
 
-    eprintln!("fsmnt-proxy-server: listening on {endpoint}");
-    eprintln!("fsmnt-proxy-server: waiting for connections… (Ctrl+C to stop)");
+    info!(endpoint, "listening for proxy clients");
+    info!("waiting for connections (Ctrl+C to stop)");
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
-                    eprintln!("fsmnt-proxy-server: client connected");
+                    info!("client connected");
                     if let Err(e) = handle_client(stream) {
-                        eprintln!("fsmnt-proxy-server: client error: {e}");
+                        warn!(error = %e, "client connection failed");
                     }
-                    eprintln!("fsmnt-proxy-server: client disconnected");
+                    info!("client disconnected");
                 });
             }
             Err(e) => {
-                eprintln!("fsmnt-proxy-server: accept error: {e}");
+                warn!(error = %e, "could not accept a client connection");
             }
         }
     }

@@ -1,6 +1,7 @@
 //! Staged filesystem detection over a seekable byte source.
 
 use nostdio::{Read, Seek, SeekFrom};
+use tracing::debug;
 
 use crate::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
@@ -84,6 +85,10 @@ pub fn detect_backup_boot_sector_at(
         if DetectedBootSector::from_bytes(&fat) == DetectedBootSector::Fat32
             && bpb_bytes_per_sector(&fat) == sector_size
         {
+            debug!(
+                offset,
+                sector_size, "classified the volume from the FAT32 backup boot sector at sector 6"
+            );
             return Ok(Some(DetectedBootSector::Fat32));
         }
         // exFAT: backup boot region at sector 12; `BytesPerSectorShift` at 0x6C.
@@ -92,6 +97,10 @@ pub fn detect_backup_boot_sector_at(
             && exfat.len() > 0x6C
             && (1u64 << exfat[0x6C]) == sector_size
         {
+            debug!(
+                offset,
+                sector_size, "classified the volume from the exFAT backup boot region at sector 12"
+            );
             return Ok(Some(DetectedBootSector::ExFat));
         }
         // NTFS: last sector of the volume.
@@ -100,6 +109,11 @@ pub fn detect_backup_boot_sector_at(
             if DetectedBootSector::from_bytes(&ntfs) == DetectedBootSector::Ntfs
                 && bpb_bytes_per_sector(&ntfs) == sector_size
             {
+                debug!(
+                    offset,
+                    sector_size,
+                    "classified the volume from the NTFS boot-sector copy in its last sector"
+                );
                 return Ok(Some(DetectedBootSector::Ntfs));
             }
         }

@@ -4,6 +4,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use tracing::debug;
+
 use super::container::ImageContainer;
 use super::error::ImageOpenError;
 use super::format::ImageFormat;
@@ -36,6 +38,7 @@ impl ImageReader {
     /// Returns an error if the path cannot be inspected, a declared container
     /// is invalid, an EWF segment or virtual-disk parent is missing, or required
     /// container metadata cannot be parsed.
+    #[tracing::instrument(skip_all, fields(path = %path.as_ref().display()))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ImageOpenError> {
         let path = path.as_ref();
         let mut file = File::open(path).map_err(|error| ImageOpenError::new(path, error))?;
@@ -47,17 +50,13 @@ impl ImageReader {
             read_signature(&mut file).map_err(|error| ImageOpenError::new(path, error))?;
 
         if ewf::has_signature(&signature) || ewf::has_first_segment_extension(path) {
-            return Ok(Self {
-                inner: Box::new(ewf::EwfImageReader::open(path)?),
-            });
+            return Ok(Self::detected(Box::new(ewf::EwfImageReader::open(path)?)));
         }
 
         if vhdx::has_signature(&signature) || vhdx::has_extension(path) {
             let reader =
                 vhdx::VhdxReader::open(path).map_err(|error| ImageOpenError::new(path, error))?;
-            return Ok(Self {
-                inner: Box::new(reader),
-            });
+            return Ok(Self::detected(Box::new(reader)));
         }
 
         let has_vhd_footer = vhd::has_footer_signature(&mut file, length)
@@ -65,16 +64,23 @@ impl ImageReader {
         if has_vhd_footer || vhd::has_extension(path) {
             let reader =
                 vhd::VhdReader::open(path).map_err(|error| ImageOpenError::new(path, error))?;
-            return Ok(Self {
-                inner: Box::new(reader),
-            });
+            return Ok(Self::detected(Box::new(reader)));
         }
 
         file.seek(SeekFrom::Start(0))
             .map_err(|error| ImageOpenError::new(path, error))?;
-        Ok(Self {
-            inner: Box::new(RawImageReader::new(file, length)),
-        })
+        Ok(Self::detected(Box::new(RawImageReader::new(file, length))))
+    }
+
+    /// Wrap a selected container, recording which format won and how much
+    /// decoded media it presents.
+    fn detected(inner: Box<dyn ImageContainer>) -> Self {
+        debug!(
+            format = %inner.format(),
+            size_bytes = ImageContainer::len(inner.as_ref()),
+            "selected an image container format"
+        );
+        Self { inner }
     }
 
     /// Container format selected while opening the image.

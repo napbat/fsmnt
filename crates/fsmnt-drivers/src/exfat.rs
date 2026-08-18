@@ -20,6 +20,7 @@ use fsmnt_core::{
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
+use tracing::debug;
 
 use crate::adapter::{found, read_at_through, read_up_to};
 use crate::boot_backup;
@@ -85,6 +86,14 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
         exfat
             .load_metadata(&mut reader)
             .map_err(|e| map_exfat_error(e, "<metadata>"))?;
+        debug!(
+            cluster_size = exfat.cluster_size(),
+            sector_size = exfat.bytes_per_sector(),
+            cluster_count = exfat.cluster_count(),
+            root_cluster = exfat.root_directory_cluster(),
+            boot_checksum_valid = exfat.boot_checksum_valid(),
+            "opened an exFAT volume"
+        );
         Ok(Self {
             reader,
             exfat,

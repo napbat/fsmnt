@@ -12,6 +12,7 @@
 use std::ffi::c_void;
 use std::os::windows::io::AsRawHandle;
 
+use tracing::debug;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetVolumePathNamesForVolumeNameW,
@@ -124,7 +125,7 @@ pub fn enumerate_volumes() -> Vec<VolumeInfo> {
 /// lookup deliberately returns every candidate.
 #[must_use]
 pub fn find_volumes_for_extent(extent: &PhysicalExtent) -> Vec<VolumeInfo> {
-    enumerate_volumes()
+    let candidates: Vec<VolumeInfo> = enumerate_volumes()
         .into_iter()
         .filter(|volume| {
             volume
@@ -132,7 +133,23 @@ pub fn find_volumes_for_extent(extent: &PhysicalExtent) -> Vec<VolumeInfo> {
                 .iter()
                 .any(|candidate| candidate.has_same_start(extent))
         })
-        .collect()
+        .collect();
+
+    debug!(
+        drive = %extent.drive(),
+        offset = extent.offset(),
+        count = candidates.len(),
+        "logical-volume candidates for extent"
+    );
+    for candidate in &candidates {
+        debug!(
+            volume = %candidate.volume_guid_path,
+            mount_points = ?candidate.mount_points,
+            "logical-volume candidate"
+        );
+    }
+
+    candidates
 }
 
 /// Query one volume's disk extent and mount points.

@@ -13,6 +13,7 @@ fsmnt-core = { workspace = true }
 fsmnt-parser-core = { workspace = true, features = ["std"] }
 nostdio = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

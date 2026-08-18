@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use tracing::debug;
+
 use crate::{HostDriveEnumerator, HostDriveId, HostDriveResult};
 
 use super::BlockZoneReporter;
@@ -358,15 +360,30 @@ pub fn select_logical_volume(
     candidates: &[LogicalVolume],
     selection: Option<&LogicalVolumeId>,
 ) -> Result<LogicalVolume, VolumeSelectionError> {
+    debug!(
+        drive = %extent.drive(),
+        offset = extent.offset(),
+        candidates = candidates.len(),
+        volumes = ?candidates.iter().map(|candidate| candidate.id().as_str()).collect::<Vec<_>>(),
+        mount_points = ?candidates
+            .iter()
+            .flat_map(LogicalVolume::mount_points)
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>(),
+        "enumerated the logical volumes backing the extent"
+    );
+
     if let Some(requested) = selection {
-        return candidates
+        let selected = candidates
             .iter()
             .find(|candidate| candidate.id() == requested)
             .cloned()
             .ok_or_else(|| VolumeSelectionError::NotFound {
                 requested: requested.clone(),
                 extent: extent.clone(),
-            });
+            })?;
+        debug!(volume = %selected.id(), "selected the logical volume the caller named");
+        return Ok(selected);
     }
 
     let mounted: Vec<&LogicalVolume> = candidates
@@ -374,6 +391,7 @@ pub fn select_logical_volume(
         .filter(|candidate| candidate.is_mounted())
         .collect();
     if let [candidate] = mounted.as_slice() {
+        debug!(volume = %candidate.id(), "selected the only mounted logical volume");
         return Ok((*candidate).clone());
     }
     if mounted.len() > 1 {
@@ -389,7 +407,10 @@ pub fn select_logical_volume(
         [] => Err(VolumeSelectionError::NoneAvailable {
             extent: extent.clone(),
         }),
-        [candidate] => Ok(candidate.clone()),
+        [candidate] => {
+            debug!(volume = %candidate.id(), "selected the only logical volume backing the extent");
+            Ok(candidate.clone())
+        }
         many => Err(VolumeSelectionError::Ambiguous {
             candidates: many
                 .iter()

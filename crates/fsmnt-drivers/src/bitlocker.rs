@@ -13,8 +13,24 @@ use nt_bitlocker::{BitLockerVolume, Credential, UnlockMethod};
 
 use fsmnt_core::{FsError, FsResult, TargetFilesystem};
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
+use tracing::debug;
 
 use crate::ntfs::NtfsFilesystem;
+
+/// The name of an unlock method's protector, for diagnostics.
+///
+/// Only the *kind* of credential is named: the password, BEK bytes and
+/// every derived key stay out of the logs.
+const fn protector_name(method: &UnlockMethod) -> &'static str {
+    match method {
+        UnlockMethod::Credential(Credential::ClearKey) => "clear key",
+        UnlockMethod::Credential(Credential::RecoveryPassword(_)) => "recovery password",
+        UnlockMethod::Credential(Credential::UserPassword(_)) => "user password",
+        UnlockMethod::Credential(Credential::BekFile(_)) => "BEK startup key",
+        UnlockMethod::Vmk(_) => "volume master key",
+        UnlockMethod::Fvek(_) => "full-volume encryption key",
+    }
+}
 
 /// [`FilesystemDriver`] for `BitLocker`-encrypted volumes.
 ///
@@ -118,15 +134,30 @@ impl FilesystemDriver for BitLockerDriver {
             .map(|p| format!("{:?}", p.protector_type()))
             .collect();
 
+        debug!(
+            protectors = ?protectors,
+            "parsed the BitLocker metadata; trying the configured credentials in order"
+        );
+
         // Each failed attempt hands the volume back for the next one.
         let mut current_volume = volume;
         let mut last_error = String::new();
 
         for method in &self.unlock_methods() {
             match current_volume.unlock(method) {
-                Ok(unlocked) => return Ok(Box::new(NtfsFilesystem::new(unlocked)?)),
+                Ok(unlocked) => {
+                    debug!(
+                        protector = protector_name(method),
+                        "unlocked the BitLocker volume; opening the NTFS filesystem inside"
+                    );
+                    return Ok(Box::new(NtfsFilesystem::new(unlocked)?));
+                }
                 Err(unlock_err) => {
                     last_error = unlock_err.source.to_string();
+                    debug!(
+                        protector = protector_name(method),
+                        "this protector did not unlock the volume"
+                    );
                     current_volume = unlock_err.volume;
                 }
             }

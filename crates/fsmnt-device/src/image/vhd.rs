@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use tracing::debug;
+
 use super::container::ImageContainer;
 use super::format::ImageFormat;
 use super::util::{has_extension as path_has_extension, seek_position};
@@ -577,6 +579,11 @@ fn resolve_parent(
             Ok(parent)
                 if parent.unique_id == header.parent_unique_id && parent.length == child_size =>
             {
+                debug!(
+                    path = %candidate.display(),
+                    depth = PARENT_CHAIN_LIMIT - depth_remaining + 1,
+                    "resolved a VHD differencing parent"
+                );
                 return Ok(parent);
             }
             Ok(_) => failures.push(format!(

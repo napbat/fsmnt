@@ -5,6 +5,8 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use tracing::debug;
+
 use super::format::{
     Guid, HEADER_REGION_SIZE, MIB, Metadata, ParentLocator, ParentPathKind, Region,
 };
@@ -482,6 +484,11 @@ fn resolve_parent(
                         == u64::from(child_metadata.logical_sector_size)
                     && parent.length == child_metadata.virtual_disk_size =>
             {
+                debug!(
+                    path = %candidate.display(),
+                    depth = PARENT_CHAIN_LIMIT - depth_remaining + 1,
+                    "resolved a VHDX differencing parent"
+                );
                 return Ok(parent);
             }
             Ok(_) => failures.push(format!(

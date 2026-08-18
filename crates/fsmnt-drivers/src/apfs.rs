@@ -22,6 +22,7 @@ use fsmnt_device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
     reject_unsupported_recovery,
 };
+use tracing::debug;
 
 use crate::identity;
 
@@ -193,6 +194,15 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
         let block_size = apfs.block_size();
         let total_size = apfs.block_count().saturating_mul(u64::from(block_size));
         let volume_uuid = superblock.vol_uuid.0;
+        debug!(
+            volume = %superblock.name,
+            role = ?superblock.role,
+            index,
+            volumes = volumes.len(),
+            block_size,
+            size_bytes = total_size,
+            "opened an APFS volume from its container"
+        );
         let volume =
             Volume::open(&apfs, &mut reader, index).map_err(|e| map_apfs_error(e, "<volume>"))?;
         Ok(Self {
