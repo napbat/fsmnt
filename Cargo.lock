@@ -574,7 +574,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fs-apfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "chrono",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "fs-btrfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "crc32c",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "fs-exfat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "chrono",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "fs-ext"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "chrono",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "fs-fat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arbitrary",
  "bitflags",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "fs-ntfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arbitrary",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "crc32c",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "chrono",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-device"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32c",
  "crc32fast",
@@ -731,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-device-linux"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fsmnt-device",
  "fsmnt-proxy",
@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-device-macos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fsmnt-device",
  "fsmnt-proxy",
@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-device-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fsmnt-device",
  "fsmnt-proxy",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-dokan"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dokan",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-drivers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "fs-apfs",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-fuse"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "ctrlc",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-fuzz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fs-btrfs",
  "libfuzzer-sys",
@@ -814,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-parser-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crc32c",
  "mutants",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "fsmnt-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fsmnt-device",
  "fsmnt-parser-core",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "linux-fscrypt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "chacha20",
@@ -1133,7 +1133,7 @@ checksum = "e818b1435af48545c0f098dc3f267548c7c01640651c8f556f8123562df0be54"
 
 [[package]]
 name = "nt-bitlocker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "ccm",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "nt-compression"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpufeatures 0.3.0",
  "divan",
