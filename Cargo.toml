@@ -168,6 +168,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 crc32c = { workspace = true }
+crc32fast = { workspace = true, features = ["std"] }
 flate2 = { workspace = true }
 fsmnt-testkit = { workspace = true, features = ["device"] }
 tempfile = { workspace = true }

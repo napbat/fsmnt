@@ -447,3 +447,78 @@ fn mounting_a_complete_partition_reports_no_shortfall() {
     assert_eq!(opened.truncated_by, None);
     assert_eq!(opened.size_bytes, opened.declared_size_bytes);
 }
+
+/// A 512-byte-sector GPT disk of `sectors` sectors with primary *and* backup
+/// structures, holding one Linux partition at LBAs 80..=87 that carries an
+/// NTFS boot sector (so detection has something to find).
+fn gpt_disk_with_backup(sectors: usize) -> Vec<u8> {
+    fn header(current: u64, backup: u64, entries_lba: u64) -> [u8; 92] {
+        let mut h = [0u8; 92];
+        h[0..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x0001_0000_u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92_u32.to_le_bytes());
+        h[24..32].copy_from_slice(&current.to_le_bytes());
+        h[32..40].copy_from_slice(&backup.to_le_bytes());
+        h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
+        h[80..84].copy_from_slice(&4_u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128_u32.to_le_bytes());
+        let crc = crc32fast::hash(&h);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+    let mut media = vec![0_u8; 512 * sectors];
+    let last = (sectors - 1) as u64;
+    write_mbr_entry(&mut media[446..462], 0xee, 1, 0xffff_ffff);
+    media[510..512].copy_from_slice(&[0x55, 0xaa]);
+    media[512..604].copy_from_slice(&header(1, last, 2));
+    let mut entry = [0u8; 128];
+    entry[0..16].copy_from_slice(&GptPartitionEntry::LINUX_FILESYSTEM_GUID);
+    entry[16..32].copy_from_slice(&[0x33; 16]);
+    entry[32..40].copy_from_slice(&80_u64.to_le_bytes());
+    entry[40..48].copy_from_slice(&87_u64.to_le_bytes());
+    media[1024..1152].copy_from_slice(&entry);
+    let backup_entries = 512 * (sectors - 33);
+    media[backup_entries..backup_entries + 128].copy_from_slice(&entry);
+    let backup_header = 512 * (sectors - 1);
+    media[backup_header..backup_header + 92].copy_from_slice(&header(
+        last,
+        1,
+        (sectors - 33) as u64,
+    ));
+    write_ntfs_boot_sector(&mut media, 80 * 512);
+    media
+}
+
+#[test]
+fn a_wiped_front_gpt_is_read_from_its_backup_header() {
+    let mut media = gpt_disk_with_backup(256);
+    // dd if=/dev/zero of=disk count=64: MBR, primary header and entry array
+    // all gone; the backup header and array at the end survive.
+    media[..512 * 64].fill(0);
+    let (_directory, path) = image_file(&media);
+
+    let layout = image_layout(&path).expect("enumerate the wiped-front image");
+    assert!(matches!(layout.kind, ImageLayoutKind::Gpt));
+    assert!(
+        layout.gpt_from_backup,
+        "the table must come from the backup"
+    );
+    assert!(!layout.sector_size_auto_detected);
+    assert_eq!(layout.partitions.len(), 1);
+    assert_eq!(layout.partitions[0].offset, 80 * 512);
+    assert_eq!(layout.partitions[0].size_bytes, 8 * 512);
+    assert_eq!(
+        layout.partitions[0].detected,
+        Some(DetectedBootSector::Ntfs)
+    );
+
+    // And it is mountable by ordinal exactly like an intact table.
+    let intact = gpt_disk_with_backup(256);
+    let (_directory, intact_path) = image_file(&intact);
+    let intact_layout = image_layout(&intact_path).expect("enumerate the intact image");
+    assert!(!intact_layout.gpt_from_backup);
+    assert_eq!(
+        intact_layout.partitions[0].offset,
+        layout.partitions[0].offset
+    );
+}

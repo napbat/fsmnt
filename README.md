@@ -316,6 +316,22 @@ than not at all. The window becomes the partition's *declared* extent, so a
 filesystem whose data runs past the dump's end can still be walked. On a
 device the same flag rides over bad sectors one 512-byte sector at a time.
 
+**A wiped partition table has a backup too.** GPT writes a second header into
+the last sector of the disk and the entry array just before it. When the
+front of an image is gone — `dd` over the first sectors, a bootloader
+mishap, an acquisition that started late — `partitions` and `--partition`
+read the table from that copy (validated by signature, header CRC, and its
+own recorded position) and say so:
+
+```
+GPT partition table (recovered from the backup header in the last sector; the primary header at the front of the image is damaged)
+```
+
+A protective MBR whose GPT header at LBA 1 is gone is treated the same way
+rather than as an MBR disk with one `0xEE` partition. Only an image that is
+truncated at the end as well loses both copies — and then `scan` still finds
+the filesystems themselves.
+
 **Boot sectors have backups too.** FAT32 keeps sectors 0–2 again at sector
 6, exFAT keeps its whole 12-sector boot region again at sector 12, and NTFS
 mirrors its boot sector into the last sector of the volume. When sector 0

@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 crc32c = { workspace = true }
+# GPT header checksums (CRC-32/IEEE), used to validate a backup header
+# before trusting it over a damaged primary.
+crc32fast = { workspace = true, features = ["std"] }
 ewf = { workspace = true }
 fsmnt-core = { workspace = true }
 fsmnt-parser-core = { workspace = true, features = ["std"] }

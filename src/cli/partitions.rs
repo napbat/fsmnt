@@ -96,7 +96,14 @@ fn image_partitions(
 
     match layout.kind {
         ImageLayoutKind::Gpt => {
-            println!("GPT partition table");
+            if layout.gpt_from_backup {
+                println!(
+                    "GPT partition table (recovered from the backup header in the last sector; \
+                     the primary header at the front of the image is damaged)"
+                );
+            } else {
+                println!("GPT partition table");
+            }
             println!(
                 "{:>4}  {:<24} {:<22} {:>12} {:>14}  FILESYSTEM",
                 "#", "NAME", "TYPE", "SIZE", "OFFSET"
@@ -200,8 +207,18 @@ fn drive_partitions(
     let sector = disk.sector_size();
 
     match disk.layout().clone() {
-        DiskLayout::Gpt { header } => {
-            println!("GPT disk (sector size {sector})");
+        DiskLayout::Gpt {
+            header,
+            from_backup,
+        } => {
+            if from_backup {
+                println!(
+                    "GPT disk (sector size {sector}; table recovered from the backup header in \
+                     the last sector — the primary at LBA 1 is damaged)"
+                );
+            } else {
+                println!("GPT disk (sector size {sector})");
+            }
             println!("{:>4}  {:<26} {:>12}  FILESYSTEM", "#", "TYPE", "SIZE");
             let count = usize::try_from(header.num_partition_entries.get()).unwrap_or(usize::MAX);
             let mut ordinal = 0;

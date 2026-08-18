@@ -146,6 +146,10 @@ pub struct ImageLayout {
     /// supplied: 512-byte sectors found no partition table and 4096-byte
     /// sectors found a GPT.
     pub sector_size_auto_detected: bool,
+    /// Whether the GPT was read from the backup header in the last sector
+    /// because the primary at LBA 1 was wiped or invalid. The partitions are
+    /// the same; the front of the media is what is damaged.
+    pub gpt_from_backup: bool,
     /// Length of the decoded media in bytes.
     pub size_bytes: u64,
     /// Partition table found at the start of the decoded media.
@@ -278,6 +282,13 @@ fn layout_at_sector_size(
         })?;
     let sector_size = disk.sector_size();
 
+    let gpt_from_backup = matches!(
+        disk.layout(),
+        DiskLayout::Gpt {
+            from_backup: true,
+            ..
+        }
+    );
     let (kind, entries) = match disk.layout().clone() {
         DiskLayout::Gpt { .. } => (ImageLayoutKind::Gpt, gpt_entries(&mut disk)),
         DiskLayout::Mbr { .. } => (ImageLayoutKind::Mbr, mbr_entries(&disk)),
@@ -311,6 +322,7 @@ fn layout_at_sector_size(
             format,
             sector_size,
             sector_size_auto_detected: auto_detected,
+            gpt_from_backup,
             size_bytes,
             kind,
             partitions,

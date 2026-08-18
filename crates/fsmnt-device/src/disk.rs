@@ -28,8 +28,15 @@ pub enum DiskLayout {
     Bare(DetectedBootSector),
     /// GPT partitioned disk — header cached for partition lookup.
     Gpt {
-        /// The validated GPT header read from LBA 1.
+        /// The validated GPT header: read from LBA 1, or — when the primary
+        /// is damaged — the backup copy in the disk's last sector, whose
+        /// entry array sits just before it.
         header: GptHeader,
+        /// Whether the header came from the backup at the end of the disk
+        /// because the primary at LBA 1 was unreadable or invalid. The
+        /// partitions it describes are the same; the front of the disk is
+        /// what is damaged.
+        from_backup: bool,
     },
     /// MBR partitioned disk — MBR cached for partition lookup.
     Mbr {
@@ -116,7 +123,7 @@ impl<R: Read + Seek> Disk<R> {
     #[must_use]
     pub fn partition_count(&self) -> usize {
         match &self.layout {
-            DiskLayout::Gpt { header } => {
+            DiskLayout::Gpt { header, .. } => {
                 usize::try_from(header.num_partition_entries.get()).unwrap_or(usize::MAX)
             }
             DiskLayout::Mbr { mbr } => mbr.valid_partitions().count(),
@@ -134,7 +141,7 @@ impl<R: Read + Seek> Disk<R> {
     /// or the entry cannot be read.
     ///
     pub fn gpt_partition(&mut self, index: usize) -> std::io::Result<GptPartitionEntry> {
-        let DiskLayout::Gpt { header } = &self.layout else {
+        let DiskLayout::Gpt { header, .. } = &self.layout else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Not a GPT disk",
@@ -356,21 +363,93 @@ impl<R: Read + Seek> Disk<R> {
             | DetectedBootSector::Btrfs => Ok(DiskLayout::Bare(detected)),
 
             DetectedBootSector::GptPartitioned => {
-                let header = read_gpt_header(reader, u64::from(sector_size))?;
-                Ok(DiskLayout::Gpt { header })
+                match read_gpt_header(reader, u64::from(sector_size)) {
+                    Ok(header) => Ok(DiskLayout::Gpt {
+                        header,
+                        from_backup: false,
+                    }),
+                    // The boot sector promised GPT but LBA 1 does not hold
+                    // a valid header: the copy at the end may.
+                    Err(error) => Self::backup_gpt_layout(reader, sector_size)?.ok_or(error),
+                }
             }
 
             DetectedBootSector::MbrPartitioned => {
                 let mbr = Mbr::from_bytes(&probe.prefix[..BOOT_SECTOR_SIZE]).ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid MBR")
                 })?;
+                // A protective MBR whose GPT header at LBA 1 is gone is a
+                // wiped-front GPT disk, not an MBR disk with one 0xEE
+                // partition; the backup header at the end says which.
+                if mbr.is_gpt_protective()
+                    && let Some(layout) = Self::backup_gpt_layout(reader, sector_size)?
+                {
+                    return Ok(layout);
+                }
                 Ok(DiskLayout::Mbr {
                     mbr: Box::new(*mbr),
                 })
             }
 
-            DetectedBootSector::Unknown => Ok(DiskLayout::Unknown),
+            DetectedBootSector::Unknown => {
+                Ok(Self::backup_gpt_layout(reader, sector_size)?.unwrap_or(DiskLayout::Unknown))
+            }
         }
+    }
+
+    /// The GPT layout described by the backup header in the last sector, if
+    /// one is there and stands up.
+    ///
+    /// GPT writes a second copy of the header into the disk's last LBA and
+    /// the entry array into the sectors before it, precisely so a damaged
+    /// first track (`dd if=/dev/zero of=/dev/sdX count=64`, a bootloader
+    /// gone wrong, a partial acquisition) does not lose the table. The copy
+    /// is trusted only when its signature, its own header CRC-32, and its
+    /// self-address (`current_lba` naming the last sector) all agree; the
+    /// entry array it points at is read on demand like the primary's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source's length cannot be determined or
+    /// the last sector cannot be read.
+    fn backup_gpt_layout(reader: &mut R, sector_size: u32) -> std::io::Result<Option<DiskLayout>> {
+        let sector = u64::from(sector_size);
+        let length = reader.seek(SeekFrom::End(0))?;
+        if length < sector * 2 {
+            return Ok(None);
+        }
+        let last_lba = length / sector - 1;
+        reader.seek(SeekFrom::Start(last_lba * sector))?;
+        let mut buffer = [0u8; 512];
+        reader.read_exact(&mut buffer[..92])?;
+        let Some(header) = GptHeader::from_bytes(&buffer[..92]) else {
+            return Ok(None);
+        };
+        if !header.is_valid() || header.current_lba.get() != last_lba {
+            return Ok(None);
+        }
+        // Header CRC covers `header_size` bytes with the CRC field zeroed;
+        // GPT headers are 92 bytes in every implementation that matters, and
+        // a claimed size outside a sector is corruption, not a longer header.
+        let header_size = header.header_size.get() as usize;
+        if !(92..=512).contains(&header_size) {
+            return Ok(None);
+        }
+        let mut covered = [0u8; 512];
+        reader.seek(SeekFrom::Start(last_lba * sector))?;
+        reader.read_exact(&mut covered[..header_size])?;
+        covered[16..20].fill(0);
+        if crc32fast::hash(&covered[..header_size]) != header.header_crc32.get() {
+            return Ok(None);
+        }
+        // The entry array must precede the backup header, on the disk.
+        if header.partition_entry_lba.get() >= last_lba {
+            return Ok(None);
+        }
+        Ok(Some(DiskLayout::Gpt {
+            header: *header,
+            from_backup: true,
+        }))
     }
 }
 
@@ -452,5 +531,138 @@ mod tests {
     fn too_small_image_errors() {
         let result = Disk::new(Cursor::new(vec![0u8; 100]));
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod backup_gpt_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    const SECTOR: usize = 512;
+    /// 128 sectors: protective MBR, primary header, 32-sector entry array,
+    /// data, 32-sector backup entry array, backup header in the last sector.
+    const SECTORS: usize = 128;
+
+    /// A GPT header for `current`/`backup` LBAs whose entry array (4 entries
+    /// of 128 bytes) starts at `entries_lba`, with a correct header CRC.
+    fn gpt_header(current: u64, backup: u64, entries_lba: u64) -> [u8; 92] {
+        let mut h = [0u8; 92];
+        h[0..8].copy_from_slice(b"EFI PART");
+        h[8..12].copy_from_slice(&0x0001_0000_u32.to_le_bytes());
+        h[12..16].copy_from_slice(&92_u32.to_le_bytes());
+        h[24..32].copy_from_slice(&current.to_le_bytes());
+        h[32..40].copy_from_slice(&backup.to_le_bytes());
+        h[40..48].copy_from_slice(&34_u64.to_le_bytes()); // first usable
+        h[48..56].copy_from_slice(&30_u64.to_le_bytes()); // last usable
+        h[72..80].copy_from_slice(&entries_lba.to_le_bytes());
+        h[80..84].copy_from_slice(&4_u32.to_le_bytes());
+        h[84..88].copy_from_slice(&128_u32.to_le_bytes());
+        let crc = crc32fast::hash(&h);
+        h[16..20].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+
+    /// One partition entry: Linux filesystem type, LBAs 8..=15.
+    fn entry() -> [u8; 128] {
+        let mut e = [0u8; 128];
+        e[0..16].copy_from_slice(&GptPartitionEntry::LINUX_FILESYSTEM_GUID);
+        e[16..32].copy_from_slice(&[0x22; 16]);
+        e[32..40].copy_from_slice(&8_u64.to_le_bytes());
+        e[40..48].copy_from_slice(&15_u64.to_le_bytes());
+        e
+    }
+
+    /// A complete GPT disk with primary and backup structures.
+    fn gpt_disk() -> Vec<u8> {
+        let mut disk = vec![0u8; SECTOR * SECTORS];
+        let last = (SECTORS - 1) as u64;
+        // Protective MBR.
+        disk[446] = 0x00;
+        disk[446 + 4] = 0xEE;
+        disk[446 + 8..446 + 12].copy_from_slice(&1_u32.to_le_bytes());
+        disk[446 + 12..446 + 16].copy_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+        disk[510] = 0x55;
+        disk[511] = 0xAA;
+        // Primary header at LBA 1, entries at LBA 2.
+        disk[SECTOR..SECTOR + 92].copy_from_slice(&gpt_header(1, last, 2));
+        disk[SECTOR * 2..SECTOR * 2 + 128].copy_from_slice(&entry());
+        // Backup entries at last-32, backup header in the last sector.
+        let backup_entries = SECTOR * (SECTORS - 33);
+        disk[backup_entries..backup_entries + 128].copy_from_slice(&entry());
+        let backup_header = SECTOR * (SECTORS - 1);
+        disk[backup_header..backup_header + 92].copy_from_slice(&gpt_header(
+            last,
+            1,
+            (SECTORS - 33) as u64,
+        ));
+        disk
+    }
+
+    fn first_partition_extent(disk: &mut Disk<Cursor<Vec<u8>>>) -> (u64, u64) {
+        let e = disk.gpt_partition(0).expect("entry 0");
+        (e.start_offset(512), e.size_bytes(512))
+    }
+
+    #[test]
+    fn intact_disk_uses_the_primary_header() {
+        let mut disk = Disk::new(Cursor::new(gpt_disk())).expect("open");
+        assert!(matches!(
+            disk.layout(),
+            DiskLayout::Gpt {
+                from_backup: false,
+                ..
+            }
+        ));
+        assert_eq!(first_partition_extent(&mut disk), (8 * 512, 8 * 512));
+    }
+
+    #[test]
+    fn wiped_front_falls_back_to_the_backup_header() {
+        // Zero the whole first track: MBR, primary header, primary entries.
+        let mut image = gpt_disk();
+        image[..SECTOR * 34].fill(0);
+        let mut disk = Disk::new(Cursor::new(image)).expect("open");
+        assert!(
+            matches!(
+                disk.layout(),
+                DiskLayout::Gpt {
+                    from_backup: true,
+                    ..
+                }
+            ),
+            "backup header must be found: {:?}",
+            disk.layout()
+        );
+        assert_eq!(disk.partition_count(), 4);
+        assert_eq!(first_partition_extent(&mut disk), (8 * 512, 8 * 512));
+    }
+
+    #[test]
+    fn protective_mbr_with_dead_primary_header_uses_the_backup() {
+        // Only LBA 1..=33 wiped; the protective MBR survives, which used to
+        // classify as an MBR disk with a single 0xEE partition.
+        let mut image = gpt_disk();
+        image[SECTOR..SECTOR * 34].fill(0);
+        let disk = Disk::new(Cursor::new(image)).expect("open");
+        assert!(matches!(
+            disk.layout(),
+            DiskLayout::Gpt {
+                from_backup: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_corrupt_backup_header_is_not_trusted() {
+        let mut image = gpt_disk();
+        image[..SECTOR * 34].fill(0);
+        // Flip a byte inside the backup header's covered region: the CRC no
+        // longer matches, so it must be rejected rather than half-trusted.
+        let backup_header = SECTOR * (SECTORS - 1);
+        image[backup_header + 40] ^= 0x01;
+        let disk = Disk::new(Cursor::new(image)).expect("open");
+        assert!(matches!(disk.layout(), DiskLayout::Unknown));
     }
 }
