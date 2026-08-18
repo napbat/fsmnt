@@ -98,6 +98,7 @@ pub use fsmnt_drivers as drivers;
 pub use fsmnt_proxy as proxy;
 
 mod backend;
+mod ext_backup;
 mod fstab_mount;
 mod image_layout;
 
@@ -197,7 +198,8 @@ pub enum OpenImageError {
     /// and present an empty volume, so it is refused with the group number
     /// as a hint that the real start is earlier.
     #[error(
-        "offset {offset} in {path:?} holds an ext backup superblock (block group {group}), not the start of a filesystem; the primary lies earlier — list partitions with `fsmnt partitions {}`",
+        "offset {offset} in {path:?} holds an ext backup superblock (block group {group}); {} — mount that, or list partitions with `fsmnt partitions {}`",
+        primary_location(*filesystem_start),
         path.display()
     )]
     ExtBackupSuperblock {
@@ -207,6 +209,31 @@ pub enum OpenImageError {
         offset: u64,
         /// Block group the backup superblock belongs to.
         group: u16,
+        /// Where the filesystem this copy belongs to begins, computed from
+        /// the geometry the copy itself records. `None` when that geometry
+        /// places the start before the beginning of the media, which means
+        /// the copy is stale or coincidental rather than a backup of a
+        /// filesystem living here.
+        filesystem_start: Option<u64>,
+    },
+    /// Nothing is readable at the selected offset, but an ext backup
+    /// superblock one block group in says a filesystem starts there.
+    ///
+    /// The offset was right and its primary metadata is destroyed —
+    /// zeroed, overwritten, or simply never copied by a partial imaging
+    /// run. The volume is still openable from the copy.
+    #[error(
+        "no filesystem at offset {offset} in {path:?}, but an ext backup superblock for it exists at {backup_offset} (group {group}); retry with `--backup-superblock {group}`"
+    )]
+    ExtPrimaryDamaged {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Decoded-media offset whose primary metadata is unreadable.
+        offset: u64,
+        /// Block group holding the usable copy.
+        group: u32,
+        /// Decoded-media offset of that copy.
+        backup_offset: u64,
     },
     /// Reading or classifying the selected boot sector failed.
     #[error("failed to detect a filesystem at offset {offset} in {path:?}: {source}")]
@@ -232,6 +259,15 @@ pub enum OpenImageError {
         #[source]
         source: FsError,
     },
+}
+
+/// Phrase naming where a filesystem starts, for
+/// [`OpenImageError::ExtBackupSuperblock`].
+fn primary_location(filesystem_start: Option<u64>) -> String {
+    filesystem_start.map_or_else(
+        || "the primary lies earlier".to_string(),
+        |start| format!("the filesystem starts at offset {start}"),
+    )
 }
 
 /// Location and filesystem-root choices for opening a disk image.
@@ -296,8 +332,8 @@ impl ImageOpenOptions {
         self
     }
 
-    /// Replace every filesystem-level option (root selector, journal replay)
-    /// with `filesystem` at once.
+    /// Replace every filesystem-level option (root selector, journal
+    /// replay, backup-superblock group, salvage) with `filesystem` at once.
     #[must_use]
     pub fn with_filesystem_options(mut self, filesystem: FilesystemOpenOptions) -> Self {
         self.filesystem = filesystem;
@@ -401,24 +437,44 @@ pub fn open_image_with_options(
             detected,
         });
     }
+    let detected = ext_backup::detection_with_backup_request(detected, &filesystem);
     if detected == DetectedBootSector::Unknown {
         // Detection refuses ext backup superblocks; say so precisely rather
         // than "no filesystem driver for Unknown" — the offset came from a
         // magic-number scan more often than not, and the group number tells
         // the user how far back the real start is.
         let backup =
-            fsmnt_device::ext_backup_superblock_at(&mut image, offset).map_err(|source| {
+            fsmnt_device::ext_backup_superblock_info_at(&mut image, offset).map_err(|source| {
                 OpenImageError::Detection {
                     path: path.to_path_buf(),
                     offset,
                     source,
                 }
             })?;
-        if let Some(group) = backup {
+        if let Some(info) = backup {
             return Err(OpenImageError::ExtBackupSuperblock {
                 path: path.to_path_buf(),
                 offset,
-                group,
+                group: info.group,
+                filesystem_start: info.filesystem_start(offset),
+            });
+        }
+        // Not a copy either — but the primary metadata of a filesystem
+        // that really does start here may simply be destroyed, in which
+        // case its own group-1 backup is still standing one block group
+        // in and names this offset as its start.
+        let recoverable = ext_backup::find_group_one_backup(&mut image, offset, size_bytes)
+            .map_err(|source| OpenImageError::Detection {
+                path: path.to_path_buf(),
+                offset,
+                source,
+            })?;
+        if let Some(backup_offset) = recoverable {
+            return Err(OpenImageError::ExtPrimaryDamaged {
+                path: path.to_path_buf(),
+                offset,
+                group: 1,
+                backup_offset,
             });
         }
     }
@@ -518,8 +574,8 @@ impl PartitionOpenOptions {
         self
     }
 
-    /// Replace every filesystem-level option (root selector, journal replay)
-    /// with `filesystem` at once.
+    /// Replace every filesystem-level option (root selector, journal
+    /// replay, backup-superblock group, salvage) with `filesystem` at once.
     #[must_use]
     pub fn with_filesystem_options(mut self, filesystem: FilesystemOpenOptions) -> Self {
         self.filesystem = filesystem;
@@ -906,6 +962,7 @@ fn open_devices(
         devices.primary_mut().reader_mut(),
         std::io::SeekFrom::Start(0),
     )?;
+    let detected = ext_backup::detection_with_backup_request(detected, filesystem);
     let opened = drivers.open_devices_with_options_resolved(devices, detected, filesystem)?;
 
     Ok(OpenedPartition {

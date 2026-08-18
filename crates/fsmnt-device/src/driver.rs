@@ -112,16 +112,20 @@ fn invalid_root_selector(value: &str) -> FilesystemRootParseError {
 pub struct FilesystemOpenOptions {
     root: FilesystemRoot,
     journal_replay: bool,
+    ext_backup_superblock: Option<u32>,
+    salvage: bool,
 }
 
 impl FilesystemOpenOptions {
     /// Create options using the driver's default filesystem root, with
-    /// journal replay enabled.
+    /// journal replay enabled, from the primary metadata, without salvage.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             root: FilesystemRoot::Default,
             journal_replay: true,
+            ext_backup_superblock: None,
+            salvage: false,
         }
     }
 
@@ -153,10 +157,55 @@ impl FilesystemOpenOptions {
         &self.root
     }
 
+    /// Open the volume from the backup copy of its metadata kept in block
+    /// group `group`, instead of the primary copy at the start.
+    ///
+    /// This is ext-specific — ext2/3/4 are the formats in this stack that
+    /// replicate their superblock and group-descriptor table into later
+    /// block groups (`sparse_super` puts copies in groups 1, 3, 5, 7, 9,
+    /// 25, …), and it is the same escape hatch `e2fsck -b` offers when the
+    /// primary is unreadable. Drivers for other formats reject a request
+    /// they cannot honour rather than silently opening the primary.
+    /// `None` (the default) means "use the primary".
+    #[must_use]
+    pub const fn with_ext_backup_superblock(mut self, group: Option<u32>) -> Self {
+        self.ext_backup_superblock = group;
+        self
+    }
+
+    /// Whether the driver should recover what it can from a filesystem
+    /// whose directory tree is damaged, missing, or beyond the end of a
+    /// truncated image.
+    ///
+    /// Without it a driver may refuse to open a volume it cannot present
+    /// coherently — an empty-looking mount reads as "no data", which in a
+    /// forensic context is worse than an error. With it the driver opens
+    /// anyway and exposes whatever it can still reach, which for ext means
+    /// an extra top-level directory of files found by walking the inode
+    /// tables. Drivers with no salvage mode reject the request.
+    #[must_use]
+    pub const fn with_salvage(mut self, salvage: bool) -> Self {
+        self.salvage = salvage;
+        self
+    }
+
     /// Whether journal replay into an overlay is permitted.
     #[must_use]
     pub const fn journal_replay(&self) -> bool {
         self.journal_replay
+    }
+
+    /// Block group whose backup metadata copy should be used in place of
+    /// the primary, if one was requested.
+    #[must_use]
+    pub const fn ext_backup_superblock(&self) -> Option<u32> {
+        self.ext_backup_superblock
+    }
+
+    /// Whether damaged-tree salvage was requested.
+    #[must_use]
+    pub const fn salvage(&self) -> bool {
+        self.salvage
     }
 }
 
@@ -340,12 +389,15 @@ pub trait FilesystemDriver: Send + Sync {
     /// [`FilesystemOpenOptions::journal_replay`]: a driver that never
     /// replays a journal already presents the on-disk state, so declining
     /// replay changes nothing. Drivers that do replay (ext) override this
-    /// method to honour it.
+    /// method to honour it. The recovery options that select *different*
+    /// metadata — [`FilesystemOpenOptions::ext_backup_superblock`] and
+    /// [`FilesystemOpenOptions::salvage`] — are rejected rather than
+    /// ignored, so a user never mistakes a plain mount for a recovered one.
     ///
     /// # Errors
     ///
     /// Returns an error when this driver does not support the requested root
-    /// selector or opening fails.
+    /// selector or recovery options, or when opening fails.
     fn open_with_options(
         &self,
         reader: Box<dyn DeviceReader>,
@@ -355,6 +407,7 @@ pub trait FilesystemDriver: Send + Sync {
         if options.root() != &FilesystemRoot::Default {
             return Err(unsupported_root(self.name(), options.root()));
         }
+        reject_unsupported_recovery(self.name(), options)?;
         self.open(reader, detected)
     }
 
@@ -410,6 +463,33 @@ fn unsupported_root(driver: &str, root: &FilesystemRoot) -> FsError {
     FsError::Filesystem(format!(
         "filesystem driver {driver:?} does not support root selector {root:?}"
     ))
+}
+
+/// Reject the recovery options a driver cannot honour.
+///
+/// Unlike [`FilesystemOpenOptions::journal_replay`], which a driver that
+/// never replays satisfies by doing nothing, these two change *what gets
+/// opened*. Ignoring them would hand back an ordinary primary-metadata
+/// mount while the user believes they are looking at a recovered one.
+///
+/// # Errors
+///
+/// Returns an error when a backup-metadata copy or salvage mode was
+/// requested of a driver that implements neither.
+pub fn reject_unsupported_recovery(driver: &str, options: &FilesystemOpenOptions) -> FsResult<()> {
+    if let Some(group) = options.ext_backup_superblock() {
+        return Err(FsError::Filesystem(format!(
+            "filesystem driver {driver:?} cannot open from the backup metadata in block group \
+             {group}; backup superblocks are an ext2/3/4 feature"
+        )));
+    }
+    if options.salvage() {
+        return Err(FsError::Filesystem(format!(
+            "filesystem driver {driver:?} has no salvage mode; --salvage recovers files from ext \
+             volumes whose directory tree is damaged"
+        )));
+    }
+    Ok(())
 }
 
 /// An ordered collection of [`FilesystemDriver`]s.
@@ -691,6 +771,45 @@ mod tests {
 
         let reader = Box::new(std::io::Cursor::new(vec![0u8; 512]));
         assert!(registry.open(reader, DetectedBootSector::Ntfs).is_ok());
+    }
+
+    #[test]
+    fn a_driver_without_recovery_support_rejects_it_rather_than_ignoring_it() {
+        let mut registry = DriverRegistry::new();
+        registry.register(Box::new(NullDriver));
+
+        // Both options change which metadata is read, so silently opening
+        // the primary instead would misrepresent what was mounted.
+        for (options, expected) in [
+            (
+                FilesystemOpenOptions::new().with_ext_backup_superblock(Some(1)),
+                "block group 1",
+            ),
+            (FilesystemOpenOptions::new().with_salvage(true), "salvage"),
+        ] {
+            let reader = Box::new(std::io::Cursor::new(vec![0u8; 512]));
+            let Err(error) = registry.open_with_options(reader, DetectedBootSector::Ntfs, &options)
+            else {
+                panic!("driver {:?} must reject {options:?}", "null");
+            };
+            let message = error.to_string();
+            assert!(
+                message.contains("null") && message.contains(expected),
+                "unexpected error: {message}",
+            );
+        }
+
+        // The default options still open normally.
+        let reader = Box::new(std::io::Cursor::new(vec![0u8; 512]));
+        assert!(
+            registry
+                .open_with_options(
+                    reader,
+                    DetectedBootSector::Ntfs,
+                    &FilesystemOpenOptions::new()
+                )
+                .is_ok()
+        );
     }
 
     #[test]

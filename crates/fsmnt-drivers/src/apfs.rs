@@ -20,6 +20,7 @@ use fs_apfs::{
 use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
 use fsmnt_device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
+    reject_unsupported_recovery,
 };
 
 use crate::identity;
@@ -390,6 +391,7 @@ impl FilesystemDriver for ApfsDriver {
         _detected: DetectedBootSector,
         options: &FilesystemOpenOptions,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
+        reject_unsupported_recovery(self.name(), options)?;
         Ok(Box::new(ApfsFilesystem::open(
             reader,
             &requested_volume(options.root())?,

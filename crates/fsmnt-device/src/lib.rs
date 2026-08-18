@@ -43,7 +43,7 @@ mod tolerant_reader;
 
 pub use detection::{
     detect_backup_boot_sector_at, detect_boot_sector_at, detect_boot_sector_within,
-    ext_backup_superblock_at,
+    ext_backup_superblock_at, ext_backup_superblock_info_at,
 };
 pub use disk::{Disk, DiskLayout};
 pub use drive::{
@@ -53,14 +53,14 @@ pub use drive::{
 pub use driver::{
     DeviceReader, DriverRegistry, FilesystemDriver, FilesystemMemberDiscovery, FilesystemMemberId,
     FilesystemOpenOptions, FilesystemRoot, FilesystemRootParseError, ResolvedFilesystem,
-    ResolvedMemberDiscovery,
+    ResolvedMemberDiscovery, reject_unsupported_recovery,
 };
 pub use fsmnt_parser_core::boot_sector::{
     BOOT_SECTOR_SIZE, BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_MAGIC,
     BTRFS_SUPERBLOCK_PROBE_SIZE, BootSectorDiagnosis, BootSectorHeader, BootSectorUnknownReason,
-    DetectedBootSector, DosBpb, ExFatBootSector, FS_DETECT_PROBE_SIZE, Fat16Ebpb, Fat32Ebpb,
-    FilesystemType, NtfsEbpb, ParseError, ParsedBootSector, diagnose_boot_sector,
-    is_btrfs_primary_superblock, parse_boot_sector,
+    DetectedBootSector, DosBpb, ExFatBootSector, ExtBackupSuperblock, FS_DETECT_PROBE_SIZE,
+    Fat16Ebpb, Fat32Ebpb, FilesystemType, NtfsEbpb, ParseError, ParsedBootSector,
+    diagnose_boot_sector, is_btrfs_primary_superblock, parse_boot_sector,
 };
 pub use fsmnt_parser_core::partition::{
     GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry, read_gpt_header,

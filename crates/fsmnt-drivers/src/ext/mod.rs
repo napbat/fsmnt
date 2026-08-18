@@ -7,8 +7,15 @@
 //! Dirty-image recovery (journal replay, then orphan-inode processing) is
 //! handled inside the adapter, so callers always receive a handle onto the
 //! post-recovery filesystem state.
+//!
+//! Two damaged-media modes sit alongside that: [`backup`] opens a volume
+//! through the metadata copy kept in a later block group when the primary
+//! copy is unreadable, and [`salvage`] recovers file content by sweeping
+//! the inode tables when the directory tree is not usable.
 
+mod backup;
 mod dir;
+mod salvage;
 
 use std::io;
 
@@ -37,6 +44,36 @@ pub struct ExtFilesystem<R: Read + Seek + Send> {
     reader: R,
     ext: Ext,
     overlay: Overlay,
+    /// Whether the damaged-tree recovery view is active.
+    salvage: bool,
+    /// Sweep results, filled the first time the salvage directory is
+    /// listed. Walking every inode table costs one pass over the metadata,
+    /// so a mount that never opens the directory never pays for it.
+    salvaged: Option<Vec<salvage::SalvagedInode>>,
+}
+
+/// What a path names inside the mounted volume.
+enum Target {
+    /// The mount root, which salvage mode treats specially.
+    Root,
+    /// An inode reached through the directory tree, or directly by number
+    /// under the salvage directory.
+    Inode(u32),
+    /// The synthetic salvage directory itself. It has no inode: its
+    /// entries are produced by sweeping the inode tables.
+    SalvageRoot,
+}
+
+impl Target {
+    /// The inode backing this target, or `None` for the synthetic salvage
+    /// directory.
+    const fn inode(&self) -> Option<u32> {
+        match self {
+            Self::Root => Some(EXT4_ROOT_INO),
+            Self::Inode(inum) => Some(*inum),
+            Self::SalvageRoot => None,
+        }
+    }
 }
 
 /// Which replay artifact, if any, serves overlay reads.
@@ -145,6 +182,19 @@ fn map_ext_error(e: ExtError, path: &str) -> FsError {
     }
 }
 
+/// Map a failure from the recovery path, naming the stage and the way out.
+///
+/// Everything this covers happens because the volume was dirty and replay
+/// was attempted. A missing, truncated or unparsable journal is the common
+/// cause, and the on-disk view is then still perfectly readable — so the
+/// error says so rather than leaving the caller with a volume that simply
+/// refuses to open.
+fn map_replay_error(e: &ExtError, stage: &str) -> FsError {
+    FsError::Filesystem(format!(
+        "{stage} failed: {e}; retry with --no-journal-replay to present the on-disk state"
+    ))
+}
+
 impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// Open an ext2/ext3/ext4 volume from `reader`.
     ///
@@ -163,17 +213,65 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// open still fails (e.g. an unsupported incompatible feature flag).
     pub fn new(mut reader: R) -> FsResult<Self> {
         let mut fs = match Ext::new(&mut reader) {
-            Ok(ext) => Self {
-                reader,
-                ext,
-                overlay: Overlay::Clean,
-            },
+            Ok(ext) => Self::from_parts(reader, ext, Overlay::Clean),
             Err(ExtError::NeedsRecovery | ExtError::OrphanRecoveryRequired) => {
                 Self::recover(reader)?
             }
             Err(e) => return Err(map_ext_error(e, "<open>")),
         };
         fs.check_root_directory()?;
+        Ok(fs)
+    }
+
+    /// Assemble a handle in the default (non-salvage) view.
+    fn from_parts(reader: R, ext: Ext, overlay: Overlay) -> Self {
+        Self {
+            reader,
+            ext,
+            overlay,
+            salvage: false,
+            salvaged: None,
+        }
+    }
+
+    /// Open an ext2/ext3/ext4 volume in **salvage** mode: recover what the
+    /// metadata still reaches instead of refusing a volume whose directory
+    /// tree is unusable.
+    ///
+    /// A superblock and group-descriptor table are still required — without
+    /// them nothing can be located at all — but the root directory is not.
+    /// Three things change relative to [`Self::new`]:
+    ///
+    /// 1. The open no longer fails when the root cannot be listed, and the
+    ///    root then presents as an empty directory rather than an error.
+    /// 2. A synthetic top-level directory
+    ///    ([`.fsmnt-salvage`](salvage::SALVAGE_DIR)) appears, listing every
+    ///    in-use inode found by sweeping the readable block groups as
+    ///    `inode-<N>`.
+    /// 3. Directories among those are enterable, which recovers the real
+    ///    names of everything below any surviving directory.
+    ///
+    /// `journal_replay` selects the same view as it does for the ordinary
+    /// constructors: replayed (`true`) or exactly as it sits on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the superblock or group descriptors cannot be
+    /// parsed, or if requested replay fails.
+    pub fn new_salvaging(mut reader: R, journal_replay: bool) -> FsResult<Self> {
+        let mut fs = if journal_replay {
+            match Ext::new(&mut reader) {
+                Ok(ext) => Self::from_parts(reader, ext, Overlay::Clean),
+                Err(ExtError::NeedsRecovery | ExtError::OrphanRecoveryRequired) => {
+                    Self::recover(reader)?
+                }
+                Err(e) => return Err(map_ext_error(e, "<open>")),
+            }
+        } else {
+            let ext = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<open>"))?;
+            Self::from_parts(reader, ext, Overlay::Unreplayed)
+        };
+        fs.salvage = true;
         Ok(fs)
     }
 
@@ -194,11 +292,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// descriptors are invalid, or if the root directory is unusable.
     pub fn new_without_replay(mut reader: R) -> FsResult<Self> {
         let ext = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<open>"))?;
-        let mut fs = Self {
-            reader,
-            ext,
-            overlay: Overlay::Unreplayed,
-        };
+        let mut fs = Self::from_parts(reader, ext, Overlay::Unreplayed);
         fs.check_root_directory()?;
         Ok(fs)
     }
@@ -216,6 +310,10 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// context "mounted, empty" is easily misread as "no data"; refusing to
     /// open with a pointed message is the safer outcome, and after this
     /// check a successful mount guarantees that at least the root lists.
+    ///
+    /// [`Self::new_salvaging`] skips this check: recovering the files a
+    /// damaged volume still holds is precisely the case this refusal
+    /// otherwise blocks.
     fn check_root_directory(&mut self) -> FsResult<()> {
         // The inode borrows `ext`, so decide inside the closure and hand
         // out only an owned verdict.
@@ -254,9 +352,9 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// Run journal (and, if still needed, orphan) replay, then strict-open
     /// through the resulting overlay.
     fn recover(mut reader: R) -> FsResult<Self> {
-        let lenient = Ext::open_lenient(&mut reader).map_err(|e| map_ext_error(e, "<lenient>"))?;
+        let lenient = Ext::open_lenient(&mut reader).map_err(|e| map_replay_error(&e, "open"))?;
         let journal = JournalReplay::build(&lenient, &mut reader)
-            .map_err(|e| map_ext_error(e, "<journal>"))?;
+            .map_err(|e| map_replay_error(&e, "journal replay"))?;
 
         let strict_attempt = {
             let mut or = OverlayReader::new(&mut reader, &journal);
@@ -264,52 +362,64 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         };
 
         match strict_attempt {
-            Ok(ext) => Ok(Self {
-                reader,
-                ext,
-                overlay: Overlay::Journal(journal),
-            }),
+            Ok(ext) => Ok(Self::from_parts(reader, ext, Overlay::Journal(journal))),
             Err(ExtError::OrphanRecoveryRequired) => {
                 // Parse a lenient Ext through the journal overlay so the
                 // orphan stage consumes the post-journal metadata snapshot.
                 let post_journal_lenient = {
                     let mut or = OverlayReader::new(&mut reader, &journal);
                     Ext::open_lenient(&mut or)
-                        .map_err(|e| map_ext_error(e, "<post-journal-lenient>"))?
+                        .map_err(|e| map_replay_error(&e, "reopening after journal replay"))?
                 };
                 let orphan = OrphanReplay::build(journal, &post_journal_lenient, &mut reader)
-                    .map_err(|e| map_ext_error(e, "<orphan>"))?;
+                    .map_err(|e| map_replay_error(&e, "orphan replay"))?;
                 let ext = {
                     let mut or = OverlayReader::new(&mut reader, &orphan);
-                    Ext::new(&mut or).map_err(|e| map_ext_error(e, "<strict-orphan>"))?
+                    Ext::new(&mut or)
+                        .map_err(|e| map_replay_error(&e, "reopening after orphan replay"))?
                 };
-                Ok(Self {
-                    reader,
-                    ext,
-                    overlay: Overlay::Orphan(orphan),
-                })
+                Ok(Self::from_parts(reader, ext, Overlay::Orphan(orphan)))
             }
-            Err(e) => Err(map_ext_error(e, "<strict-journal>")),
+            Err(e) => Err(map_replay_error(&e, "reopening after journal replay")),
         }
     }
 
-    /// Resolve a path to its inode number.
+    /// Resolve a path to what it names.
     ///
-    /// Returns [`EXT4_ROOT_INO`] for an empty or root-only path.
-    fn navigate_to_inode(&mut self, path: &str) -> FsResult<u32> {
+    /// Returns [`Target::Root`] for an empty or root-only path. In salvage
+    /// mode a path under [`salvage::SALVAGE_DIR`] is resolved by inode
+    /// number instead of by directory lookup, and anything below that entry
+    /// is then walked normally — which is what makes a surviving directory
+    /// browsable under its real names.
+    fn resolve(&mut self, path: &str) -> FsResult<Target> {
         let stack = canonicalise_ext_path(path);
-        if stack.is_empty() {
-            return Ok(EXT4_ROOT_INO);
+        let Some((first, rest)) = stack.split_first() else {
+            return Ok(Target::Root);
+        };
+        if self.salvage && *first == salvage::SALVAGE_DIR {
+            let Some((entry, below)) = rest.split_first() else {
+                return Ok(Target::SalvageRoot);
+            };
+            let inum =
+                salvage::name_inode(entry).ok_or_else(|| FsError::NotFound(path.to_string()))?;
+            return self.walk(inum, below, path).map(Target::Inode);
         }
+        self.walk(EXT4_ROOT_INO, &stack, path).map(Target::Inode)
+    }
 
+    /// Walk `components` down from the directory inode `start`.
+    fn walk(&mut self, start: u32, components: &[&str], path: &str) -> FsResult<u32> {
+        if components.is_empty() {
+            return Ok(start);
+        }
         self.with_reader(|ext, reader| -> FsResult<u32> {
-            let mut current_inum = EXT4_ROOT_INO;
-            for (idx, component) in stack.iter().enumerate() {
+            let mut current_inum = start;
+            for (idx, component) in components.iter().enumerate() {
                 let mut dir = ext.directory_at(current_inum);
                 let entry = dir
                     .lookup(reader, component.as_bytes())
                     .map_err(|e| map_ext_error(e, path))?;
-                let is_last = idx == stack.len() - 1;
+                let is_last = idx == components.len() - 1;
                 if !is_last && !matches!(entry.kind, EntryKind::Directory) {
                     return Err(FsError::NotADirectory(path.to_string()));
                 }
@@ -317,6 +427,23 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             }
             Ok(current_inum)
         })
+    }
+
+    /// Resolve `path` to an inode, treating the synthetic salvage
+    /// directory as "not a file" for the callers that need one.
+    fn resolve_inode(&mut self, path: &str) -> FsResult<u32> {
+        self.resolve(path)?
+            .inode()
+            .ok_or_else(|| FsError::NotAFile(path.to_string()))
+    }
+
+    /// The sweep results, running the sweep on first use.
+    fn salvaged(&mut self) -> &[salvage::SalvagedInode] {
+        if self.salvaged.is_none() {
+            let found = self.with_reader(|ext, reader| salvage::sweep(ext, reader));
+            self.salvaged = Some(found);
+        }
+        self.salvaged.as_deref().unwrap_or_default()
     }
 
     /// Run `f` with a reader view that routes through the active overlay.
@@ -347,7 +474,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
 
 impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-        let inum = self.navigate_to_inode(path)?;
+        let inum = self.resolve_inode(path)?;
         self.with_reader(|ext, reader| -> FsResult<Vec<u8>> {
             let inode = ext
                 .inode(reader, inum)
@@ -366,12 +493,16 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        found(self.navigate_to_inode(path))
+        found(self.resolve(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
-        let inum = match self.navigate_to_inode(path) {
-            Ok(i) => i,
+        let inum = match self.resolve(path) {
+            Ok(target) => match target.inode() {
+                Some(inum) => inum,
+                // The salvage directory is synthetic but is a directory.
+                None => return Ok(true),
+            },
             Err(FsError::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
         };
@@ -384,8 +515,11 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
-        let inum = match self.navigate_to_inode(path) {
-            Ok(i) => i,
+        let inum = match self.resolve(path) {
+            Ok(target) => match target.inode() {
+                Some(inum) => inum,
+                None => return Ok(false),
+            },
             Err(FsError::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
         };
@@ -398,7 +532,9 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
-        let inum = self.navigate_to_inode(path)?;
+        let Some(inum) = self.resolve(path)?.inode() else {
+            return Ok(salvage::directory_metadata());
+        };
         self.with_reader(|ext, reader| -> FsResult<FsMetadata> {
             let inode = ext
                 .inode(reader, inum)
@@ -418,7 +554,31 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     }
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
-        let inum = self.navigate_to_inode(path)?;
+        let target = self.resolve(path)?;
+        let inum = match target {
+            Target::SalvageRoot => {
+                let found = salvage::listing(self.salvaged(), path);
+                return Ok(found);
+            }
+            Target::Root => {
+                let listed =
+                    self.with_reader(|ext, reader| dir::list(ext, reader, EXT4_ROOT_INO, path));
+                if !self.salvage {
+                    return listed;
+                }
+                // Salvage mode is entered precisely because the tree may be
+                // unusable, so an unlistable root is expected rather than
+                // an error — and the salvage directory is what the caller
+                // came for. A real entry of the same name would be shadowed
+                // by path resolution anyway, so it is dropped rather than
+                // listed twice.
+                let mut entries = listed.unwrap_or_default();
+                entries.retain(|entry| entry.name != salvage::SALVAGE_DIR);
+                entries.push(salvage::directory_entry(path));
+                return Ok(entries);
+            }
+            Target::Inode(inum) => inum,
+        };
         self.with_reader(|ext, reader| dir::list(ext, reader, inum, path))
     }
 
@@ -456,13 +616,18 @@ impl FilesystemDriver for ExtDriver {
     }
 
     /// ext has a single root, so only [`FilesystemRoot::Default`] is
-    /// accepted; [`FilesystemOpenOptions::journal_replay`] selects between
-    /// the recovered view ([`ExtFilesystem::new`]) and the raw on-disk view
-    /// ([`ExtFilesystem::new_without_replay`]).
+    /// accepted. The remaining options all pick a *view* of the same
+    /// bytes: [`FilesystemOpenOptions::journal_replay`] chooses between the
+    /// recovered view ([`ExtFilesystem::new`]) and the raw on-disk view
+    /// ([`ExtFilesystem::new_without_replay`]);
+    /// [`FilesystemOpenOptions::ext_backup_superblock`] reads the metadata
+    /// from a later block group's backup copy instead of the primary; and
+    /// [`FilesystemOpenOptions::salvage`] opens a volume whose directory
+    /// tree is unusable ([`ExtFilesystem::new_salvaging`]).
     fn open_with_options(
         &self,
         reader: Box<dyn DeviceReader>,
-        detected: DetectedBootSector,
+        _detected: DetectedBootSector,
         options: &FilesystemOpenOptions,
     ) -> FsResult<Box<dyn TargetFilesystem>> {
         if options.root() != &FilesystemRoot::Default {
@@ -472,11 +637,35 @@ impl FilesystemDriver for ExtDriver {
                 options.root()
             )));
         }
-        if options.journal_replay() {
-            self.open(reader, detected)
-        } else {
-            Ok(Box::new(ExtFilesystem::new_without_replay(reader)?))
+        let replay = options.journal_replay();
+        let salvage = options.salvage();
+        match options.ext_backup_superblock() {
+            Some(group) => open_view(backup::patch_from_backup(reader, group)?, replay, salvage),
+            None => open_view(reader, replay, salvage),
         }
+    }
+}
+
+/// Open `reader` in the view the flags describe.
+///
+/// # Errors
+///
+/// Returns whatever the selected constructor reports.
+fn open_view<R: Read + Seek + Send + 'static>(
+    reader: R,
+    journal_replay: bool,
+    salvage: bool,
+) -> FsResult<Box<dyn TargetFilesystem>> {
+    if salvage {
+        return Ok(Box::new(ExtFilesystem::new_salvaging(
+            reader,
+            journal_replay,
+        )?));
+    }
+    if journal_replay {
+        Ok(Box::new(ExtFilesystem::new(reader)?))
+    } else {
+        Ok(Box::new(ExtFilesystem::new_without_replay(reader)?))
     }
 }
 

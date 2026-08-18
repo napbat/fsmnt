@@ -1352,6 +1352,27 @@ mkfs.ext4 -q \
     ext4-meta-bg.img
 
 # ===================================================================
+# ext4-multigroup.img — 8 MiB, 1 KiB blocks, 1024 blocks per group, so
+# 8 block groups with sparse_super backups in groups 1, 3, 5 and 7.
+# Deliberately NOT meta_bg: the group-descriptor table sits in one run
+# right after each superblock copy, which is the layout the backup-
+# superblock open path copies over the primary. Small enough that a test
+# can hold it in memory and wipe the first 8 KiB.
+# ===================================================================
+echo "==> Building ext4-multigroup.img"
+EXT4_MULTIGROUP_STAGE="$STAGING/ext4-multigroup"
+build_common_tree "$EXT4_MULTIGROUP_STAGE" "ext4-multigroup"
+
+dd if=/dev/zero of=ext4-multigroup.img bs=1M count=8 status=none
+mkfs.ext4 -q \
+    -U "66666666-6666-6666-6666-666666666666" \
+    -b 1024 -g 1024 \
+    -O 'sparse_super,^meta_bg,^resize_inode,extents,metadata_csum,metadata_csum_seed,orphan_file' \
+    -L multigroup \
+    -d "$EXT4_MULTIGROUP_STAGE" \
+    ext4-multigroup.img
+
+# ===================================================================
 # ext4-fscrypt.img -- fscrypt v1 + v2 + v2-casefold encrypted dirs.
 # Requires sudo + losetup + e4crypt (kernel fscrypt support); skipped
 # otherwise. The image is committed to git; this builder regenerates
@@ -2007,13 +2028,13 @@ build_fscrypt_fixture
 # --- summary ---
 echo ""
 echo "Fixtures generated:"
-ls -lh ext2.img ext2-no-filetype.img ext3.img ext4.img ext4-meta-bg.img ext4-quota.img
+ls -lh ext2.img ext2-no-filetype.img ext3.img ext4.img ext4-meta-bg.img ext4-multigroup.img ext4-quota.img
 if [ -f ext4-fscrypt.img ]; then
     ls -lh ext4-fscrypt.img
 fi
 echo ""
 echo "Verifying magic numbers..."
-for img in ext2.img ext2-no-filetype.img ext3.img ext4.img ext4-meta-bg.img ext4-quota.img; do
+for img in ext2.img ext2-no-filetype.img ext3.img ext4.img ext4-meta-bg.img ext4-multigroup.img ext4-quota.img; do
     magic=$(od -A n -t x2 -j 1080 -N 2 "$img" | tr -d ' ')
     echo "  $img magic: 0x$magic"
 done

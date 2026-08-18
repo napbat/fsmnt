@@ -261,3 +261,213 @@ fn registry_rejects_type_with_no_driver() {
         "unexpected error: {err}",
     );
 }
+
+/// Bytes the primary metadata of `ext4-multigroup.img` occupies: 1 KiB
+/// blocks put the superblock in block 1 and its group-descriptor table in
+/// block 2, so wiping the first 8 KiB destroys both (and the bitmaps that
+/// follow) while leaving every backup copy intact.
+const MULTIGROUP_PRIMARY_METADATA: usize = 8192;
+
+#[test]
+fn ext_opens_from_a_backup_superblock_when_the_primary_is_wiped() {
+    let Some(image) = fixture("fs-ext", "ext4-multigroup.img") else {
+        eprintln!("skipping: fs-ext/testdata/ext4-multigroup.img not generated");
+        return;
+    };
+
+    let mut damaged = image;
+    damaged[..MULTIGROUP_PRIMARY_METADATA].fill(0);
+    assert_eq!(
+        detect(&damaged),
+        DetectedBootSector::Unknown,
+        "a wiped primary superblock must not detect as a filesystem",
+    );
+    assert!(
+        default_registry()
+            .open(
+                Box::new(Cursor::new(damaged.clone())),
+                DetectedBootSector::Ext
+            )
+            .is_err(),
+        "the ordinary open reads the primary and must fail",
+    );
+
+    // Group 1 keeps a copy of both the superblock and the descriptor
+    // table, which is enough to locate every inode again.
+    let options = FilesystemOpenOptions::new().with_ext_backup_superblock(Some(1));
+    let mut fs = default_registry()
+        .open_with_options(
+            Box::new(Cursor::new(damaged.clone())),
+            DetectedBootSector::Ext,
+            &options,
+        )
+        .expect("group 1's backup metadata should open the volume");
+    let entries = fs.read_dir("/").expect("root should list from the backup");
+    assert!(
+        entries.iter().any(|entry| entry.name == "hello.txt"),
+        "the recovered root should hold the fixture tree: {:?}",
+        entries.iter().map(|e| &e.name).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        fs.read("/hello.txt").expect("read through the backup open"),
+        b"Hello from ext4-multigroup!\n",
+    );
+
+    // sparse_super keeps copies in groups 1, 3, 5 and 7 only.
+    let options = FilesystemOpenOptions::new().with_ext_backup_superblock(Some(2));
+    let Err(error) = default_registry().open_with_options(
+        Box::new(Cursor::new(damaged)),
+        DetectedBootSector::Ext,
+        &options,
+    ) else {
+        panic!("group 2 holds no backup superblock, so the open must fail");
+    };
+    assert!(
+        error.to_string().contains("no ext backup superblock"),
+        "the failure should name the missing copy: {error}",
+    );
+}
+
+#[test]
+fn ext_meta_bg_opens_from_its_backup_superblock() {
+    let Some(image) = fixture("fs-ext", "ext4-meta-bg.img") else {
+        eprintln!("skipping: fs-ext/testdata/ext4-meta-bg.img not generated");
+        return;
+    };
+
+    // META_BG scatters the descriptor blocks, so only the superblock copy
+    // is patched in; the descriptors are read from where they already are.
+    let options = FilesystemOpenOptions::new().with_ext_backup_superblock(Some(1));
+    let mut fs = default_registry()
+        .open_with_options(
+            Box::new(Cursor::new(image)),
+            DetectedBootSector::Ext,
+            &options,
+        )
+        .expect("group 1's backup superblock should open a META_BG volume");
+    let entries = fs.read_dir("/").expect("root should list");
+    assert!(
+        entries.iter().any(|entry| entry.name == "hello.txt"),
+        "the volume opened through the backup should expose the same tree",
+    );
+}
+
+/// Byte range of the root directory's single data block in `ext4.img`:
+/// 4 KiB blocks, and inode 2's extent points at block 4.
+const EXT4_ROOT_DIRECTORY_BLOCK: std::ops::Range<usize> = 4 * 4096..5 * 4096;
+
+/// Contents of `/hello.txt` in `ext4.img`, used to recognise the file
+/// again once its name is gone.
+const EXT4_HELLO_CONTENT: &[u8] = b"Hello from ext4!\n";
+
+#[test]
+fn ext_salvage_recovers_files_when_the_root_directory_is_gone() {
+    let Some(image) = fixture("fs-ext", "ext4.img") else {
+        eprintln!("skipping: fs-ext/testdata/ext4.img not generated");
+        return;
+    };
+
+    // Destroy the names, keep the data: the shape of a truncated Android
+    // image, whose directories live at the end of the volume.
+    let mut damaged = image;
+    damaged[EXT4_ROOT_DIRECTORY_BLOCK].fill(0);
+
+    let Err(error) = default_registry().open(
+        Box::new(Cursor::new(damaged.clone())),
+        DetectedBootSector::Ext,
+    ) else {
+        panic!("a volume whose root cannot be listed must not open by default");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("root directory cannot be listed"),
+        "unexpected error: {error}",
+    );
+
+    let options = FilesystemOpenOptions::new().with_salvage(true);
+    let mut fs = default_registry()
+        .open_with_options(
+            Box::new(Cursor::new(damaged)),
+            DetectedBootSector::Ext,
+            &options,
+        )
+        .expect("salvage mode should open a volume with an unusable root");
+
+    let root = fs.read_dir("/").expect("the root lists in salvage mode");
+    assert!(
+        root.iter().any(|entry| entry.name == ".fsmnt-salvage"),
+        "salvage mode must advertise its directory: {:?}",
+        root.iter().map(|e| &e.name).collect::<Vec<_>>(),
+    );
+
+    let salvaged = fs
+        .read_dir("/.fsmnt-salvage")
+        .expect("the salvage directory lists");
+    assert!(
+        salvaged.len() > 1,
+        "the sweep should find the fixture's inodes, found {}",
+        salvaged.len(),
+    );
+
+    // hello.txt is unreachable by name, but its bytes come back through
+    // the ordinary inode path under its recovered number.
+    let recovered = salvaged
+        .iter()
+        .filter(|entry| !entry.metadata.is_dir)
+        .find_map(|entry| {
+            let path = format!("/.fsmnt-salvage/{}", entry.name);
+            fs.read(&path)
+                .ok()
+                .filter(|bytes| bytes == EXT4_HELLO_CONTENT)
+        });
+    assert!(
+        recovered.is_some(),
+        "hello.txt's content should be recoverable from the inode sweep",
+    );
+
+    // Directories are recovered too, which restores the real names of
+    // everything below any surviving one.
+    let directory = salvaged
+        .iter()
+        .find(|entry| entry.metadata.is_dir)
+        .expect("the fixture has subdirectories");
+    let listed = fs
+        .read_dir(&format!("/.fsmnt-salvage/{}", directory.name))
+        .expect("a recovered directory should list");
+    assert!(
+        listed.iter().all(|entry| entry.name != "."),
+        "`.` and `..` stay filtered inside salvage listings",
+    );
+}
+
+/// Byte range of the jbd2 superblock in the `ext4.img` family: the journal
+/// (inode 8) begins at physical block 9, with 4 KiB blocks.
+const EXT4_JOURNAL_SUPERBLOCK: std::ops::Range<usize> = 9 * 4096..10 * 4096;
+
+#[test]
+fn ext_replay_failure_points_at_the_no_replay_view() {
+    let Some(image) = fixture("fs-ext", "ext4-dirty-orphan.img") else {
+        eprintln!("skipping: fs-ext/testdata/ext4-dirty-orphan.img not generated");
+        return;
+    };
+
+    // The fixture is dirty, so opening it attempts replay. Destroy the
+    // jbd2 superblock and replay has nothing to work from — while the
+    // on-disk view remains perfectly readable.
+    let mut damaged = image;
+    damaged[EXT4_JOURNAL_SUPERBLOCK].fill(0xFF);
+
+    let Err(error) = ExtFilesystem::new(Cursor::new(damaged.clone())) else {
+        panic!("replay cannot succeed without a journal");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("--no-journal-replay"),
+        "a replay failure should name the view that still works: {message}",
+    );
+
+    let mut raw = ExtFilesystem::new_without_replay(Cursor::new(damaged))
+        .expect("the on-disk view is unaffected by the broken journal");
+    assert!(raw.try_is_dir("/").expect("root should stat"));
+}
