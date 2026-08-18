@@ -12,8 +12,6 @@
 //! Hole blocks (zero-filled by the underlying mapper) are NOT
 //! decrypted — kernel zero-fills holes before the crypto pass.
 
-#![cfg(feature = "fscrypt")]
-
 use alloc::boxed::Box;
 
 use aes::Aes256;
@@ -28,9 +26,12 @@ use sm4::Sm4;
 use xts_mode::Xts128;
 use zeroize::Zeroizing;
 
-use crate::error::{ExtError, Result};
-use crate::fscrypt::adiantum::{ADIANTUM_KEY_SIZE, ADIANTUM_TWEAK_SIZE, AdiantumCipher};
-use crate::fscrypt::types::{
+use crate::adiantum::{ADIANTUM_KEY_SIZE, ADIANTUM_TWEAK_SIZE, AdiantumCipher};
+use crate::error::{FscryptError, Result};
+use crate::keyderive::derive_file_key;
+use crate::keystore::FscryptKeystore;
+use crate::params::FsParams;
+use crate::types::{
     FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_256_XTS,
     FSCRYPT_MODE_SM4_XTS, FscryptPolicy, IvDerivation, mode_keysize,
 };
@@ -70,20 +71,32 @@ impl ContentCipher {
     /// caller: fs block size for default policies, `1 <<
     /// policy.log2_data_unit_size` for sub-block policies. Callers must
     /// pass blocks whose length is a multiple of `data_unit_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FscryptError::UnsupportedMode`] when `contents_mode`
+    /// names a cipher this crate does not implement, and
+    /// [`FscryptError::InvalidPolicy`] when `key` is the wrong length
+    /// for the mode.
+    ///
+    /// # Panics
+    ///
+    /// The per-mode key installs cannot fail once the length check
+    /// above has passed, so their `expect`s are unreachable.
     pub fn with_iv(
         policy: &FscryptPolicy,
         key: &[u8],
         iv: IvDerivation,
         data_unit_size: usize,
     ) -> Result<Self> {
-        let want = mode_keysize(policy.contents_mode).ok_or(ExtError::UnsupportedFscryptMode {
+        let want = mode_keysize(policy.contents_mode).ok_or(FscryptError::UnsupportedMode {
             inode: 0,
             contents: policy.contents_mode,
             filenames: policy.filenames_mode,
             flags: policy.flags,
         })?;
         if key.len() != want {
-            return Err(ExtError::InvalidFscryptPolicy {
+            return Err(FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "content key length does not match mode",
             });
@@ -145,7 +158,7 @@ impl ContentCipher {
                     data_unit_size,
                 })
             }
-            other => Err(ExtError::UnsupportedFscryptMode {
+            other => Err(FscryptError::UnsupportedMode {
                 inode: 0,
                 contents: other,
                 filenames: policy.filenames_mode,
@@ -165,16 +178,29 @@ impl ContentCipher {
     /// chunks with absolute unit index
     /// `block_index * (block.len() / data_unit_size) + i` driving each
     /// chunk's tweak.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FscryptError::InvalidPolicy`] when `block.len()` is not
+    /// a multiple of the data-unit size, when AES-128-CBC-ESSIV is
+    /// handed a data-unit size that is not a multiple of the AES block,
+    /// or when the absolute data-unit index would overflow.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the absolute data-unit index exceeds `u64::MAX` — which
+    /// needs a file larger than 2^64 data units, beyond any filesystem
+    /// fscrypt runs on.
     pub fn decrypt_block(&self, block: &mut [u8], block_index: u128) -> Result<()> {
         if !block.len().is_multiple_of(self.data_unit_size) {
-            return Err(ExtError::InvalidFscryptPolicy {
+            return Err(FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "encrypted block length is not a multiple of the data unit size",
             });
         }
         let units_per_block = block.len() / self.data_unit_size;
         let first_unit_index = block_index.checked_mul(units_per_block as u128).ok_or(
-            ExtError::InvalidFscryptPolicy {
+            FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "data-unit index overflows u128",
             },
@@ -218,7 +244,7 @@ impl ContentCipher {
             }
             ContentCipherInner::Aes128CbcEssiv(cipher) => {
                 if !self.data_unit_size.is_multiple_of(16) {
-                    return Err(ExtError::InvalidFscryptPolicy {
+                    return Err(FscryptError::InvalidPolicy {
                         inode: 0,
                         reason: "AES-128-CBC-ESSIV data unit size must be a multiple of 16",
                     });
@@ -264,161 +290,62 @@ impl ContentCipher {
     }
 }
 
-/// Build a [`ContentCipher`] for the given inode's content key.
+/// Bytes per fscrypt data unit under `policy` on a filesystem with
+/// `block_size`-byte blocks.
 ///
-/// Looks up the policy via `inode_xattr_lookup` (typically the
-/// `encryption.c` xattr fetch), validates the policy, looks up the
-/// master key in [`crate::ext::Ext::fscrypt_keys`], and derives the
-/// content key + IV strategy:
-///
-///   - Default v1/v2 policies: per-file key via the v1 or v2 KDF (nonce
-///     input), IV = logical block index.
-///   - v2 + `IV_INO_LBLK_64` / `IV_INO_LBLK_32`: per-mode-per-FS key via
-///     the v2 KDF (`mode_num` + FS UUID), IV derived from inode + lblk.
-pub(crate) fn build_cipher_for_inode<R: crate::io::Read + crate::io::Seek>(
-    ext: &crate::ext::Ext,
-    fs: &mut R,
-    inode_number: u32,
-    inode_xattr_lookup: impl FnOnce(&mut R) -> Result<alloc::vec::Vec<u8>>,
-) -> Result<ContentCipher> {
-    use crate::fscrypt::policy::{
-        FSCRYPT_POLICY_FLAG_DIRECT_KEY, FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32,
-        FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64,
-    };
-    use crate::fscrypt::{FscryptPolicyKind, kdf_v1, kdf_v2, policy};
-
-    let bytes = inode_xattr_lookup(fs)?;
-    let p = policy::parse_context(&bytes, inode_number)?;
-    policy::validate_supported(
-        &p,
-        inode_number,
-        u8::try_from(ext.block_size.trailing_zeros())
-            .expect("a u32 trailing-zero count never exceeds 32"),
-        ext.compat
-            .contains(crate::feature_flags::CompatFeatures::STABLE_INODES),
-    )?;
-
-    // `validate_supported` rejects any mode not in SUPPORTED_PAIRS, so
-    // `mode_keysize` is guaranteed to return `Some` here. The eventual
-    // length check on the derived buffer happens in `ContentCipher::new`.
-    let key_size =
-        mode_keysize(p.contents_mode).expect("validate_supported guarantees a known mode");
-
-    // Resolve the data unit size from the policy. `validate_supported`
-    // has already bounded `log2_data_unit_size` to either 0 (default)
-    // or `[SECTOR_SHIFT, log2(fs_block_size)]`, so the shift is safe
-    // and the result divides the fs block size.
-    let data_unit_size = if p.log2_data_unit_size == 0 {
-        ext.block_size as usize
+/// `log2_data_unit_size == 0` means "one data unit per fs block", the
+/// only shape available before kernel 6.7 and still the common one.
+/// [`validate_supported`](crate::policy::validate_supported) has already
+/// bounded any non-zero value to `[SECTOR_SHIFT, log2(block_size)]`, so
+/// the shift below cannot overflow and the result always divides the
+/// block size.
+#[must_use]
+pub fn data_unit_size(policy: &FscryptPolicy, block_size: u32) -> usize {
+    if policy.log2_data_unit_size == 0 {
+        block_size as usize
     } else {
-        1usize << p.log2_data_unit_size
-    };
-
-    let iv64 = p.flags & FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64 != 0;
-    let iv32 = p.flags & FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32 != 0;
-    let direct = p.flags & FSCRYPT_POLICY_FLAG_DIRECT_KEY != 0;
-
-    // Wrap the derived key in `Zeroizing` so the buffer is scrubbed when
-    // this function returns, regardless of whether `ContentCipher::new`
-    // succeeds. The cipher itself owns the key material derived from
-    // this buffer; the original derivation buffer doesn't need to
-    // outlive that ownership transfer.
-    let (key, iv): (
-        Zeroizing<alloc::vec::Vec<u8>>,
-        crate::fscrypt::types::IvDerivation,
-    ) = if direct {
-        // validate_supported has already restricted DIRECT_KEY to v2 +
-        // (Adiantum, Adiantum). Mirror kernel
-        // `setup_per_mode_enc_key(HKDF_CONTEXT_DIRECT_KEY, include_fs_uuid=false)`:
-        // info = [mode_num] only, no FS UUID. The per-file nonce enters
-        // through the IV (`fscrypt_generate_iv`'s `memcpy(iv->nonce,
-        // ci->ci_nonce, 16)` branch), not the key.
-        let id = p.key_identifier.expect("v2 policy carries identifier");
-        let mk = ext
-            .fscrypt_keys
-            .get_v2(&id)?
-            .ok_or_else(|| ExtError::MissingFscryptKey {
-                inode: inode_number,
-                policy_kind: alloc::format!("{:?}", p.kind),
-                key_ref: hex_encode(&id.0),
-            })?;
-        let key_bytes = kdf_v2::derive_direct_key(mk, p.contents_mode, key_size);
-        let iv = crate::fscrypt::types::IvDerivation::DirectKey { nonce: p.nonce };
-        (Zeroizing::new(key_bytes), iv)
-    } else if iv64 || iv32 {
-        // v2 policy guaranteed by `validate_supported` for either
-        // flag. Look up the master key by v2 identifier and derive a
-        // per-mode-per-FS key whose KDF info is `mode_num || fs_uuid`.
-        let id = p.key_identifier.expect("v2 policy carries identifier");
-        let mk = ext
-            .fscrypt_keys
-            .get_v2(&id)?
-            .ok_or_else(|| ExtError::MissingFscryptKey {
-                inode: inode_number,
-                policy_kind: alloc::format!("{:?}", p.kind),
-                key_ref: hex_encode(&id.0),
-            })?;
-        let uuid = ext.uuid();
-        let key_bytes = if iv64 {
-            kdf_v2::derive_iv_ino_lblk_64_key(mk, p.contents_mode, uuid, key_size)
-        } else {
-            kdf_v2::derive_iv_ino_lblk_32_key(mk, p.contents_mode, uuid, key_size)
-        };
-        let iv = if iv64 {
-            crate::fscrypt::types::IvDerivation::InoLblk64 { inode_number }
-        } else {
-            let ino_hash_key = kdf_v2::derive_inode_hash_key(mk);
-            let hashed_ino = crate::fscrypt::dirhash::inode_hash_low32(&ino_hash_key, inode_number);
-            crate::fscrypt::types::IvDerivation::InoLblk32 { hashed_ino }
-        };
-        (Zeroizing::new(key_bytes), iv)
-    } else {
-        let key_bytes =
-            match p.kind {
-                FscryptPolicyKind::V1 => {
-                    let desc = p.key_descriptor.expect("v1 policy carries descriptor");
-                    let mk = ext.fscrypt_keys.get_v1(desc).ok_or_else(|| {
-                        ExtError::MissingFscryptKey {
-                            inode: inode_number,
-                            policy_kind: alloc::format!("{:?}", p.kind),
-                            key_ref: hex_encode(&desc.0),
-                        }
-                    })?;
-                    kdf_v1::derive(mk, &p.nonce, key_size)?
-                }
-                FscryptPolicyKind::V2 => {
-                    let id = p.key_identifier.expect("v2 policy carries identifier");
-                    let mk = ext.fscrypt_keys.get_v2(&id)?.ok_or_else(|| {
-                        ExtError::MissingFscryptKey {
-                            inode: inode_number,
-                            policy_kind: alloc::format!("{:?}", p.kind),
-                            key_ref: hex_encode(&id.0),
-                        }
-                    })?;
-                    kdf_v2::derive(mk, kdf_v2::ctx::PER_FILE_ENC_KEY, &p.nonce, key_size)
-                }
-            };
-        (
-            Zeroizing::new(key_bytes),
-            crate::fscrypt::types::IvDerivation::PerFileBlockIndex,
-        )
-    };
-    ContentCipher::with_iv(&p, &key, iv, data_unit_size)
+        1usize << policy.log2_data_unit_size
+    }
 }
 
-fn hex_encode(bytes: &[u8]) -> alloc::string::String {
-    use core::fmt::Write;
-    let mut s = alloc::string::String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(&mut s, "{b:02x}").expect("string write infallible");
-    }
-    s
+/// Build a [`ContentCipher`] from a policy the host has already read off
+/// disk, plus the registered master keys.
+///
+///   - Default v1/v2 policies: per-file key via the v1 or v2 KDF (the
+///     per-file nonce as input), IV = logical block index.
+///   - v2 + `IV_INO_LBLK_64` / `IV_INO_LBLK_32`: per-mode-per-FS key via
+///     the v2 KDF (`mode_num` + FS UUID), IV derived from inode + lblk.
+///   - v2 + `DIRECT_KEY`: per-mode key with no FS UUID, per-file nonce
+///     carried in the IV instead.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::UnsupportedMode`] for a policy outside the
+/// supported matrix, [`FscryptError::MissingKey`] when no master key is
+/// registered for it, [`FscryptError::KeyUnwrapFailed`] when a
+/// hardware-wrapped key will not unwrap, and
+/// [`FscryptError::InvalidPolicy`] when the derived key length does not
+/// match the mode.
+pub fn build_content_cipher(
+    keys: &FscryptKeystore,
+    policy: &FscryptPolicy,
+    inode_number: u32,
+    params: &FsParams,
+) -> Result<ContentCipher> {
+    crate::policy::validate_supported(
+        policy,
+        inode_number,
+        params.block_size_log2(),
+        params.has_stable_inodes,
+    )?;
+    let (key, iv) = derive_file_key(keys, policy, inode_number, params, policy.contents_mode)?;
+    ContentCipher::with_iv(policy, &key, iv, data_unit_size(policy, params.block_size))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fscrypt::types::{FscryptKeyIdentifier, FscryptPolicyKind};
+    use crate::types::{FscryptKeyIdentifier, FscryptPolicyKind};
 
     #[test]
     fn content_cipher_adiantum_dispatch_invokes_decrypt() {
@@ -433,7 +360,7 @@ mod tests {
         // End-to-end byte-level correctness is covered by Task 19's
         // integration test against the real ext4 fixture; the dispatch
         // test only proves the cipher is invoked.
-        use crate::fscrypt::adiantum::ADIANTUM_KEY_SIZE;
+        use crate::adiantum::ADIANTUM_KEY_SIZE;
 
         #[rustfmt::skip]
         const KEY: [u8; ADIANTUM_KEY_SIZE] = [
@@ -474,7 +401,7 @@ mod tests {
     /// would yield identical output if the nonce never made it through.
     #[test]
     fn direct_key_adiantum_nonce_changes_iv() {
-        use crate::fscrypt::adiantum::ADIANTUM_KEY_SIZE;
+        use crate::adiantum::ADIANTUM_KEY_SIZE;
         let key = [0xA5u8; ADIANTUM_KEY_SIZE];
         let policy = FscryptPolicy {
             kind: FscryptPolicyKind::V2,
@@ -511,7 +438,7 @@ mod tests {
     /// the IV identical to the default-policy IV.
     #[test]
     fn direct_key_adiantum_zero_nonce_matches_default_iv() {
-        use crate::fscrypt::adiantum::ADIANTUM_KEY_SIZE;
+        use crate::adiantum::ADIANTUM_KEY_SIZE;
         let key = [0x42u8; ADIANTUM_KEY_SIZE];
         let policy = FscryptPolicy {
             kind: FscryptPolicyKind::V2,
@@ -553,7 +480,7 @@ mod tests {
     /// confusion would break this test.
     #[test]
     fn aes_128_cbc_essiv_round_trips_against_kernel_iv() {
-        use crate::fscrypt::types::FSCRYPT_MODE_AES_128_CBC;
+        use crate::types::FSCRYPT_MODE_AES_128_CBC;
         use aes::Aes128;
 
         let content_key = {
@@ -622,7 +549,7 @@ mod tests {
     /// `InvalidFscryptPolicy` (not panic).
     #[test]
     fn aes_128_cbc_essiv_rejects_wrong_key_size() {
-        use crate::fscrypt::types::FSCRYPT_MODE_AES_128_CBC;
+        use crate::types::FSCRYPT_MODE_AES_128_CBC;
         let policy = FscryptPolicy {
             kind: FscryptPolicyKind::V2,
             contents_mode: FSCRYPT_MODE_AES_128_CBC,
@@ -637,7 +564,7 @@ mod tests {
             ContentCipher::with_iv(&policy, &[0u8; 32], IvDerivation::PerFileBlockIndex, 4096);
         assert!(matches!(
             result.err(),
-            Some(ExtError::InvalidFscryptPolicy { .. })
+            Some(FscryptError::InvalidPolicy { .. })
         ));
     }
 
@@ -647,7 +574,7 @@ mod tests {
     /// Pins the dispatch wiring + agreement with `xts-mode::Xts128<Sm4>`.
     #[test]
     fn sm4_xts_round_trips_against_kernel_iv() {
-        use crate::fscrypt::types::FSCRYPT_MODE_SM4_XTS;
+        use crate::types::FSCRYPT_MODE_SM4_XTS;
         use sm4::Sm4;
 
         let key = {
@@ -836,7 +763,7 @@ mod tests {
             0x55, 0xb7, 0x98, 0xd9, 0xb8, 0xc7, 0x76, 0xf4, 0x4c, 0xec, 0xa0, 0x6c, 0x15, 0x0f,
             0x4d, 0x12,
         ];
-        let got = crate::fscrypt::dirhash::inode_hash_low32(&ino_hash_key, 12);
+        let got = crate::dirhash::inode_hash_low32(&ino_hash_key, 12);
         assert_eq!(got, 0x378f_3ff6);
     }
 
@@ -857,7 +784,7 @@ mod tests {
             ContentCipher::with_iv(&policy, &[0u8; 32], IvDerivation::PerFileBlockIndex, 4096);
         assert!(matches!(
             result.err(),
-            Some(ExtError::InvalidFscryptPolicy { .. })
+            Some(FscryptError::InvalidPolicy { .. })
         ));
     }
 
@@ -955,6 +882,6 @@ mod tests {
         // 4097 % 512 != 0; must reject before touching the cipher.
         let mut block = vec![0u8; 4097];
         let err = cipher.decrypt_block(&mut block, 0).unwrap_err();
-        assert!(matches!(err, ExtError::InvalidFscryptPolicy { .. }));
+        assert!(matches!(err, FscryptError::InvalidPolicy { .. }));
     }
 }

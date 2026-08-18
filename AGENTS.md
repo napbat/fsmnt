@@ -37,7 +37,9 @@ kept as a thin wrapper over it. Member crates under `crates/`:
   owning crate.
 - `crates/formats/` — parent directory (not a crate) for filesystem-format
   parser crates (`fs-ntfs`, `fs-fat`, `fs-ext`, `fs-apfs`, `fs-btrfs`,
-  `fs-exfat`, `nt-compression`, and `nt-bitlocker`); members via the `crates/formats/*`
+  `fs-exfat`, `nt-compression`, `nt-bitlocker`, and `linux-fscrypt` — the
+  format-neutral Linux file-based-encryption layer ext4 and, in time, f2fs
+  both call into); members via the `crates/formats/*`
   glob. These are **vendored** from tracium — see "Vendored crates" below.
 - `fsmnt-drivers` — adapters binding the vendored parsers to
   `TargetFilesystem` / `FilesystemDriver`, so device and image mounting can

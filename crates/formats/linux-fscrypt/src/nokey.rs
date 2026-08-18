@@ -66,7 +66,8 @@ fn base64url_encode(src: &[u8]) -> Vec<u8> {
 /// directories carry the dirhash inside each on-disk dirent — that
 /// extraction is filed as a follow-up; this encoder accepts whatever
 /// the caller supplies so future casefold support drops in cleanly.
-pub(crate) fn encode_nokey_name(dirhash: [u32; 2], ciphertext: &[u8]) -> Vec<u8> {
+#[must_use]
+pub fn encode_nokey_name(dirhash: [u32; 2], ciphertext: &[u8]) -> Vec<u8> {
     let mut wire = [0u8; NOKEY_NAME_MAX];
     wire[0..4].copy_from_slice(&dirhash[0].to_le_bytes());
     wire[4..8].copy_from_slice(&dirhash[1].to_le_bytes());

@@ -32,7 +32,7 @@ impl Aes128CbcEssivCipher {
 
     /// Decrypt one fscrypt data unit in place. `unit.len()` must be a
     /// non-zero multiple of 16; `plain_iv` is the kernel's `union
-    /// fscrypt_iv` view (low 16 bytes of [`crate::fscrypt::types::IvDerivation::full_iv`]).
+    /// fscrypt_iv` view (low 16 bytes of [`crate::types::IvDerivation::full_iv`]).
     pub(super) fn decrypt_unit(&self, unit: &mut [u8], plain_iv: [u8; 16]) {
         // ESSIV: essiv_iv = AES-ECB(SHA-256(key))(plain_iv).
         let mut essiv_iv = plain_iv;

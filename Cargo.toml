@@ -45,6 +45,10 @@ fs-apfs = { path = "crates/formats/fs-apfs", default-features = false }
 fs-btrfs = { path = "crates/formats/fs-btrfs", default-features = false }
 fs-exfat = { path = "crates/formats/fs-exfat", default-features = false }
 fs-ext = { path = "crates/formats/fs-ext", default-features = false }
+# Format-neutral Linux fscrypt (file-based encryption). Shared by every
+# filesystem the kernel wires it into — ext4 today, f2fs/ubifs/ceph next —
+# so it lives beside the parsers rather than inside one of them.
+linux-fscrypt = { path = "crates/formats/linux-fscrypt", default-features = false }
 nt-compression = { path = "crates/formats/nt-compression", default-features = false }
 # nt-bitlocker is std-only (crypto stack + secrecy); no no_std variant.
 nt-bitlocker = { path = "crates/formats/nt-bitlocker" }

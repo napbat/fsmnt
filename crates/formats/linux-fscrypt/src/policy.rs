@@ -1,12 +1,8 @@
 //! Parses on-disk `fscrypt_context_v1` (28 bytes) and `fscrypt_context_v2`
 //! (40 bytes) into the public `FscryptPolicy` summary.
 
-#![cfg(feature = "fscrypt")]
-
-use crate::error::{ExtError, Result};
-use crate::fscrypt::types::{
-    FscryptKeyDescriptor, FscryptKeyIdentifier, FscryptPolicy, FscryptPolicyKind,
-};
+use crate::error::{FscryptError, Result};
+use crate::types::{FscryptKeyDescriptor, FscryptKeyIdentifier, FscryptPolicy, FscryptPolicyKind};
 
 /// Kernel constant `FSCRYPT_CONTEXT_V1`.
 const FSCRYPT_CONTEXT_V1: u8 = 1;
@@ -17,9 +13,15 @@ const FSCRYPT_CONTEXT_V2: u8 = 2;
 /// `encryption.c` xattr) into a [`FscryptPolicy`].
 ///
 /// `inode` is used solely for error context.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::InvalidPolicy`] when the payload is empty,
+/// names a context version other than 1 or 2, is the wrong length for
+/// the version it names, or (v2) has non-zero reserved bytes.
 pub fn parse_context(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
     if bytes.is_empty() {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "empty fscrypt context",
         });
@@ -27,7 +29,7 @@ pub fn parse_context(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
     match bytes[0] {
         FSCRYPT_CONTEXT_V1 => parse_v1(bytes, inode),
         FSCRYPT_CONTEXT_V2 => parse_v2(bytes, inode),
-        _ => Err(ExtError::InvalidFscryptPolicy {
+        _ => Err(FscryptError::InvalidPolicy {
             inode,
             reason: "unknown fscrypt context version",
         }),
@@ -36,7 +38,7 @@ pub fn parse_context(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
 
 fn parse_v1(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
     if bytes.len() != 28 {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "fscrypt v1 context must be exactly 28 bytes",
         });
@@ -62,7 +64,7 @@ fn parse_v1(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
 
 fn parse_v2(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
     if bytes.len() != 40 {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "fscrypt v2 context must be exactly 40 bytes",
         });
@@ -72,7 +74,7 @@ fn parse_v2(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
     let flags = bytes[3];
     let log2_data_unit_size = bytes[4];
     if bytes[5] != 0 || bytes[6] != 0 || bytes[7] != 0 {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "fscrypt v2 reserved bytes must be zero",
         });
@@ -94,11 +96,11 @@ fn parse_v2(bytes: &[u8], inode: u32) -> Result<FscryptPolicy> {
 }
 
 /// `FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64` (kernel `include/uapi/linux/fscrypt.h`).
-pub(crate) const FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64: u8 = 0x08;
+pub const FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64: u8 = 0x08;
 /// `FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32` (kernel `include/uapi/linux/fscrypt.h`).
-pub(crate) const FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32: u8 = 0x10;
+pub const FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32: u8 = 0x10;
 /// `FSCRYPT_POLICY_FLAG_DIRECT_KEY` (kernel `include/uapi/linux/fscrypt.h`).
-pub(crate) const FSCRYPT_POLICY_FLAG_DIRECT_KEY: u8 = 0x04;
+pub const FSCRYPT_POLICY_FLAG_DIRECT_KEY: u8 = 0x04;
 
 /// Single source of truth for which fscrypt policies this crate
 /// supports. Called by every decrypt entry point (content key, filename
@@ -143,13 +145,19 @@ pub(crate) const FSCRYPT_POLICY_FLAG_DIRECT_KEY: u8 = 0x04;
 /// v1 + Adiantum is accepted: the upstream kernel
 /// (`fscrypt_valid_enc_modes_v1` in `fs/crypto/policy.c`) explicitly
 /// whitelists the (Adiantum, Adiantum) pair on v1 policies.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::UnsupportedMode`] — carrying the raw
+/// `(contents, filenames, flags)` triple for diagnostics — for every
+/// rejection listed above.
 pub fn validate_supported(
     policy: &FscryptPolicy,
     inode_number: u32,
     fs_block_size_log2: u8,
     has_stable_inodes: bool,
 ) -> Result<()> {
-    use crate::fscrypt::types::{
+    use crate::types::{
         FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS,
         FSCRYPT_MODE_AES_256_CTS, FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS,
         FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS,
@@ -174,7 +182,7 @@ pub fn validate_supported(
     /// All policy flag bits currently defined by the kernel.
     const VALID_FLAGS_MASK: u8 = 0x1F;
 
-    let unsupported = || ExtError::UnsupportedFscryptMode {
+    let unsupported = || FscryptError::UnsupportedMode {
         inode: inode_number,
         contents: policy.contents_mode,
         filenames: policy.filenames_mode,

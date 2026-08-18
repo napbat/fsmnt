@@ -16,8 +16,6 @@
 //! This module is private to the `fscrypt` parent module; callers use
 //! [`Hctr2Cipher::new`] + [`Hctr2Cipher::decrypt_in_place`] only.
 
-#![cfg(feature = "fscrypt")]
-
 use aes::Aes256;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
@@ -25,7 +23,7 @@ use polyval::Polyval;
 use polyval::universal_hash::UniversalHash;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::error::{ExtError, Result};
+use crate::error::{FscryptError, Result};
 
 /// HCTR2 master key length: AES-256 → 32 bytes.
 pub(crate) const HCTR2_KEY_SIZE: usize = 32;
@@ -105,7 +103,7 @@ impl Hctr2Cipher {
         buf: &mut [u8],
     ) -> Result<()> {
         if buf.len() < BLOCK {
-            return Err(ExtError::InvalidFscryptPolicy {
+            return Err(FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "HCTR2 ciphertext < 16 bytes",
             });
@@ -353,7 +351,7 @@ mod tests {
         let mut buf = [0u8; 15];
         assert!(matches!(
             cipher.decrypt_in_place(&tweak, &mut buf).unwrap_err(),
-            ExtError::InvalidFscryptPolicy { .. }
+            FscryptError::InvalidPolicy { .. }
         ));
     }
 }

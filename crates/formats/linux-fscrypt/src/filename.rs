@@ -6,23 +6,22 @@
 //! (flags & 0x03)` (with a minimum of 16 bytes); after decrypting, the
 //! trailing NUL pad is stripped.
 
-#![cfg(feature = "fscrypt")]
-
 use zeroize::Zeroizing;
 
 use aes::{Aes128, Aes256};
 use sm4::Sm4;
 
-use crate::error::{ExtError, Result};
-use crate::ext::Ext;
-use crate::fscrypt::adiantum::{ADIANTUM_TWEAK_SIZE, AdiantumCipher};
-use crate::fscrypt::hctr2::{HCTR2_TWEAK_SIZE, Hctr2Cipher};
-use crate::fscrypt::types::{
+use crate::adiantum::{ADIANTUM_TWEAK_SIZE, AdiantumCipher};
+use crate::cts;
+use crate::error::{FscryptError, Result};
+use crate::hctr2::{HCTR2_TWEAK_SIZE, Hctr2Cipher};
+use crate::keyderive::derive_file_key;
+use crate::keystore::FscryptKeystore;
+use crate::params::FsParams;
+use crate::types::{
     FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_128_CTS, FSCRYPT_MODE_AES_256_CTS,
-    FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_SM4_CTS, FscryptPolicy, FscryptPolicyKind,
-    IvDerivation, mode_keysize,
+    FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_SM4_CTS, FscryptPolicy, IvDerivation, mode_keysize,
 };
-use crate::fscrypt::{cts, kdf_v1, kdf_v2, policy};
 
 /// Decrypt a single AES-256-CTS dirent ciphertext name with the given
 /// filenames key, then strip trailing NUL padding. Test-only helper for
@@ -47,7 +46,7 @@ fn decrypt_name(filenames_key: &[u8; 32], ciphertext: &[u8]) -> Result<alloc::ve
 ///
 /// `decrypt_name` / `decrypt_name_into` honour a single padding contract:
 /// callers receive plaintext with trailing NUL padding already stripped.
-pub(crate) struct FilenameCipher {
+pub struct FilenameCipher {
     inner: FilenameCipherInner,
     iv: IvDerivation,
 }
@@ -67,17 +66,23 @@ impl FilenameCipher {
     /// an explicit IV-derivation strategy.
     ///
     /// `key` length must equal the per-mode key size: 32 for
-    /// AES-256-CTS / Adiantum, 16 for AES-128-CTS. Mismatches surface as
-    /// `InvalidFscryptPolicy` rather than panicking.
-    pub(crate) fn new(policy: &FscryptPolicy, key: &[u8], iv: IvDerivation) -> Result<Self> {
-        let want = mode_keysize(policy.filenames_mode).ok_or(ExtError::UnsupportedFscryptMode {
+    /// AES-256-CTS / Adiantum, 16 for AES-128-CTS.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FscryptError::UnsupportedMode`] when `filenames_mode`
+    /// names a cipher this crate does not implement, and
+    /// [`FscryptError::InvalidPolicy`] when `key` is the wrong length
+    /// for the mode — a mismatch is reported rather than a panic.
+    pub fn new(policy: &FscryptPolicy, key: &[u8], iv: IvDerivation) -> Result<Self> {
+        let want = mode_keysize(policy.filenames_mode).ok_or(FscryptError::UnsupportedMode {
             inode: 0,
             contents: policy.contents_mode,
             filenames: policy.filenames_mode,
             flags: policy.flags,
         })?;
         if key.len() != want {
-            return Err(ExtError::InvalidFscryptPolicy {
+            return Err(FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "filename key length does not match mode",
             });
@@ -119,7 +124,7 @@ impl FilenameCipher {
                 FilenameCipherInner::Hctr2(alloc::boxed::Box::new(Hctr2Cipher::new(&k)))
             }
             other => {
-                return Err(ExtError::UnsupportedFscryptMode {
+                return Err(FscryptError::UnsupportedMode {
                     inode: 0,
                     contents: policy.contents_mode,
                     filenames: other,
@@ -135,11 +140,13 @@ impl FilenameCipher {
     ///
     /// **Padding contract:** callers receive padding-stripped plaintext.
     /// Do NOT strip again at the call site.
-    pub(crate) fn decrypt_name_into(
-        &self,
-        on_disk: &[u8],
-        out: &mut alloc::vec::Vec<u8>,
-    ) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FscryptError::InvalidPolicy`] when `on_disk` is shorter
+    /// than the cipher's minimum ciphertext (one 16-byte block for the
+    /// CTS modes, one block for the wide-block modes).
+    pub fn decrypt_name_into(&self, on_disk: &[u8], out: &mut alloc::vec::Vec<u8>) -> Result<()> {
         out.clear();
         // Kernel `fscrypt_fname_encrypt` calls `fscrypt_generate_iv(0, ci)`;
         // reuse the same derivation against `lblk=0` so default policies
@@ -188,192 +195,53 @@ impl FilenameCipher {
 
     /// Convenience wrapper for call sites that do not already carry a
     /// scratch buffer.
-    pub(crate) fn decrypt_name(&self, on_disk: &[u8]) -> Result<alloc::vec::Vec<u8>> {
+    ///
+    /// # Errors
+    ///
+    /// As [`FilenameCipher::decrypt_name_into`].
+    pub fn decrypt_name(&self, on_disk: &[u8]) -> Result<alloc::vec::Vec<u8>> {
         let mut out = alloc::vec::Vec::with_capacity(on_disk.len());
         self.decrypt_name_into(on_disk, &mut out)?;
         Ok(out)
     }
 }
 
-/// Build a fully-constructed [`FilenameCipher`] for the given inode +
-/// policy + keystore.
+/// Build a [`FilenameCipher`] from a policy the host has already read
+/// off disk, plus the registered master keys.
 ///
-/// `inode_number` is the inode that anchors the cipher — typically the
-/// directory (for dirent decryption) or symlink (for symlink-target
-/// decryption). For `IV_INO_LBLK_*` policies, the IV depends on this
-/// inode number; for default policies, the IV is zero and the inode
-/// number is used for error context only.
-pub(crate) fn build_filename_cipher_for_inode(
-    ext: &Ext,
+/// `inode_number` is the object that anchors the cipher — the directory
+/// for dirent decryption, the symlink for symlink-target decryption.
+/// Under `IV_INO_LBLK_*` it feeds the IV; otherwise the IV is zero and
+/// the number only supplies error context.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::UnsupportedMode`] for a policy outside the
+/// supported matrix, [`FscryptError::MissingKey`] when no master key is
+/// registered for it, [`FscryptError::KeyUnwrapFailed`] when a
+/// hardware-wrapped key will not unwrap, and
+/// [`FscryptError::InvalidPolicy`] when the derived key length does not
+/// match the mode.
+pub fn build_filename_cipher(
+    keys: &FscryptKeystore,
+    policy: &FscryptPolicy,
     inode_number: u32,
-    p: &FscryptPolicy,
+    params: &FsParams,
 ) -> Result<FilenameCipher> {
-    use crate::fscrypt::policy::{
-        FSCRYPT_POLICY_FLAG_DIRECT_KEY, FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32,
-        FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64,
-    };
-    use zeroize::Zeroizing;
-
-    policy::validate_supported(
-        p,
+    crate::policy::validate_supported(
+        policy,
         inode_number,
-        (ext.block_size.trailing_zeros()).to_le_bytes()[0],
-        ext.compat
-            .contains(crate::feature_flags::CompatFeatures::STABLE_INODES),
+        params.block_size_log2(),
+        params.has_stable_inodes,
     )?;
-    let iv64 = p.flags & FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64 != 0;
-    let iv32 = p.flags & FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32 != 0;
-    let direct = p.flags & FSCRYPT_POLICY_FLAG_DIRECT_KEY != 0;
-    // validate_supported guarantees a known mode, so this is `Some`.
-    let key_size =
-        mode_keysize(p.filenames_mode).expect("validate_supported guarantees a known mode");
-    // Heap derivation buffer in `Zeroizing` so the bytes are scrubbed
-    // once `FilenameCipher::new` copies them into a fixed-size cipher
-    // state.
-    let (raw_key, iv): (Zeroizing<alloc::vec::Vec<u8>>, IvDerivation) = if direct {
-        // validate_supported has restricted DIRECT_KEY to v2 +
-        // (Adiantum, Adiantum). Mirror kernel
-        // `setup_per_mode_enc_key(HKDF_CONTEXT_DIRECT_KEY,
-        // include_fs_uuid=false)`: HKDF info = [mode_num] only. The
-        // per-file nonce enters via the IV (`fscrypt_generate_iv` writes
-        // ci_nonce into bytes 8..24), not the key derivation.
-        let id = p.key_identifier.expect("v2 policy carries identifier");
-        let mk = ext
-            .fscrypt_keys
-            .get_v2(&id)?
-            .ok_or_else(|| ExtError::MissingFscryptKey {
-                inode: inode_number,
-                policy_kind: alloc::format!("{:?}", p.kind),
-                key_ref: hex(&id.0),
-            })?;
-        let key_bytes = kdf_v2::derive_direct_key(mk, p.filenames_mode, key_size);
-        let iv = IvDerivation::DirectKey { nonce: p.nonce };
-        (Zeroizing::new(key_bytes), iv)
-    } else if iv64 || iv32 {
-        let id = p.key_identifier.expect("v2 policy carries identifier");
-        let mk = ext
-            .fscrypt_keys
-            .get_v2(&id)?
-            .ok_or_else(|| ExtError::MissingFscryptKey {
-                inode: inode_number,
-                policy_kind: alloc::format!("{:?}", p.kind),
-                key_ref: hex(&id.0),
-            })?;
-        let uuid = ext.uuid();
-        let key_bytes = if iv64 {
-            kdf_v2::derive_iv_ino_lblk_64_key(mk, p.filenames_mode, uuid, key_size)
-        } else {
-            kdf_v2::derive_iv_ino_lblk_32_key(mk, p.filenames_mode, uuid, key_size)
-        };
-        let iv = if iv64 {
-            IvDerivation::InoLblk64 { inode_number }
-        } else {
-            let ino_hash_key = kdf_v2::derive_inode_hash_key(mk);
-            let hashed_ino = crate::fscrypt::dirhash::inode_hash_low32(&ino_hash_key, inode_number);
-            IvDerivation::InoLblk32 { hashed_ino }
-        };
-        (Zeroizing::new(key_bytes), iv)
-    } else {
-        let bytes =
-            match p.kind {
-                FscryptPolicyKind::V1 => {
-                    let desc = p.key_descriptor.expect("v1 policy carries descriptor");
-                    let mk = ext.fscrypt_keys.get_v1(desc).ok_or_else(|| {
-                        ExtError::MissingFscryptKey {
-                            inode: inode_number,
-                            policy_kind: alloc::format!("{:?}", p.kind),
-                            key_ref: hex(&desc.0),
-                        }
-                    })?;
-                    kdf_v1::derive(mk, &p.nonce, key_size)?
-                }
-                FscryptPolicyKind::V2 => {
-                    let id = p.key_identifier.expect("v2 policy carries identifier");
-                    let mk = ext.fscrypt_keys.get_v2(&id)?.ok_or_else(|| {
-                        ExtError::MissingFscryptKey {
-                            inode: inode_number,
-                            policy_kind: alloc::format!("{:?}", p.kind),
-                            key_ref: hex(&id.0),
-                        }
-                    })?;
-                    kdf_v2::derive(mk, kdf_v2::ctx::PER_FILE_ENC_KEY, &p.nonce, key_size)
-                }
-            };
-        (Zeroizing::new(bytes), IvDerivation::PerFileBlockIndex)
-    };
-    FilenameCipher::new(p, &raw_key, iv)
-}
-
-fn hex(bytes: &[u8]) -> alloc::string::String {
-    use core::fmt::Write;
-    let mut s = alloc::string::String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(&mut s, "{b:02x}").expect("string write infallible");
-    }
-    s
-}
-
-/// Cached crypto state for a directory iterator.
-///
-/// Captured once when the iterator is built so that every emitted entry
-/// can be decrypted (or forwarded as ciphertext) without re-deriving
-/// the filenames key on every step.
-pub(crate) enum DirCryptoState {
-    /// Directory is plaintext; iterator emits on-disk bytes directly.
-    Plaintext,
-    /// Directory is encrypted and a key is registered; iterator decrypts
-    /// each name via the cipher.
-    EncryptedDecryptable { cipher: FilenameCipher },
-    /// Directory is encrypted but no key is registered. The default API
-    /// path errors with `MissingFscryptKey` before iteration starts; the
-    /// raw API path forwards the on-disk ciphertext bytes.
-    EncryptedMissingKey {
-        policy_kind: FscryptPolicyKind,
-        key_ref: alloc::string::String,
-    },
-}
-
-/// Compute the [`DirCryptoState`] for a directory inode.
-pub(crate) fn directory_decryption_state<R: crate::io::Read + crate::io::Seek>(
-    ext: &Ext,
-    fs: &mut R,
-    dir_inode: &crate::inode::ExtInode<'_>,
-) -> Result<DirCryptoState> {
-    use crate::inode::InodeFlags;
-    if !dir_inode.flags().contains(InodeFlags::ENCRYPT_FL) {
-        return Ok(DirCryptoState::Plaintext);
-    }
-    let p = dir_inode
-        .fscrypt_policy(fs)?
-        .ok_or(ExtError::InvalidFscryptPolicy {
-            inode: dir_inode.inode_number(),
-            reason: "ENCRYPT_FL set but missing context",
-        })?;
-    // The kernel rejects ENCRYPT_FL+CASEFOLD_FL with v1 policies because
-    // there is no v1 path to derive a dirhash key. Reject the
-    // combination here so a crafted on-disk image cannot proceed through
-    // dirent decryption with v1 keys silently.
-    if dir_inode.flags().contains(InodeFlags::CASEFOLD_FL) && p.kind == FscryptPolicyKind::V1 {
-        return Err(ExtError::InvalidFscryptPolicy {
-            inode: dir_inode.inode_number(),
-            reason: "v1 policy on casefolded directory not supported by kernel",
-        });
-    }
-    match build_filename_cipher_for_inode(ext, dir_inode.inode_number(), &p) {
-        Ok(cipher) => Ok(DirCryptoState::EncryptedDecryptable { cipher }),
-        Err(ExtError::MissingFscryptKey { key_ref, .. }) => {
-            Ok(DirCryptoState::EncryptedMissingKey {
-                policy_kind: p.kind,
-                key_ref,
-            })
-        }
-        Err(e) => Err(e),
-    }
+    let (raw_key, iv) = derive_file_key(keys, policy, inode_number, params, policy.filenames_mode)?;
+    FilenameCipher::new(policy, &raw_key, iv)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FscryptPolicyKind;
 
     /// AES-256-CBC ciphertext of "hello.txt\0\0\0\0\0\0\0" (16-byte block,
     /// 7 NUL-byte pad) under the 32-byte all-zero key with a 16-byte
@@ -392,8 +260,8 @@ mod tests {
 
     #[test]
     fn filename_cipher_adiantum_strips_padding() {
-        use crate::fscrypt::adiantum::ADIANTUM_KEY_SIZE;
-        use crate::fscrypt::types::{
+        use crate::adiantum::ADIANTUM_KEY_SIZE;
+        use crate::types::{
             FSCRYPT_MODE_ADIANTUM, FscryptKeyIdentifier, FscryptPolicy, FscryptPolicyKind,
         };
 
@@ -425,7 +293,7 @@ mod tests {
         // Single 16-byte block = plain CBC with the 16-byte zero IV
         // (CS3 collapses for n == 16). Encrypt locally with AES-128 then
         // decrypt via the typed dispatch path.
-        use crate::fscrypt::types::{
+        use crate::types::{
             FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS, FscryptKeyIdentifier,
         };
         use aes::Aes128;
@@ -460,7 +328,7 @@ mod tests {
     #[test]
     fn filename_cipher_new_rejects_wrong_key_size() {
         // AES-128-CTS expects 16 bytes; passing 32 must fail-closed.
-        use crate::fscrypt::types::{
+        use crate::types::{
             FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS, FscryptKeyIdentifier,
         };
         let policy = FscryptPolicy {
@@ -476,7 +344,7 @@ mod tests {
         let result = FilenameCipher::new(&policy, &[0u8; 32], IvDerivation::PerFileBlockIndex);
         assert!(matches!(
             result.err(),
-            Some(ExtError::InvalidFscryptPolicy { .. })
+            Some(FscryptError::InvalidPolicy { .. })
         ));
     }
 

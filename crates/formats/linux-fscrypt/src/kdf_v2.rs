@@ -3,23 +3,31 @@
 //! Mirrors `fs/crypto/hkdf.c`. Salt = 64 zero bytes; IKM = master key
 //! bytes (length 16..=64); info prefix = "fscrypt\0" || `context_byte`.
 
-#![cfg(feature = "fscrypt")]
-
 use alloc::vec::Vec;
 
 use hkdf::Hkdf;
 use sha2::Sha512;
 
-use crate::fscrypt::types::{FscryptKeyIdentifier, FscryptMasterKey};
+use crate::types::{FscryptKeyIdentifier, FscryptMasterKey};
 
-/// Kernel HKDF context bytes (fs/crypto/hkdf.c).
+/// Kernel HKDF context bytes (`fs/crypto/hkdf.c`). One byte, appended to
+/// `"fscrypt\0"`, that separates the key hierarchies derived from a
+/// single master key.
 pub mod ctx {
+    /// Derives the 16-byte v2 `master_key_identifier` from the key itself.
     pub const KEY_IDENTIFIER: u8 = 1;
+    /// Derives a per-file content or filenames key from the file nonce.
     pub const PER_FILE_ENC_KEY: u8 = 2;
+    /// Derives the per-mode key used under `FSCRYPT_POLICY_FLAG_DIRECT_KEY`.
     pub const DIRECT_KEY: u8 = 3;
+    /// Derives the per-mode-per-FS key used under `IV_INO_LBLK_64`.
     pub const IV_INO_LBLK_64_KEY: u8 = 4;
+    /// Derives the `SipHash` key an encrypted casefolded directory hashes with.
     pub const DIRHASH_KEY: u8 = 5;
+    /// Derives the per-mode-per-FS key used under `IV_INO_LBLK_32`.
     pub const IV_INO_LBLK_32_KEY: u8 = 6;
+    /// Derives the per-FS `SipHash` key that `IV_INO_LBLK_32` hashes inode
+    /// numbers with.
     pub const INODE_HASH_KEY: u8 = 7;
 }
 
@@ -35,6 +43,12 @@ fn build_info(context: u8, application_info: &[u8]) -> Vec<u8> {
 
 /// Run HKDF-SHA512 with the kernel salt (64 zero bytes), the master key
 /// as IKM, and the given context + `application_info`.
+///
+/// # Panics
+///
+/// Panics when `out_len` exceeds HKDF-SHA512's 255 × 64-byte ceiling.
+/// Every caller in this crate asks for 16, 32, or 64.
+#[must_use]
 pub fn derive(
     master_key: &FscryptMasterKey,
     context: u8,
@@ -51,6 +65,7 @@ pub fn derive(
 }
 
 /// Compute the v2 `master_key_identifier` from a master key.
+#[must_use]
 pub fn key_identifier(master_key: &FscryptMasterKey) -> FscryptKeyIdentifier {
     let okm = derive(master_key, ctx::KEY_IDENTIFIER, &[], 16);
     let mut ident = [0u8; 16];
@@ -69,6 +84,7 @@ fn iv_ino_lblk_info(mode_num: u8, fs_uuid: &[u8; 16]) -> [u8; 17] {
 }
 
 /// Derive the per-mode-per-FS key for an `IV_INO_LBLK_64` policy.
+#[must_use]
 pub fn derive_iv_ino_lblk_64_key(
     master_key: &FscryptMasterKey,
     mode_num: u8,
@@ -84,6 +100,7 @@ pub fn derive_iv_ino_lblk_64_key(
 }
 
 /// Derive the per-mode-per-FS key for an `IV_INO_LBLK_32` policy.
+#[must_use]
 pub fn derive_iv_ino_lblk_32_key(
     master_key: &FscryptMasterKey,
     mode_num: u8,
@@ -105,12 +122,14 @@ pub fn derive_iv_ino_lblk_32_key(
 /// unlike `IV_INO_LBLK_*`, the FS UUID is **not** appended (a single
 /// `mk_direct_keys` cache covers the master key + mode pair across any
 /// FS that holds it).
+#[must_use]
 pub fn derive_direct_key(master_key: &FscryptMasterKey, mode_num: u8, out_len: usize) -> Vec<u8> {
     derive(master_key, ctx::DIRECT_KEY, &[mode_num], out_len)
 }
 
 /// Derive the 16-byte per-FS `SipHash` key used to hash inode numbers
 /// under an `IV_INO_LBLK_32` policy. Kernel info field is empty.
+#[must_use]
 pub fn derive_inode_hash_key(master_key: &FscryptMasterKey) -> [u8; 16] {
     let okm = derive(master_key, ctx::INODE_HASH_KEY, &[], 16);
     let mut key = [0u8; 16];

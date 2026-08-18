@@ -219,7 +219,7 @@ fn indirect_map_test_ext(blocks_count: u64, block_size: u32) -> &'static crate::
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     }))
 }
 
@@ -588,7 +588,7 @@ fn leak_dummy_ext_with_block_size(block_size: u32) -> &'static crate::ext::Ext {
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     });
     alloc::boxed::Box::leak(ext)
 }

@@ -700,7 +700,7 @@ fn ext_with_uninitialized_block_bitmap() -> Ext {
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     }
 }
 

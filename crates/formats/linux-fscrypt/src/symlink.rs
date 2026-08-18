@@ -4,28 +4,33 @@
 //!     u16 le len;          // size of `encrypted_path`
 //!     u8  `encrypted_path`[len];
 //!
-//! After reading the raw symlink target bytes via the standard short /
-//! inline-overflow / long-mapped dispatch, parse the 2-byte length,
-//! take exactly `len` ciphertext bytes, decrypt via [`FilenameCipher`]
-//! (AES-256-CBC-CTS CS3 or Adiantum, depending on the directory policy),
-//! and strip the trailing NUL pad.
+//! The framing is fscrypt's, not any one filesystem's: the host reads
+//! the raw symlink target bytes however it stores them, then hands the
+//! whole payload here. This module parses the 2-byte length, takes
+//! exactly `len` ciphertext bytes, decrypts via [`crate::FilenameCipher`]
+//! (CBC-CTS, Adiantum, or HCTR2 per the policy), and strips the trailing
+//! NUL pad.
 
-#![cfg(feature = "fscrypt")]
-
-use crate::error::{ExtError, Result};
+use crate::error::{FscryptError, Result};
 
 /// Parse the on-disk `fscrypt_symlink_data` length prefix and return a
 /// borrow of the ciphertext slice.
 ///
-/// Shared between the decrypt path (`decode_symlink`) and the no-key
-/// presentation path in [`crate::inode::ExtInode::read_symlink`] so both
-/// apply the same length validation. Mirrors the kernel's
-/// `fscrypt_get_symlink` (`fs/crypto/hooks.c`): too-short payload,
-/// `cstr.len == 0`, and `cstr.len + sizeof(*sd) > max_size` all surface
-/// as `-EUCLEAN` upstream.
-pub(crate) fn parse_fscrypt_symlink_ciphertext(inode: u32, raw: &[u8]) -> Result<&[u8]> {
+/// Shared between the decrypt path ([`decode_symlink`]) and the host's
+/// no-key presentation path so both apply the same length validation.
+/// Mirrors the kernel's `fscrypt_get_symlink` (`fs/crypto/hooks.c`):
+/// too-short payload, `cstr.len == 0`, and
+/// `cstr.len + sizeof(*sd) > max_size` all surface as `-EUCLEAN`
+/// upstream. `inode` is error context only.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::InvalidPolicy`] when the payload is shorter
+/// than the length prefix, declares a zero length, or declares more
+/// ciphertext than `raw` holds.
+pub fn parse_symlink_ciphertext(inode: u32, raw: &[u8]) -> Result<&[u8]> {
     if raw.len() < 2 {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "encrypted symlink too short for length prefix",
         });
@@ -36,13 +41,13 @@ pub(crate) fn parse_fscrypt_symlink_ciphertext(inode: u32, raw: &[u8]) -> Result
     // would surface a malformed zero-length payload as a successful
     // 11-byte base64url encoding of `[0u8; 8]`.
     if len == 0 {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "encrypted symlink ciphertext length is zero",
         });
     }
     if 2 + len > raw.len() {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode,
             reason: "encrypted symlink length exceeds available bytes",
         });
@@ -55,11 +60,14 @@ pub(crate) fn parse_fscrypt_symlink_ciphertext(inode: u32, raw: &[u8]) -> Result
 /// `raw` is the full on-disk symlink payload (length prefix + ciphertext).
 /// `cipher` is the filename cipher built from the derived filenames key and
 /// the inode's fscrypt policy.
-pub(crate) fn decode_symlink(
-    raw: &[u8],
-    cipher: &crate::fscrypt::FilenameCipher,
-) -> Result<alloc::vec::Vec<u8>> {
-    let ct = parse_fscrypt_symlink_ciphertext(0, raw)?;
+///
+/// # Errors
+///
+/// Returns [`FscryptError::InvalidPolicy`] for a malformed length prefix
+/// (see [`parse_symlink_ciphertext`]) or a ciphertext too short for the
+/// cipher.
+pub fn decode_symlink(raw: &[u8], cipher: &crate::FilenameCipher) -> Result<alloc::vec::Vec<u8>> {
+    let ct = parse_symlink_ciphertext(0, raw)?;
     // NOTE: trailing-NUL strip is owned by FilenameCipher::decrypt_name —
     // do NOT strip again here (was a double-strip risk).
     cipher.decrypt_name(ct)
@@ -68,11 +76,9 @@ pub(crate) fn decode_symlink(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fscrypt::filename::FilenameCipher;
-    use crate::fscrypt::policy::{
-        FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32, FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64,
-    };
-    use crate::fscrypt::types::{
+    use crate::filename::FilenameCipher;
+    use crate::policy::{FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32, FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64};
+    use crate::types::{
         FSCRYPT_MODE_AES_256_CTS, FSCRYPT_MODE_AES_256_XTS, FscryptKeyIdentifier, FscryptPolicy,
         FscryptPolicyKind, IvDerivation,
     };
@@ -184,21 +190,18 @@ mod tests {
     fn decode_symlink_rejects_short_input() {
         let cipher = make_aes_cts_cipher([0u8; 32]);
         let err = decode_symlink(&[0x10], &cipher).unwrap_err();
-        assert!(matches!(err, ExtError::InvalidFscryptPolicy { .. }));
+        assert!(matches!(err, FscryptError::InvalidPolicy { .. }));
     }
 
     /// Mirrors kernel `fscrypt_get_symlink`: `if (cstr.len == 0) return
     /// ERR_PTR(-EUCLEAN);`. Both the decrypt path and the new no-key
-    /// fall-back rely on `parse_fscrypt_symlink_ciphertext`, so the
+    /// fall-back rely on `parse_symlink_ciphertext`, so the
     /// rejection lands in both code paths simultaneously.
     #[test]
-    fn parse_fscrypt_symlink_ciphertext_rejects_zero_length() {
+    fn parse_symlink_ciphertext_rejects_zero_length() {
         let raw = [0u8, 0u8];
-        let err = parse_fscrypt_symlink_ciphertext(13, &raw).unwrap_err();
-        assert!(matches!(
-            err,
-            ExtError::InvalidFscryptPolicy { inode: 13, .. }
-        ));
+        let err = parse_symlink_ciphertext(13, &raw).unwrap_err();
+        assert!(matches!(err, FscryptError::InvalidPolicy { inode: 13, .. }));
     }
 
     #[test]
@@ -206,7 +209,7 @@ mod tests {
         let cipher = make_aes_cts_cipher([0u8; 32]);
         let raw = [0u8, 0u8];
         let err = decode_symlink(&raw, &cipher).unwrap_err();
-        assert!(matches!(err, ExtError::InvalidFscryptPolicy { .. }));
+        assert!(matches!(err, FscryptError::InvalidPolicy { .. }));
     }
 
     #[test]
@@ -217,6 +220,6 @@ mod tests {
         raw.extend_from_slice(&[0u8; 16]);
         let cipher = make_aes_cts_cipher([0u8; 32]);
         let err = decode_symlink(&raw, &cipher).unwrap_err();
-        assert!(matches!(err, ExtError::InvalidFscryptPolicy { .. }));
+        assert!(matches!(err, FscryptError::InvalidPolicy { .. }));
     }
 }

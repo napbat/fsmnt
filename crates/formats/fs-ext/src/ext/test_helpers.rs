@@ -85,7 +85,7 @@ impl Ext {
                 last_error: None,
             },
             #[cfg(feature = "fscrypt")]
-            fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+            fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
         });
         Box::leak(ext)
     }
@@ -170,7 +170,7 @@ impl Ext {
                 last_error: None,
             },
             #[cfg(feature = "fscrypt")]
-            fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+            fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
         });
         Box::leak(ext)
     }

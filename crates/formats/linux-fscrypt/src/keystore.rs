@@ -1,12 +1,12 @@
-//! In-memory master-key store hung off `Ext`.
+//! In-memory master-key store, owned by the host filesystem.
 //!
-//! Keys are added explicitly via `Ext::add_fscrypt_v1_key` /
-//! `add_fscrypt_v2_key` (raw paths), or via
-//! `Ext::add_fscrypt_v2_wrapped_key` (hardware-wrapped path that
-//! defers the unwrap to an operator-supplied callback). There is no
-//! auto-discovery; an operator supplies keys out-of-band.
-
-#![cfg(feature = "fscrypt")]
+//! Keys are added explicitly — [`FscryptKeystore::add_v1`] /
+//! [`FscryptKeystore::add_v2`] for raw bytes, or
+//! [`FscryptKeystore::add_v2_wrapped`] for a hardware-wrapped blob whose
+//! unwrap is deferred to an operator-supplied callback. There is no
+//! auto-discovery and no kernel-keyring access; an operator supplies
+//! keys out-of-band. `fs-ext` hangs one of these off `Ext` and surfaces
+//! the three registration calls as `Ext::add_fscrypt_*`.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -16,9 +16,9 @@ use core::cell::OnceCell;
 
 use zeroize::Zeroizing;
 
-use crate::error::{ExtError, Result};
-use crate::fscrypt::kdf_v2;
-use crate::fscrypt::types::{
+use crate::error::{FscryptError, Result};
+use crate::kdf_v2;
+use crate::types::{
     FscryptKeyDescriptor, FscryptKeyIdentifier, FscryptMasterKey, FscryptPolicyKind,
 };
 
@@ -31,15 +31,16 @@ use crate::fscrypt::types::{
 /// — the keystore caches the unwrapped bytes after the first lookup
 /// and returns the cached value on subsequent calls.
 ///
-/// `Send + Sync` are required because [`crate::Ext`] is part of the
-/// `agent-core` `TargetFilesystem: Send` contract; the trait object
-/// lives inside the keystore which lives inside `Ext`. Real TEE
+/// `Send + Sync` are required because the host filesystem handle that
+/// owns the keystore is expected to be `Send` (fs-ext's `Ext` is, via
+/// the `TargetFilesystem: Send` contract); the trait object lives
+/// inside the keystore, which lives inside that handle. Real TEE
 /// adapters are typically stateless wrappers around an OS handle and
 /// satisfy these bounds trivially.
 pub trait FscryptKeyUnwrapper: Send + Sync {
     /// Convert a wrapped blob into the raw fscrypt master-key bytes.
     /// Errors surface to the caller as
-    /// [`ExtError::FscryptKeyUnwrapFailed`] with the supplied reason.
+    /// [`FscryptError::KeyUnwrapFailed`] with the supplied reason.
     ///
     /// # Errors
     ///
@@ -86,8 +87,13 @@ enum FscryptV2Entry {
     },
 }
 
+/// The master keys an operator has registered for this filesystem.
+///
+/// v1 keys are filed under their 8-byte descriptor (the operator picks
+/// it; the kernel never derives it), v2 keys under the 16-byte
+/// identifier HKDF derives from the key itself.
 #[derive(Default)]
-pub(crate) struct FscryptKeystore {
+pub struct FscryptKeystore {
     v1: BTreeMap<FscryptKeyDescriptor, FscryptMasterKey>,
     v2: BTreeMap<FscryptKeyIdentifier, FscryptV2Entry>,
 }
@@ -102,11 +108,14 @@ impl core::fmt::Debug for FscryptKeystore {
 }
 
 impl FscryptKeystore {
-    pub(crate) fn add_v1(&mut self, descriptor: FscryptKeyDescriptor, key: FscryptMasterKey) {
+    /// Register a raw v1 master key under the operator-supplied descriptor.
+    pub fn add_v1(&mut self, descriptor: FscryptKeyDescriptor, key: FscryptMasterKey) {
         self.v1.insert(descriptor, key);
     }
 
-    pub(crate) fn add_v2(&mut self, key: FscryptMasterKey) -> FscryptKeyIdentifier {
+    /// Register a raw v2 master key, returning the identifier HKDF
+    /// derives from it — the value a v2 policy names on disk.
+    pub fn add_v2(&mut self, key: FscryptMasterKey) -> FscryptKeyIdentifier {
         let id = kdf_v2::key_identifier(&key);
         self.v2.insert(id, FscryptV2Entry::Raw(key));
         id
@@ -117,7 +126,7 @@ impl FscryptKeystore {
     /// keystore until a lookup against `identifier` triggers the first
     /// unwrap; the unwrapped bytes are cached for subsequent lookups
     /// and zeroized when the keystore is dropped.
-    pub(crate) fn add_v2_wrapped(
+    pub fn add_v2_wrapped(
         &mut self,
         identifier: FscryptKeyIdentifier,
         wrapped_blob: Vec<u8>,
@@ -133,7 +142,9 @@ impl FscryptKeystore {
         );
     }
 
-    pub(crate) fn get_v1(&self, descriptor: FscryptKeyDescriptor) -> Option<&FscryptMasterKey> {
+    /// Look up a v1 master key by descriptor.
+    #[must_use]
+    pub fn get_v1(&self, descriptor: FscryptKeyDescriptor) -> Option<&FscryptMasterKey> {
         self.v1.get(&descriptor)
     }
 
@@ -146,12 +157,15 @@ impl FscryptKeystore {
     ///     unwrap callback errored or returned a key whose derived
     ///     identifier doesn't match the registered one.
     ///
-    /// Callers map `Ok(None)` to [`ExtError::MissingFscryptKey`] (no
+    /// Callers map `Ok(None)` to [`FscryptError::MissingKey`] (no
     /// key registered at all) and propagate the `Err` straight through.
-    pub(crate) fn get_v2(
-        &self,
-        identifier: &FscryptKeyIdentifier,
-    ) -> Result<Option<&FscryptMasterKey>> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FscryptError::KeyUnwrapFailed`] when a wrapped entry's
+    /// unwrap callback fails, or when the key it produces derives an
+    /// identifier other than the registered one.
+    pub fn get_v2(&self, identifier: &FscryptKeyIdentifier) -> Result<Option<&FscryptMasterKey>> {
         let Some(entry) = self.v2.get(identifier) else {
             return Ok(None);
         };
@@ -164,7 +178,7 @@ impl FscryptKeystore {
             } => {
                 if cached.get().is_none() {
                     let unwrapped = unwrapper.unwrap_key(wrapped_blob).map_err(|e| {
-                        ExtError::FscryptKeyUnwrapFailed {
+                        FscryptError::KeyUnwrapFailed {
                             inode: 0,
                             policy_kind: alloc::format!("{:?}", FscryptPolicyKind::V2),
                             key_ref: hex_id(identifier),
@@ -179,7 +193,7 @@ impl FscryptKeystore {
                     // fscrypt is unauthenticated.
                     let derived = kdf_v2::key_identifier(&unwrapped);
                     if &derived != identifier {
-                        return Err(ExtError::FscryptKeyUnwrapFailed {
+                        return Err(FscryptError::KeyUnwrapFailed {
                             inode: 0,
                             policy_kind: alloc::format!("{:?}", FscryptPolicyKind::V2),
                             key_ref: hex_id(identifier),
@@ -197,22 +211,19 @@ impl FscryptKeystore {
         }
     }
 
-    pub(crate) fn iter_v1(&self) -> impl Iterator<Item = FscryptKeyDescriptor> + '_ {
+    /// Iterate the registered v1 descriptors, in ascending byte order.
+    pub fn iter_v1(&self) -> impl Iterator<Item = FscryptKeyDescriptor> + '_ {
         self.v1.keys().copied()
     }
 
-    pub(crate) fn iter_v2(&self) -> impl Iterator<Item = FscryptKeyIdentifier> + '_ {
+    /// Iterate the registered v2 identifiers, in ascending byte order.
+    pub fn iter_v2(&self) -> impl Iterator<Item = FscryptKeyIdentifier> + '_ {
         self.v2.keys().copied()
     }
 }
 
 fn hex_id(id: &FscryptKeyIdentifier) -> String {
-    use core::fmt::Write;
-    let mut s = String::with_capacity(id.0.len() * 2);
-    for b in id.0 {
-        write!(&mut s, "{b:02x}").expect("string write infallible");
-    }
-    s
+    crate::keyderive::hex(&id.0)
 }
 
 #[cfg(test)]
@@ -325,7 +336,7 @@ mod tests {
 
         let err = store.get_v2(&id).unwrap_err();
         assert!(
-            matches!(&err, ExtError::FscryptKeyUnwrapFailed { reason, .. }
+            matches!(&err, FscryptError::KeyUnwrapFailed { reason, .. }
                 if reason.contains("simulated TEE failure")),
             "unexpected error: {err:?}"
         );
@@ -345,7 +356,7 @@ mod tests {
 
         let err = store.get_v2(&wrong_id).unwrap_err();
         assert!(
-            matches!(&err, ExtError::FscryptKeyUnwrapFailed { reason, .. }
+            matches!(&err, FscryptError::KeyUnwrapFailed { reason, .. }
                 if reason.contains("does not match registered")),
             "unexpected error: {err:?}"
         );

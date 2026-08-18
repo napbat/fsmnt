@@ -651,7 +651,7 @@ fn depth_one_bigalloc_ext() -> &'static Ext {
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     }))
 }
 

@@ -127,7 +127,7 @@ fn free_clusters_after_init_counts_reserved_clusters_relative_to_group() {
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     };
     let gdp = GroupDescriptor {
         inode_table: 9,
@@ -216,7 +216,7 @@ fn ext_for_free_clusters_test(
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     }
 }
 

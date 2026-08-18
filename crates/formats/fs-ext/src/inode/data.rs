@@ -243,7 +243,7 @@ impl<'e> ExtInode<'e> {
                 inode: self.number,
                 reason: "ENCRYPT_FL set but encryption.c xattr missing",
             })?;
-        let policy = crate::fscrypt::policy::parse_context(&bytes, self.number)?;
+        let policy = crate::fscrypt::parse_context(&bytes, self.number)?;
         Ok(Some(policy))
     }
 
@@ -326,7 +326,7 @@ impl<'e> ExtInode<'e> {
     ///
     /// For fscrypt-encrypted symlinks (`ENCRYPT_FL`), reads the raw
     /// `fscrypt_symlink_data` payload via the same three-way dispatch,
-    /// then decrypts via [`crate::fscrypt::symlink::decode_symlink`]
+    /// then decrypts via [`crate::fscrypt::decode_symlink`]
     /// when a key is registered. When the key is missing, falls back to
     /// the kernel's no-key presentation form
     /// (`base64url(fscrypt_nokey_name)`, mirroring `fscrypt_get_symlink`
@@ -442,7 +442,7 @@ impl<'e> ExtInode<'e> {
                 reason: "ENCRYPT_FL set but encryption.c xattr missing",
             })?;
         match crate::fscrypt::build_filename_cipher_for_inode(self.ext, self.number, &policy) {
-            Ok(cipher) => crate::fscrypt::symlink::decode_symlink(&raw, &cipher),
+            Ok(cipher) => Ok(crate::fscrypt::decode_symlink(&raw, &cipher)?),
             // Mirrors kernel `fscrypt_get_symlink` → `fscrypt_fname_disk_to_usr`
             // (fs/crypto/hooks.c, fs/crypto/fname.c lines 295-350): when the
             // symlink is encrypted but no key is registered, return the
@@ -451,9 +451,8 @@ impl<'e> ExtInode<'e> {
             // Only the missing-key case falls back; policy / IO / unsupported-mode
             // errors propagate so a real failure is not masked as a no-key string.
             Err(ExtError::MissingFscryptKey { .. }) => {
-                let ct =
-                    crate::fscrypt::symlink::parse_fscrypt_symlink_ciphertext(self.number, &raw)?;
-                Ok(crate::fscrypt::nokey::encode_nokey_name([0, 0], ct))
+                let ct = crate::fscrypt::parse_symlink_ciphertext(self.number, &raw)?;
+                Ok(crate::fscrypt::encode_nokey_name([0, 0], ct))
             }
             Err(other) => Err(other),
         }

@@ -19,13 +19,11 @@
 //! `FSCRYPT_MODE_AES_256_CTS` (32-byte key) and AES-128-CBC-CTS for
 //! `FSCRYPT_MODE_AES_128_CTS` (16-byte key) share this implementation.
 
-#![cfg(feature = "fscrypt")]
-
 use aes::cipher::consts::U16;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, BlockSizeUser, KeyInit, KeySizeUser};
 
-use crate::error::{ExtError, Result};
+use crate::error::{FscryptError, Result};
 
 /// Decrypt `ct` with AES-CBC-CTS (CS3) under the AES variant `C`.
 ///
@@ -38,12 +36,12 @@ where
     C: BlockDecrypt + KeyInit + BlockSizeUser<BlockSize = U16> + KeySizeUser,
 {
     if ct.len() < 16 {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode: 0,
             reason: "CS3 ciphertext shorter than one AES block",
         });
     }
-    let cipher = C::new_from_slice(key).map_err(|_| ExtError::InvalidFscryptPolicy {
+    let cipher = C::new_from_slice(key).map_err(|_| FscryptError::InvalidPolicy {
         inode: 0,
         reason: "AES-CBC-CTS key length does not match the cipher",
     })?;
