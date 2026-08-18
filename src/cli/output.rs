@@ -1,11 +1,17 @@
-//! The `--json` wire format: what a program reads instead of the tables.
+//! Everything the CLI produces, and the one place it decides how to say it.
 //!
 //! Every command already gathers typed facts — offsets, byte counts,
 //! provenance — and then spends them on a column layout. The types here are
-//! that gathering, kept as numbers and enums, so a handler builds one report
-//! and hands it either to the human printer or to [`print_document`]. There
-//! is no second pass over the media for a machine reader, and no table to
-//! scrape.
+//! that gathering, kept as numbers and enums; each of them is a [`Report`],
+//! which knows both how to serialize itself and how to write its table, and
+//! a handler builds one and hands it to [`Output::emit`]. There is no
+//! second pass over the media for a machine reader, no table to scrape, and
+//! no handler that has to remember who it is speaking to: the choice
+//! between the table and the document is made in `emit` and nowhere else.
+//!
+//! A report with no human form writes nothing and says why where it is
+//! implemented, so the silence is a decision somebody wrote down rather
+//! than an arm somebody forgot.
 //!
 //! The schema is the CLI's own, deliberately: the library types it converts
 //! from are free to rename fields, split enums or grow variants without that
@@ -19,6 +25,8 @@
 //! inapplicable is `null` rather than a missing key or a placeholder, so a
 //! reader can index a field it expects instead of testing for it — which is
 //! also why an ordinal a person sees as `-` is `null` here.
+
+use std::io::Write;
 
 use serde::{Serialize, Serializer};
 
@@ -56,28 +64,63 @@ impl Output {
         if json { Self::Json } else { Self::Human }
     }
 
-    /// Whether stdout is reserved for JSON.
-    pub(crate) const fn is_json(self) -> bool {
-        matches!(self, Self::Json)
+    /// Emit one report on stdout, in whichever form this output is.
+    ///
+    /// The single point where JSON-versus-text is decided. Everything above
+    /// it is one gathering of facts, so a new report grows a rendering
+    /// rather than another pair of arms that can disagree.
+    ///
+    /// # Panics
+    ///
+    /// Panics if stdout cannot be written, as `println!` does.
+    pub(crate) fn emit<R: Report>(self, report: &R) {
+        match self {
+            Self::Json => println!("{}", render(report, matches!(R::SHAPE, Shape::Document))),
+            Self::Human => {
+                // Locked once for the whole rendering: a table is many
+                // lines, and nothing else of this process writes between
+                // them.
+                let mut stdout = std::io::stdout().lock();
+                report
+                    .render_text(&mut stdout)
+                    .expect("failed printing to stdout");
+            }
+        }
     }
 }
 
-/// Print one complete document on stdout, ending the line.
-///
-/// Pretty-printed: `drives`, `partitions`, `scan` and `unmount` each emit a
-/// single document, so the whole of stdout is one value and the newlines
-/// inside it cost a reader nothing.
-pub(crate) fn print_document(document: &impl Serialize) {
-    println!("{}", render(document, true));
+/// How a report is delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shape {
+    /// The command's one answer, printed once. Pretty-printed as JSON:
+    /// `drives`, `partitions`, `scan` and `unmount` each emit a single
+    /// document, so the whole of stdout is one value and the newlines
+    /// inside it cost a reader nothing.
+    Document,
+    /// One line of a stream. A mount reports as it happens — opened,
+    /// mounted, unmounted — and the process may live for hours between
+    /// them, so each event is one line (NDJSON) a reader can act on the
+    /// moment it arrives.
+    Event,
 }
 
-/// Print one event of a stream as a single line (NDJSON).
-///
-/// A mount reports as it happens — opened, mounted, unmounted — and the
-/// process may live for hours between them, so each event is one line a
-/// reader can act on the moment it arrives.
-pub(crate) fn print_event(event: &impl Serialize) {
-    println!("{}", render(event, false));
+/// A report the CLI can hand to [`Output::emit`]: one set of facts, two
+/// renderings.
+pub(crate) trait Report: Serialize {
+    /// How this report is delivered: a whole document, or one line of a
+    /// stream.
+    const SHAPE: Shape;
+
+    /// Write the human rendering to `out`.
+    ///
+    /// Reports that have no human form — an event whose facts a person
+    /// already saw as log lines — write nothing and say so in a doc comment
+    /// on the impl.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever `out` returns; the rendering itself cannot fail.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()>;
 }
 
 /// Render a report as JSON text.
@@ -253,6 +296,40 @@ pub(crate) struct SourceRef {
 }
 
 impl SourceRef {
+    /// The source as the command line spelled it: the path that was typed,
+    /// or the drive ID `fsmnt drives` prints.
+    ///
+    /// What [`Source`]'s `Display` writes, read back off the document — so
+    /// a table can suggest a command a person pastes into a shell without
+    /// the resolved source being passed alongside the report of it.
+    pub(crate) fn name(&self) -> &str {
+        // One of the two is always set: a drive has an ID, and everything
+        // else has a path.
+        self.path
+            .as_deref()
+            .or(self.id.as_deref())
+            .unwrap_or_default()
+    }
+
+    /// What to call this source in a sentence: "disk image", "drive", or
+    /// "directory" — the nouns [`Source::describe`] uses.
+    pub(crate) fn describe(&self) -> &'static str {
+        match self.kind {
+            "image" => "disk image",
+            "drive" => "drive",
+            // `new` writes one of three tokens, and the third is its own
+            // noun.
+            _ => "directory",
+        }
+    }
+
+    /// Whether the medium is a physical drive, which is the only kind an
+    /// operating system lays logical volumes over — and so the only listing
+    /// with a `VOLUME` column.
+    pub(crate) fn is_drive(&self) -> bool {
+        self.kind == "drive"
+    }
+
     /// Name the resolved source.
     pub(crate) fn new(source: &Source) -> Self {
         match source {
@@ -354,7 +431,7 @@ pub(crate) struct PartitionsDocument {
     /// Document kind.
     kind: &'static str,
     /// The medium these partitions are on.
-    source: SourceRef,
+    pub(crate) source: SourceRef,
     /// Container format, for an image.
     #[serde(serialize_with = "serialize_format")]
     pub(crate) format: Option<ImageFormat>,
@@ -512,7 +589,7 @@ pub(crate) struct ScanDocument {
     /// Document kind.
     kind: &'static str,
     /// The medium that was searched.
-    source: SourceRef,
+    pub(crate) source: SourceRef,
     /// Distance in bytes between the positions that were tested.
     pub(crate) stride: u64,
     /// Sector size the offsets are also reported in.
@@ -522,6 +599,13 @@ pub(crate) struct ScanDocument {
     /// Container format, for an image.
     #[serde(serialize_with = "serialize_format")]
     pub(crate) format: Option<ImageFormat>,
+    /// Drive model, for the identity line above the table.
+    ///
+    /// Off the wire, where it never was: the model belongs to the drive
+    /// rather than to one search of it, and `fsmnt drives` is the document
+    /// that reports drives.
+    #[serde(skip)]
+    pub(crate) model: Option<String>,
     /// Every hit, in scan order.
     pub(crate) hits: Vec<ScanHitEntry>,
 }
@@ -538,6 +622,7 @@ impl ScanDocument {
         sector_size: u32,
         size_bytes: Option<u64>,
         format: Option<ImageFormat>,
+        model: Option<String>,
         hits: Vec<ScanHitEntry>,
     ) -> Self {
         Self {
@@ -548,6 +633,7 @@ impl ScanDocument {
             sector_size,
             size_bytes,
             format,
+            model,
             hits,
         }
     }
@@ -684,6 +770,19 @@ pub(crate) struct OpenedEvent<'a> {
     notices: Vec<String>,
 }
 
+impl Report for OpenedEvent<'_> {
+    const SHAPE: Shape = Shape::Event;
+
+    /// Nothing, deliberately. Everything this event carries has already
+    /// reached a person on the way here: the filesystem and its offset as
+    /// `info!`, every notice as `warn!`, before the volume appears. A table
+    /// of the same facts on stdout would repeat what the log just said, in
+    /// the shape a parser wants.
+    fn render_text(&self, _out: &mut dyn Write) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl<'a> OpenedEvent<'a> {
     /// Announce an opened volume and what the driver had to do to open it.
     pub(crate) fn new(report: &'a MountReport, notices: Vec<String>) -> Self {
@@ -717,16 +816,59 @@ pub(crate) struct MountedEvent<'a> {
     /// Process holding the mount — this one, or the background process
     /// `--detach` started, which is what `fsmnt unmount` releases.
     pid: u32,
+    /// Whether `pid` is another process. A detached mount outlives the
+    /// command that started it, so a caller that waits on the command it
+    /// spawned would wait forever without knowing this.
+    detached: bool,
+}
+
+impl Report for MountedEvent<'_> {
+    const SHAPE: Shape = Shape::Event;
+
+    /// Two situations, two sentences. A foreground mount still holds the
+    /// console this line is printed on, so Ctrl+C is the obvious way out; a
+    /// detached one has already handed the volume to a process that
+    /// outlives the command, so its pid is what a person is left with.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        let mountpoint = self.mountpoint;
+        if self.detached {
+            writeln!(
+                out,
+                "Volume mounted at {mountpoint} (pid {}); run 'fsmnt unmount {mountpoint}' to \
+                 unmount.",
+                self.pid,
+            )
+        } else {
+            writeln!(
+                out,
+                "Volume mounted at {mountpoint}. Press Ctrl+C, or run 'fsmnt unmount \
+                 {mountpoint}' from another shell, to unmount."
+            )
+        }
+    }
 }
 
 impl<'a> MountedEvent<'a> {
-    /// Announce a volume a program can now read.
-    pub(crate) const fn new(mountpoint: &'a str, pid: u32) -> Self {
+    /// Announce a volume a program can now read, held by this process.
+    pub(crate) const fn foreground(mountpoint: &'a str, pid: u32) -> Self {
         Self {
             schema: SCHEMA,
             event: "mounted",
             mountpoint,
             pid,
+            detached: false,
+        }
+    }
+
+    /// Announce a volume held by the background process `--detach` started,
+    /// which the command that printed this is about to leave running.
+    pub(crate) const fn detached(mountpoint: &'a str, pid: u32) -> Self {
+        Self {
+            schema: SCHEMA,
+            event: "mounted",
+            mountpoint,
+            pid,
+            detached: true,
         }
     }
 }
@@ -743,6 +885,17 @@ pub(crate) struct UnmountedEvent<'a> {
     /// What best-effort reads had to substitute, or `null` when they were
     /// off and every byte served was real.
     best_effort: Option<BestEffort>,
+}
+
+impl Report for UnmountedEvent<'_> {
+    const SHAPE: Shape = Shape::Event;
+
+    /// The mount command's last line: the volume it was holding is gone.
+    /// What best-effort reads had to substitute follows as log lines, where
+    /// the rest of the mount's warnings were.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        writeln!(out, "Unmounted.")
+    }
 }
 
 impl<'a> UnmountedEvent<'a> {
@@ -799,6 +952,16 @@ pub(crate) struct UnmountDocument<'a> {
     /// non-zero exit, not a document reporting `false`; the field is here so
     /// a reader can assert on it rather than on the absence of one.
     unmounted: bool,
+}
+
+impl Report for UnmountDocument<'_> {
+    const SHAPE: Shape = Shape::Document;
+
+    /// Which mountpoint was released — named, because `fsmnt unmount` is
+    /// run from another shell against a volume this process never held.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        writeln!(out, "Unmounted {}.", self.mountpoint)
+    }
 }
 
 impl<'a> UnmountDocument<'a> {

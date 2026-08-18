@@ -28,7 +28,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, Layer};
 
-use super::json::SCHEMA;
+use super::output::SCHEMA;
 
 /// Environment variable holding [`EnvFilter`] directives.
 ///

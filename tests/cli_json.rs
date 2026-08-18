@@ -1,10 +1,15 @@
-//! End-to-end coverage of `--json`, by running the built binary.
+//! End-to-end coverage of `--json` and of the tables it replaces, by
+//! running the built binary.
 //!
 //! The two-stream contract is a property of a whole process — stdout carries
 //! JSON and nothing else, stderr carries one JSON object per event, and the
 //! exit code is unchanged — so it cannot be checked from a unit test that
 //! calls a handler. These run `fsmnt` itself over a temporary MBR image and
 //! parse what comes back, exactly as a driving program would.
+//!
+//! Each JSON test has a twin without the flag, because the two renderings
+//! come from one report: a change that reaches the document reaches the
+//! table, and both are read by somebody.
 
 use std::process::{Command, Output};
 
@@ -223,28 +228,72 @@ fn a_failure_leaves_stdout_empty_and_says_why_on_stderr() {
     );
 }
 
-#[test]
-fn the_tables_are_untouched_without_the_flag() {
-    let (_directory, path) = image_file();
-    let output = fsmnt(&["partitions", &path.display().to_string()]);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
+/// The stdout of a successful run, as a person reads it.
+fn table(output: &Output) -> String {
     assert!(
         output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "the command failed: {}",
+        String::from_utf8_lossy(&output.stderr),
     );
-    assert!(stdout.contains("MBR partition table"), "{stdout}");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
-        stdout.contains("#  TYPE"),
-        "the human table is the default and is unchanged: {stdout}"
+        serde_json::from_str::<Value>(&stdout).is_err(),
+        "without --json nothing on stdout is JSON: {stdout}"
+    );
+    stdout
+}
+
+#[test]
+fn the_partition_table_is_untouched_without_the_flag() {
+    let (_directory, path) = image_file();
+    let stdout = table(&fsmnt(&["partitions", &path.display().to_string()]));
+
+    assert!(stdout.contains("MBR partition table"), "{stdout}");
+    for column in ["#", "TYPE", "SIZE", "OFFSET", "FILESYSTEM"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.contains("OFFSET") && line.contains(column)),
+            "the header still carries {column}: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains(&format!("  {}  ", ntfs_offset())),
+        "and the NTFS partition's offset is in the OFFSET column: {stdout}"
     );
     assert!(
         stdout.contains("Mount one with: fsmnt mount "),
         "including the hint that only a person needs: {stdout}"
     );
+}
+
+#[test]
+fn the_scan_table_is_untouched_without_the_flag() {
+    let (_directory, path) = image_file();
+    let stdout = table(&fsmnt(&["scan", &path.display().to_string()]));
+
     assert!(
-        serde_json::from_str::<Value>(&stdout).is_err(),
-        "without --json nothing on stdout is JSON: {stdout}"
+        stdout.starts_with(&format!("{}: raw image, ", path.display())),
+        "the scan says what it searched before it says what it found: {stdout}"
+    );
+    for column in ["#", "OFFSET", "SECTOR", "TYPE", "SIZE", "NOTE"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.contains("SECTOR") && line.contains(column)),
+            "the header still carries {column}: {stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("partition table; list it with `fsmnt partitions`"),
+        "the NOTE column is the same sentence the JSON `note` carries: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Mount one with: fsmnt mount {} <MOUNTPOINT> --offset {}",
+            path.display(),
+            ntfs_offset()
+        )),
+        "and the hint offers the offset the document's mount_command carries: {stdout}"
     );
 }

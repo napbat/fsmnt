@@ -6,21 +6,25 @@
 //! has a container format and a drive has a model.
 //!
 //! Every hit becomes one [`ScanHitEntry`] — offsets and numbers, the note
-//! the table prints, and the argument list that opens it — which is then
-//! rendered as the table below or as JSON. The `NOTE` column and the JSON
-//! `note` are therefore the same sentence, and the mount command a person
-//! reads is the same list a program receives.
+//! the table prints, and the argument list that opens it — which the one
+//! [`ScanDocument`] then renders as the table below or as JSON. The `NOTE`
+//! column and the JSON `note` are therefore the same sentence, and the
+//! mount command a person reads is the same list a program receives.
+
+use std::io::Write;
 
 use fsmnt::device::DetectedBootSector;
 use fsmnt::{ImageFormat, ScanHit, ScanHitKind, ScanOptions};
 
 use super::format_media_size;
-use super::json::{self, BackupSuperblockEntry, Output, ScanDocument, ScanHitEntry, media_size};
+use super::output::{
+    BackupSuperblockEntry, Output, Report, ScanDocument, ScanHitEntry, Shape, media_size,
+};
 use super::size::DEFAULT_SECTOR_SIZE;
 use super::source::{Source, resolve};
 use crate::ScanArgs;
 
-/// What the medium is, for the line above the table and for the document.
+/// What the medium is, gathered before the scan and spent on the document.
 struct Medium {
     /// Length in bytes, when anything established one.
     size_bytes: Option<u64>,
@@ -50,23 +54,20 @@ pub(crate) fn handle_scan(
             )
             .into());
         }
-        Source::Image(path) => scan_image(args, &source, path, output)?,
-        Source::Drive(drive) => scan_drive(args, &source, drive, output)?,
+        Source::Image(path) => scan_image(args, &source, path)?,
+        Source::Drive(drive) => scan_drive(args, &source, drive)?,
     };
 
     let sector_size = args.sector_size.unwrap_or(DEFAULT_SECTOR_SIZE);
-    let document = ScanDocument::new(
+    output.emit(&ScanDocument::new(
         &source,
         args.stride,
         sector_size,
         medium.size_bytes,
         medium.format,
+        medium.model,
         hit_entries(&hits, sector_size),
-    );
-    match output {
-        Output::Json => json::print_document(&document),
-        Output::Human => print_hits(&source, &document),
-    }
+    ));
     Ok(())
 }
 
@@ -75,7 +76,6 @@ fn scan_image(
     args: &ScanArgs,
     source: &Source,
     path: &std::path::Path,
-    output: Output,
 ) -> Result<(Medium, Vec<ScanHit>), Box<dyn std::error::Error>> {
     let reader = fsmnt::ImageReader::open(path)?;
     let medium = Medium {
@@ -84,7 +84,7 @@ fn scan_image(
         model: None,
     };
     drop(reader);
-    announce(source, &medium, args.stride, output);
+    announce(source, args.stride);
     let hits = fsmnt::scan_image_with_options(path, ScanOptions::new().with_stride(args.stride))?;
     Ok((medium, hits))
 }
@@ -95,7 +95,6 @@ fn scan_drive(
     args: &ScanArgs,
     source: &Source,
     drive: &fsmnt::device::HostDriveId,
-    output: Output,
 ) -> Result<(Medium, Vec<ScanHit>), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
     use fsmnt::device::HostDriveEnumerator;
@@ -106,7 +105,7 @@ fn scan_drive(
         format: None,
         model: info.and_then(|info| info.model),
     };
-    announce(source, &medium, args.stride, output);
+    announce(source, args.stride);
     let hits = fsmnt::scan_drive::<HostDrives>(drive, ScanOptions::new().with_stride(args.stride))?;
     Ok((medium, hits))
 }
@@ -117,29 +116,16 @@ fn scan_drive(
     _args: &ScanArgs,
     _source: &Source,
     _drive: &fsmnt::device::HostDriveId,
-    _output: Output,
 ) -> Result<(Medium, Vec<ScanHit>), Box<dyn std::error::Error>> {
     Err(super::NO_DRIVE_SUPPORT.into())
 }
 
 /// Say what is about to be read, before a scan that may take a while.
 ///
-/// The identity line is the command's product, so it is printed only for a
-/// person: a JSON reader gets the same facts as fields of the one document,
-/// once the scan is done.
-fn announce(source: &Source, medium: &Medium, stride: u64, output: Output) {
-    if output == Output::Human {
-        let size = medium
-            .size_bytes
-            .map_or_else(|| "unknown".to_string(), format_media_size);
-        match medium.format {
-            Some(format) => println!("{source}: {format} image, {size}"),
-            None => println!(
-                "{source}: drive ({}), {size}",
-                medium.model.as_deref().unwrap_or("unknown model"),
-            ),
-        }
-    }
+/// A log line rather than a printed one, because it says what the command
+/// is *doing*: what the medium turned out to be is the first line of the
+/// document below, where a JSON reader gets it as fields.
+fn announce(source: &Source, stride: u64) {
     tracing::info!("scanning {source} every {stride} bytes for filesystem starts");
 }
 
@@ -261,23 +247,57 @@ fn mount_command(hit: &ScanHit) -> Option<Vec<String>> {
     ))
 }
 
-/// Print what the scan found, and the two ways to mount one of them.
-fn print_hits(source: &Source, document: &ScanDocument) {
+impl Report for ScanDocument {
+    const SHAPE: Shape = Shape::Document;
+
+    /// What was searched, what was found in it, and the two ways to mount
+    /// one of the hits.
+    fn render_text(&self, out: &mut dyn Write) -> std::io::Result<()> {
+        write_medium(out, self)?;
+        write_hits(out, self)
+    }
+}
+
+/// The identity line: what the medium is, and how long.
+///
+/// An image has a container format and a drive has a model, which is the
+/// only difference between the two — they are the same forensic situation
+/// and produce the same table.
+fn write_medium(out: &mut dyn Write, document: &ScanDocument) -> std::io::Result<()> {
+    let source = document.source.name();
+    let size = document
+        .size_bytes
+        .map_or_else(|| "unknown".to_string(), format_media_size);
+    match document.format {
+        Some(format) => writeln!(out, "{source}: {format} image, {size}"),
+        None => writeln!(
+            out,
+            "{source}: drive ({}), {size}",
+            document.model.as_deref().unwrap_or("unknown model"),
+        ),
+    }
+}
+
+/// Write what the scan found, and the two ways to mount one of them.
+fn write_hits(out: &mut dyn Write, document: &ScanDocument) -> std::io::Result<()> {
+    let source = document.source.name();
     if document.hits.is_empty() {
-        println!(
+        return writeln!(
+            out,
             "\nNo filesystems found. A filesystem whose start is not aligned to {} bytes needs a \
              finer scan: --stride 512.",
             document.stride
         );
-        return;
     }
 
-    println!(
+    writeln!(
+        out,
         "\n{:>4}  {:>14} {:>14}  {:<22} {:>12}  NOTE",
         "#", "OFFSET", "SECTOR", "TYPE", "SIZE"
-    );
+    )?;
     for hit in &document.hits {
-        println!(
+        writeln!(
+            out,
             "{:>4}  {:>14} {:>14}  {:<22} {:>12}  {}",
             hit.ordinal
                 .map_or_else(|| "-".to_string(), |ordinal| ordinal.to_string()),
@@ -288,7 +308,7 @@ fn print_hits(source: &Source, document: &ScanDocument) {
             hit.size_bytes
                 .map_or_else(|| "-".to_string(), format_media_size),
             hit.note,
-        );
+        )?;
     }
 
     // A filesystem this medium begins *inside* has no offset here to mount
@@ -301,22 +321,22 @@ fn print_hits(source: &Source, document: &ScanDocument) {
 
     let Some(first) = document.hits.iter().find(|hit| hit.mount_offset.is_some()) else {
         if let Some(hit) = begins_inside {
-            println!(
+            return writeln!(
+                out,
                 "\nNo row above is the start of a filesystem, but this medium is a slice of one. \
                  Mount it with:\n  fsmnt mount {source} <MOUNTPOINT> {}",
                 command_line(hit),
             );
-            return;
         }
         // Every row above is evidence *about* a filesystem rather than the
         // start of one, so there is no offset to offer. Saying that is more
         // use than a mount command with nothing to put in it.
-        println!(
+        return writeln!(
+            out,
             "\nNothing found is mountable: no row above is the start of a filesystem. A start \
              that is not aligned to {} bytes needs a finer scan: --stride 512.",
             document.stride
         );
-        return;
     };
     let offset = first.mount_offset.unwrap_or(first.offset);
     let stride_flag = if document.stride == fsmnt::DEFAULT_STRIDE {
@@ -324,19 +344,22 @@ fn print_hits(source: &Source, document: &ScanDocument) {
     } else {
         format!(" --stride {}", document.stride)
     };
-    println!(
+    writeln!(
+        out,
         "\nMount one with: fsmnt mount {source} <MOUNTPOINT> --offset {offset}\n\
          or by its # above:  fsmnt mount {source} <MOUNTPOINT> --scan{stride_flag} \
          --partition <#>   (# is synthetic — from this scan, not from the {})",
-        source.describe(),
-    );
+        document.source.describe(),
+    )?;
     if let Some(hit) = begins_inside {
-        println!(
+        writeln!(
+            out,
             "\nOne row above has no #: its filesystem starts before this medium. Mount that one \
              with:\n  fsmnt mount {source} <MOUNTPOINT> {}",
             command_line(hit),
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// A hit's mount arguments as a person would type them.
@@ -510,10 +533,25 @@ fn group_list(hit: &ScanHit) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SECTOR_SIZE, backups_note, hit_entries, hit_entry, note_column, sector, type_column,
+        DEFAULT_SECTOR_SIZE, Report, ScanDocument, Source, backups_note, hit_entries, hit_entry,
+        note_column, sector, type_column,
     };
     use fsmnt::device::DetectedBootSector;
-    use fsmnt::{ExtBackupSuperblock, ScanHit, ScanHitKind};
+    use fsmnt::{ExtBackupSuperblock, ImageFormat, ScanHit, ScanHitKind};
+
+    /// Render a document the way `emit` writes it to a terminal.
+    fn text(document: &ScanDocument) -> String {
+        let mut rendered = Vec::new();
+        document
+            .render_text(&mut rendered)
+            .expect("a rendering into memory cannot fail");
+        String::from_utf8(rendered).expect("the rendering is UTF-8")
+    }
+
+    /// The expected rendering, written one printed line per element.
+    fn lines(lines: &[&str]) -> String {
+        format!("{}\n", lines.join("\n"))
+    }
 
     fn backups(backups: &[(u64, u16)]) -> Vec<ExtBackupSuperblock> {
         backups
@@ -782,6 +820,74 @@ mod tests {
         assert_eq!(
             value["mount_command"],
             serde_json::json!(["--offset", "270532608"]),
+        );
+    }
+
+    #[test]
+    fn the_table_a_person_reads_is_the_document_rendered_as_text() {
+        let hits = vec![
+            ScanHit {
+                offset: 0,
+                kind: ScanHitKind::PartitionTable(DetectedBootSector::MbrPartitioned),
+                size_bytes: None,
+                backup_superblocks: Vec::new(),
+            },
+            ScanHit {
+                size_bytes: Some(3_300_000_000),
+                ..ext_hit(270_532_608, &[(1024, 1), (2048, 3)])
+            },
+        ];
+        let document = ScanDocument::new(
+            &Source::Image("disk.bin".into()),
+            fsmnt::DEFAULT_STRIDE,
+            DEFAULT_SECTOR_SIZE,
+            Some(4_000_000_000),
+            Some(ImageFormat::Raw),
+            None,
+            hit_entries(&hits, DEFAULT_SECTOR_SIZE),
+        );
+
+        assert_eq!(
+            text(&document),
+            lines(&[
+                "disk.bin: raw image, 4.0 GB",
+                "",
+                "   #          OFFSET         SECTOR  TYPE                           SIZE  NOTE",
+                "   -               0             0s  MbrPartitioned                    -  \
+                 partition table; list it with `fsmnt partitions`",
+                "   0       270532608        528384s  Ext                          3.3 GB  \
+                 2 backup superblocks (groups 1, 3)",
+                "",
+                "Mount one with: fsmnt mount disk.bin <MOUNTPOINT> --offset 270532608",
+                "or by its # above:  fsmnt mount disk.bin <MOUNTPOINT> --scan --partition <#>   \
+                 (# is synthetic — from this scan, not from the disk image)",
+            ]),
+            "the `#`, the note and the offset are the entry's own fields, laid out in columns"
+        );
+    }
+
+    #[test]
+    fn a_scan_that_found_nothing_still_says_what_it_searched() {
+        let document = ScanDocument::new(
+            &Source::Drive(fsmnt::device::HostDriveId::new("0")),
+            fsmnt::DEFAULT_STRIDE,
+            DEFAULT_SECTOR_SIZE,
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            text(&document),
+            lines(&[
+                "0: drive (unknown model), unknown",
+                "",
+                "No filesystems found. A filesystem whose start is not aligned to 4096 bytes \
+                 needs a finer scan: --stride 512.",
+            ]),
+            "a drive names its model where an image names its container format, and a length \
+             nobody established is not printed as 0"
         );
     }
 }
