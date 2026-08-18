@@ -4,13 +4,21 @@
 //! zeroes, one NTFS partition) and drives [`fsmnt::image_layout`] and
 //! [`fsmnt::ImageOpenOptions::with_partition`] over it, so the listing
 //! ordinals and the mount selector are checked against the same media.
+//!
+//! Two variations on that media cover what a partition table can say about
+//! bytes a file does not have: a GPT written in 4096-byte sectors, whose
+//! offsets are eight times wrong when it is read as 512-byte ones, and an
+//! image cut short of the partitions its table describes.
 
 use std::io::Read;
 
-use fsmnt::device::{DetectedBootSector, DeviceReader, FilesystemDriver, ImageFormat};
+use fsmnt::device::{
+    DetectedBootSector, DeviceReader, FilesystemDriver, GptPartitionEntry, ImageFormat,
+};
 use fsmnt::{
     FsEntry, FsError, FsMetadata, FsResult, ImageLayoutKind, ImageOpenOptions, OpenImageError,
-    TargetFilesystem, image_layout, open_image, open_image_with_options,
+    TargetFilesystem, image_layout, image_layout_with_sector_size, open_image,
+    open_image_with_options,
 };
 
 const SECTOR_SIZE: usize = 512;
@@ -26,10 +34,26 @@ const NTFS_START_LBA: u32 = 16;
 /// Sector count of the NTFS partition; it runs to the end of the media.
 const NTFS_SECTORS: u32 = 48;
 
-/// A filesystem that answers "not found" to everything.
+/// A filesystem that answers "not found" to everything, and claims to be
+/// exactly as large as the NTFS partition it is opened from.
+///
+/// The claim is what makes a truncated image detectable: the driver opens
+/// happily from a boot sector the image does carry, and only the size it
+/// reports reveals that the rest is not there.
 struct EmptyFilesystem;
 
+impl EmptyFilesystem {
+    /// The size this filesystem claims, matching the NTFS partition entry.
+    fn claimed_size() -> u64 {
+        u64::from(NTFS_SECTORS) * 512
+    }
+}
+
 impl TargetFilesystem for EmptyFilesystem {
+    fn total_size(&self) -> Option<u64> {
+        Some(Self::claimed_size())
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         Err(FsError::NotFound(path.to_string()))
     }
@@ -239,4 +263,187 @@ fn an_unpartitioned_image_is_one_whole_image_partition() {
         open_image_with_options(&path, &registry(), options).expect("mount the whole image");
     assert_eq!(opened.offset, 0);
     assert_eq!(opened.size_bytes, MEDIA_SIZE as u64);
+}
+
+/// Logical sector size of a 4Kn drive: the GPT header lands at byte 4096 and
+/// every LBA in the entry array counts 4096-byte units.
+const NATIVE_4K: usize = 4096;
+/// First LBA of the single partition in the 4Kn image.
+const NATIVE_4K_FIRST_LBA: u64 = 4;
+/// Last LBA of that partition, inclusive as GPT records it.
+const NATIVE_4K_LAST_LBA: u64 = 7;
+
+/// Raw media laid out as a 4Kn drive's GPT: protective MBR in LBA 0, header
+/// in LBA 1, entry array in LBA 2, one NTFS partition from LBA 4.
+fn native_4k_gpt_media() -> Vec<u8> {
+    let mut media = vec![0_u8; NATIVE_4K * 8];
+
+    // The protective MBR lives in the first 512 bytes of LBA 0 whatever the
+    // sector size — which is what makes a 512-byte read of a 4Kn dump look
+    // like a GPT whose header has gone missing.
+    write_mbr_entry(&mut media[446..462], 0xee, 1, 0xffff_ffff);
+    media[510..512].copy_from_slice(&[0x55, 0xaa]);
+
+    let header = &mut media[NATIVE_4K..NATIVE_4K + 92];
+    header[0..8].copy_from_slice(b"EFI PART");
+    header[8..12].copy_from_slice(&0x0001_0000_u32.to_le_bytes()); // revision 1.0
+    header[12..16].copy_from_slice(&92_u32.to_le_bytes()); // header_size
+    header[24..32].copy_from_slice(&1_u64.to_le_bytes()); // current_lba
+    header[72..80].copy_from_slice(&2_u64.to_le_bytes()); // partition_entry_lba
+    header[80..84].copy_from_slice(&4_u32.to_le_bytes()); // num_partition_entries
+    header[84..88].copy_from_slice(&128_u32.to_le_bytes()); // partition_entry_size
+
+    let entry = &mut media[NATIVE_4K * 2..NATIVE_4K * 2 + 128];
+    entry[0..16].copy_from_slice(&GptPartitionEntry::LINUX_FILESYSTEM_GUID);
+    entry[16..32].copy_from_slice(&[0x11_u8; 16]); // unique partition GUID
+    entry[32..40].copy_from_slice(&NATIVE_4K_FIRST_LBA.to_le_bytes());
+    entry[40..48].copy_from_slice(&NATIVE_4K_LAST_LBA.to_le_bytes());
+
+    let partition_offset = usize::try_from(NATIVE_4K_FIRST_LBA).expect("lba fits") * NATIVE_4K;
+    write_ntfs_boot_sector(&mut media, partition_offset);
+    media
+}
+
+/// Byte offset and length of the 4Kn image's single partition.
+fn native_4k_extent() -> (u64, u64) {
+    let sector = u64::try_from(NATIVE_4K).expect("sector size fits");
+    (
+        NATIVE_4K_FIRST_LBA * sector,
+        (NATIVE_4K_LAST_LBA - NATIVE_4K_FIRST_LBA + 1) * sector,
+    )
+}
+
+#[test]
+fn a_4kn_gpt_is_detected_when_no_sector_size_is_given() {
+    let (_directory, path) = image_file(&native_4k_gpt_media());
+    let (offset, size) = native_4k_extent();
+
+    let layout = image_layout(&path).expect("enumerate the 4Kn image");
+
+    assert!(matches!(layout.kind, ImageLayoutKind::Gpt));
+    assert_eq!(layout.sector_size, 4096);
+    assert!(
+        layout.sector_size_auto_detected,
+        "512-byte sectors find no GPT header here, so 4096 was inferred"
+    );
+    assert_eq!(layout.partitions.len(), 1);
+    assert_eq!(layout.partitions[0].offset, offset);
+    assert_eq!(layout.partitions[0].size_bytes, size);
+    assert_eq!(layout.partitions[0].missing_bytes, 0);
+    assert_eq!(
+        layout.partitions[0].detected,
+        Some(DetectedBootSector::Ntfs),
+        "the partition offset has to be right for its boot sector to be found"
+    );
+}
+
+#[test]
+fn an_explicit_sector_size_is_taken_at_its_word() {
+    let (_directory, path) = image_file(&native_4k_gpt_media());
+    let (offset, _) = native_4k_extent();
+
+    let layout = image_layout_with_sector_size(&path, 4096).expect("enumerate at 4096");
+    assert_eq!(layout.sector_size, 4096);
+    assert!(
+        !layout.sector_size_auto_detected,
+        "nothing was inferred; the caller said so"
+    );
+    assert_eq!(layout.partitions[0].offset, offset);
+
+    let error =
+        image_layout_with_sector_size(&path, 512).expect_err("there is no GPT header at byte 512");
+    assert!(matches!(error, OpenImageError::Layout { .. }));
+}
+
+#[test]
+fn a_4kn_partition_can_be_mounted_by_ordinal() {
+    let (_directory, path) = image_file(&native_4k_gpt_media());
+    let (offset, size) = native_4k_extent();
+
+    let options = ImageOpenOptions::new()
+        .with_partition(0)
+        .with_sector_size(4096);
+    let opened = open_image_with_options(&path, &registry(), options).expect("mount at 4096");
+    assert_eq!(opened.offset, offset);
+    assert_eq!(opened.size_bytes, size);
+}
+
+/// How much of the NTFS partition the truncated image still carries.
+const PRESENT_NTFS_BYTES: usize = 8 * SECTOR_SIZE;
+
+/// The MBR media, cut off part-way through the NTFS partition.
+fn truncated_media() -> Vec<u8> {
+    let mut media = mbr_partitioned_media();
+    media.truncate(ntfs_offset() + PRESENT_NTFS_BYTES);
+    media
+}
+
+#[test]
+fn a_partition_the_image_stops_inside_reports_what_is_missing() {
+    let (_directory, path) = image_file(&truncated_media());
+
+    let layout = image_layout(&path).expect("enumerate the truncated image");
+
+    let data = &layout.partitions[0];
+    assert_eq!(data.missing_bytes, 0, "the leading partition is complete");
+    assert!(!data.is_truncated());
+
+    let ntfs = &layout.partitions[1];
+    let declared = u64::from(NTFS_SECTORS) * 512;
+    let present = u64::try_from(PRESENT_NTFS_BYTES).expect("byte count fits");
+    assert_eq!(ntfs.size_bytes, declared);
+    assert_eq!(ntfs.missing_bytes, declared - present);
+    assert_eq!(ntfs.available_bytes(), present);
+    assert!(ntfs.is_truncated());
+    assert!(!ntfs.is_beyond_end());
+    assert_eq!(
+        ntfs.detected,
+        Some(DetectedBootSector::Ntfs),
+        "the boot sector is present even though the volume is not"
+    );
+}
+
+#[test]
+fn a_partition_beyond_the_end_of_the_image_is_reported_as_such() {
+    let mut media = mbr_partitioned_media();
+    media.truncate(ntfs_offset() - SECTOR_SIZE);
+    let (_directory, path) = image_file(&media);
+
+    let layout = image_layout(&path).expect("enumerate the short image");
+    let ntfs = &layout.partitions[1];
+    assert!(ntfs.is_beyond_end());
+    assert!(!ntfs.is_truncated(), "none of it is present to be cut");
+    assert_eq!(ntfs.available_bytes(), 0);
+    assert_eq!(ntfs.detected, None, "nothing there to classify");
+}
+
+#[test]
+fn mounting_a_truncated_partition_reports_the_shortfall() {
+    let (_directory, path) = image_file(&truncated_media());
+    let options = ImageOpenOptions::new().with_partition(1);
+
+    let opened = open_image_with_options(&path, &registry(), options)
+        .expect("the boot sector is present, so the driver opens");
+
+    let present = u64::try_from(PRESENT_NTFS_BYTES).expect("byte count fits");
+    assert_eq!(
+        opened.size_bytes, present,
+        "the window is bounded by the image, not by the partition table"
+    );
+    assert_eq!(opened.declared_size_bytes, u64::from(NTFS_SECTORS) * 512);
+    assert_eq!(
+        opened.truncated_by,
+        Some(EmptyFilesystem::claimed_size() - present)
+    );
+}
+
+#[test]
+fn mounting_a_complete_partition_reports_no_shortfall() {
+    let (_directory, path) = image_file(&mbr_partitioned_media());
+    let options = ImageOpenOptions::new().with_partition(1);
+
+    let opened = open_image_with_options(&path, &registry(), options).expect("open the partition");
+
+    assert_eq!(opened.truncated_by, None);
+    assert_eq!(opened.size_bytes, opened.declared_size_bytes);
 }

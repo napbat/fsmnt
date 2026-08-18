@@ -3,18 +3,35 @@
 //! [`image_layout`] answers "what is inside this file?" without opening a
 //! filesystem: the container format, the partition table (if any), and every
 //! addressable partition with its ordinal, byte offset, size, type, label,
-//! and detected filesystem.
+//! detected filesystem, and how much of it the image is missing.
 //!
 //! The ordinals it reports are the ones
 //! [`ImageOpenOptions::with_partition`](crate::ImageOpenOptions::with_partition)
 //! consumes — both come from the same enumeration, so a partition listed here
 //! can be mounted by its number.
+//!
+//! Partition tables are written in the drive's logical sectors, so a dump of
+//! a 4Kn drive puts its GPT header at byte 4096 and means every LBA in the
+//! entry array counts 4096-byte units. [`ImageLayoutOptions::with_sector_size`]
+//! states the sector size; without one, enumeration falls back to 4 KiB
+//! sectors when 512-byte sectors find no table (see
+//! [`ImageLayout::sector_size_auto_detected`]).
 
 use std::path::Path;
 
 use fsmnt_device::{DetectedBootSector, Disk, DiskLayout, ImageFormat, ImageReader};
 
 use crate::OpenImageError;
+
+/// Logical sector size assumed for a decoded image with no better
+/// information: the 512-byte sector every 512n and 512e drive reports.
+const DEFAULT_SECTOR_SIZE: u32 = 512;
+
+/// Logical sector size tried when 512-byte sectors find no partition table.
+///
+/// 4Kn drives are the only common media whose dump needs a different unit,
+/// and a raw dump of one carries no geometry metadata to read it from.
+const NATIVE_4K_SECTOR_SIZE: u32 = 4096;
 
 /// Partition table (or lack of one) found at the start of a decoded image.
 ///
@@ -32,6 +49,38 @@ pub enum ImageLayoutKind {
     Unknown,
 }
 
+/// Sector-size and other choices for enumerating an image's layout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageLayoutOptions {
+    sector_size: Option<u32>,
+}
+
+impl ImageLayoutOptions {
+    /// Enumerate with automatic sector-size selection.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { sector_size: None }
+    }
+
+    /// Read the partition table in sectors of `sector_size` bytes.
+    ///
+    /// Supply this for a dump of a 4Kn drive, whose GPT header sits at byte
+    /// 4096 and whose entry LBAs count 4096-byte units. Setting it also
+    /// disables the automatic fallback, so a wrong value is reported as "no
+    /// partition table" rather than silently corrected.
+    #[must_use]
+    pub const fn with_sector_size(mut self, sector_size: u32) -> Self {
+        self.sector_size = Some(sector_size);
+        self
+    }
+
+    /// The requested sector size, or `None` when it is to be detected.
+    #[must_use]
+    pub const fn sector_size(&self) -> Option<u32> {
+        self.sector_size
+    }
+}
+
 /// One mountable extent within a decoded disk image.
 #[derive(Clone, Debug)]
 pub struct ImagePartition {
@@ -44,6 +93,13 @@ pub struct ImagePartition {
     pub offset: u64,
     /// Length of the partition in bytes, as declared by the partition table.
     pub size_bytes: u64,
+    /// How many of those bytes lie past the end of the decoded image.
+    ///
+    /// 0 when the partition is fully present. Equal to
+    /// [`size_bytes`](Self::size_bytes) when the partition starts past the
+    /// end of the image — a partition-table-only dump, or an acquisition
+    /// that stopped early, describes extents the media does not carry.
+    pub missing_bytes: u64,
     /// Human-readable partition type: the GPT type name, or the MBR type
     /// name falling back to its `0xNN` code. `None` for a GPT type GUID
     /// with no known name and for images without a partition table.
@@ -55,6 +111,26 @@ pub struct ImagePartition {
     pub detected: Option<DetectedBootSector>,
 }
 
+impl ImagePartition {
+    /// Bytes of this partition the decoded image actually carries.
+    #[must_use]
+    pub const fn available_bytes(&self) -> u64 {
+        self.size_bytes.saturating_sub(self.missing_bytes)
+    }
+
+    /// Whether the image carries none of this partition at all.
+    #[must_use]
+    pub const fn is_beyond_end(&self) -> bool {
+        self.available_bytes() == 0
+    }
+
+    /// Whether the image carries some but not all of this partition.
+    #[must_use]
+    pub const fn is_truncated(&self) -> bool {
+        self.missing_bytes > 0 && !self.is_beyond_end()
+    }
+}
+
 /// What a decoded disk image contains.
 ///
 /// Returned by [`image_layout`]; see [`ImageLayout::partitions`] for the
@@ -64,8 +140,12 @@ pub struct ImageLayout {
     /// Container format the image was decoded from.
     pub format: ImageFormat,
     /// Logical sector size used to convert partition-table LBAs to byte
-    /// offsets. Decoded image media is addressed in 512-byte sectors.
+    /// offsets.
     pub sector_size: u32,
+    /// Whether [`sector_size`](Self::sector_size) was inferred rather than
+    /// supplied: 512-byte sectors found no partition table and 4096-byte
+    /// sectors found a GPT.
+    pub sector_size_auto_detected: bool,
     /// Length of the decoded media in bytes.
     pub size_bytes: u64,
     /// Partition table found at the start of the decoded media.
@@ -87,6 +167,18 @@ pub(crate) struct ImageLayoutView {
     pub(crate) layout: ImageLayout,
 }
 
+/// A partition resolved to the window a filesystem will be opened in.
+pub(crate) struct LocatedImagePartition {
+    /// Reader for the decoded media.
+    pub(crate) image: ImageReader,
+    /// Byte offset of the partition within the decoded media.
+    pub(crate) offset: u64,
+    /// Length the partition table declares for the partition.
+    pub(crate) declared_bytes: u64,
+    /// Bytes of that extent the decoded media actually carries.
+    pub(crate) available_bytes: u64,
+}
+
 /// List the partitions inside a raw, EWF, VHD, or VHDX disk image.
 ///
 /// The image is decoded and its partition table parsed, but no filesystem is
@@ -98,18 +190,92 @@ pub(crate) struct ImageLayoutView {
 /// Returns an error if the image cannot be opened or decoded, or if its
 /// leading sectors cannot be read to classify the layout.
 pub fn image_layout(path: impl AsRef<Path>) -> Result<ImageLayout, OpenImageError> {
-    read_image_layout(path.as_ref()).map(|view| view.layout)
+    image_layout_with_options(path, ImageLayoutOptions::new())
+}
+
+/// List an image's partitions, reading its partition table in sectors of
+/// `sector_size` bytes.
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or decoded, or if its
+/// leading sectors cannot be read to classify the layout.
+pub fn image_layout_with_sector_size(
+    path: impl AsRef<Path>,
+    sector_size: u32,
+) -> Result<ImageLayout, OpenImageError> {
+    image_layout_with_options(
+        path,
+        ImageLayoutOptions::new().with_sector_size(sector_size),
+    )
+}
+
+/// List an image's partitions with explicit enumeration options.
+///
+/// # Errors
+///
+/// Returns an error if the image cannot be opened or decoded, or if its
+/// leading sectors cannot be read to classify the layout.
+pub fn image_layout_with_options(
+    path: impl AsRef<Path>,
+    options: ImageLayoutOptions,
+) -> Result<ImageLayout, OpenImageError> {
+    read_image_layout(path.as_ref(), options).map(|view| view.layout)
 }
 
 /// Enumerate an image's partitions and hand back the reader used to do it.
-pub(crate) fn read_image_layout(path: &Path) -> Result<ImageLayoutView, OpenImageError> {
+///
+/// With no sector size requested this is where the 4Kn fallback lives: a
+/// 512-byte read of a 4Kn dump finds a protective MBR at byte 0 and then no
+/// GPT header at byte 512, so the first attempt either fails or reports
+/// nothing mountable. Retrying at 4096 either produces a GPT — in which case
+/// it is the truth about the media — or is discarded, leaving the original
+/// answer intact.
+pub(crate) fn read_image_layout(
+    path: &Path,
+    options: ImageLayoutOptions,
+) -> Result<ImageLayoutView, OpenImageError> {
+    if let Some(sector_size) = options.sector_size {
+        return layout_at_sector_size(path, sector_size, false);
+    }
+
+    let first = layout_at_sector_size(path, DEFAULT_SECTOR_SIZE, false);
+    if first.as_ref().is_ok_and(describes_the_media) {
+        return first;
+    }
+    match layout_at_sector_size(path, NATIVE_4K_SECTOR_SIZE, true) {
+        Ok(view) if matches!(view.layout.kind, ImageLayoutKind::Gpt) => Ok(view),
+        _ => first,
+    }
+}
+
+/// Whether a layout is an answer, as opposed to "nothing recognized here".
+///
+/// An MBR with no usable entries is as inconclusive as no table at all: a
+/// 4Kn GPT dump's protective MBR parses as an MBR whose single entry is
+/// filtered out for being GPT-protective.
+fn describes_the_media(view: &ImageLayoutView) -> bool {
+    match view.layout.kind {
+        ImageLayoutKind::Gpt | ImageLayoutKind::Bare(_) => true,
+        ImageLayoutKind::Mbr => !view.layout.partitions.is_empty(),
+        ImageLayoutKind::Unknown => false,
+    }
+}
+
+/// Enumerate the image reading its partition table at one sector size.
+fn layout_at_sector_size(
+    path: &Path,
+    sector_size: u32,
+    auto_detected: bool,
+) -> Result<ImageLayoutView, OpenImageError> {
     let image = ImageReader::open(path)?;
     let format = image.format();
     let size_bytes = image.len();
-    let mut disk = Disk::new(image).map_err(|source| OpenImageError::Layout {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut disk =
+        Disk::with_sector_size(image, sector_size).map_err(|source| OpenImageError::Layout {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let sector_size = disk.sector_size();
 
     let (kind, entries) = match disk.layout().clone() {
@@ -132,6 +298,7 @@ pub(crate) fn read_image_layout(path: &Path) -> Result<ImageLayoutView, OpenImag
             ordinal,
             offset: entry.offset,
             size_bytes: entry.size_bytes,
+            missing_bytes: missing_bytes(entry.offset, entry.size_bytes, size_bytes),
             type_name: entry.type_name,
             name: entry.name,
             detected: detect_at(&mut disk, entry.offset, size_bytes),
@@ -143,6 +310,7 @@ pub(crate) fn read_image_layout(path: &Path) -> Result<ImageLayoutView, OpenImag
         layout: ImageLayout {
             format,
             sector_size,
+            sector_size_auto_detected: auto_detected,
             size_bytes,
             kind,
             partitions,
@@ -150,15 +318,25 @@ pub(crate) fn read_image_layout(path: &Path) -> Result<ImageLayoutView, OpenImag
     })
 }
 
+/// How much of the extent `offset..offset + size_bytes` the image lacks.
+fn missing_bytes(offset: u64, size_bytes: u64, image_size: u64) -> u64 {
+    offset
+        .saturating_add(size_bytes)
+        .saturating_sub(image_size)
+        .min(size_bytes)
+}
+
 /// Resolve `partition` to its extent, reusing the enumeration ordinals.
 ///
-/// Returns the decoded reader alongside the partition's byte offset and
-/// length so the caller can open a filesystem bounded to it.
+/// Returns the decoded reader alongside the partition's byte offset, the
+/// length the partition table declares, and the length actually present, so
+/// the caller can bound a filesystem to what the image really carries.
 pub(crate) fn locate_image_partition(
     path: &Path,
     partition: usize,
-) -> Result<(ImageReader, u64, u64), OpenImageError> {
-    let ImageLayoutView { image, layout } = read_image_layout(path)?;
+    options: ImageLayoutOptions,
+) -> Result<LocatedImagePartition, OpenImageError> {
+    let ImageLayoutView { image, layout } = read_image_layout(path, options)?;
     let selected =
         layout
             .partitions
@@ -175,7 +353,12 @@ pub(crate) fn locate_image_partition(
             size_bytes: layout.size_bytes,
         });
     }
-    Ok((image, selected.offset, selected.size_bytes))
+    Ok(LocatedImagePartition {
+        image,
+        offset: selected.offset,
+        declared_bytes: selected.size_bytes,
+        available_bytes: selected.available_bytes(),
+    })
 }
 
 /// Classify the boot sector at `offset` within an image of `size_bytes`.
@@ -255,4 +438,54 @@ fn mbr_entries(disk: &Disk<ImageReader>) -> Vec<RawEntry> {
             name: None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ImagePartition, missing_bytes};
+
+    fn partition(offset: u64, size_bytes: u64, image_size: u64) -> ImagePartition {
+        ImagePartition {
+            ordinal: 0,
+            offset,
+            size_bytes,
+            missing_bytes: missing_bytes(offset, size_bytes, image_size),
+            type_name: None,
+            name: None,
+            detected: None,
+        }
+    }
+
+    #[test]
+    fn a_partition_inside_the_image_is_complete() {
+        let partition = partition(1024, 4096, 65_536);
+        assert_eq!(partition.missing_bytes, 0);
+        assert_eq!(partition.available_bytes(), 4096);
+        assert!(!partition.is_truncated());
+        assert!(!partition.is_beyond_end());
+    }
+
+    #[test]
+    fn a_partition_the_image_stops_inside_is_truncated() {
+        let partition = partition(1024, 4096, 3072);
+        assert_eq!(partition.missing_bytes, 2048);
+        assert_eq!(partition.available_bytes(), 2048);
+        assert!(partition.is_truncated());
+        assert!(!partition.is_beyond_end());
+    }
+
+    #[test]
+    fn a_partition_starting_past_the_end_is_missing_entirely() {
+        let partition = partition(8192, 4096, 4096);
+        assert_eq!(partition.missing_bytes, 4096);
+        assert_eq!(partition.available_bytes(), 0);
+        assert!(partition.is_beyond_end());
+        assert!(!partition.is_truncated(), "nothing of it is present to cut");
+    }
+
+    #[test]
+    fn a_partition_ending_exactly_at_the_end_is_complete() {
+        let partition = partition(4096, 4096, 8192);
+        assert_eq!(partition.missing_bytes, 0);
+    }
 }

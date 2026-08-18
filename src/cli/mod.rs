@@ -2,12 +2,16 @@
 //!
 //! `main.rs` owns the clap definitions and dispatches into this module:
 //! [`mount`] implements the three mounting commands, [`partitions`] the two
-//! inspection commands, [`detach`] hands a mount to a background process,
-//! and the helpers below are used by all of them.
+//! inspection commands, [`scan`] searches media no partition table
+//! describes, [`size`] reads the size expressions their offsets are written
+//! in, [`detach`] hands a mount to a background process, and the helpers
+//! below are used by all of them.
 
 pub(crate) mod detach;
 pub(crate) mod mount;
 pub(crate) mod partitions;
+pub(crate) mod scan;
+pub(crate) mod size;
 
 #[cfg(test)]
 mod tests;
@@ -18,6 +22,7 @@ pub(crate) use mount::{MountImageOptions, handle_mount, handle_mount_image};
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) use partitions::handle_drives;
 pub(crate) use partitions::handle_partitions;
+pub(crate) use scan::{ScanImageOptions, handle_scan};
 
 /// On Unix the mountpoint is a directory; create it if needed.
 #[allow(
@@ -73,6 +78,28 @@ pub(crate) fn format_size(bytes: u64) -> String {
     let gb = bytes / 1_000_000_000;
     let tenths = (bytes % 1_000_000_000) / 100_000_000;
     format!("{gb}.{tenths} GB")
+}
+
+/// Warn on stderr when the opened filesystem is larger than the bytes
+/// behind it.
+///
+/// The mount itself succeeds — the superblock is at the front — so without
+/// this the shortfall only shows up later as per-file read errors, which
+/// read like corruption rather than like a partial acquisition.
+pub(crate) fn warn_if_truncated(truncated_by: Option<u64>, available_bytes: u64, medium: &str) {
+    use size::format_size_precise;
+
+    let Some(missing) = truncated_by else {
+        return;
+    };
+    let claimed = available_bytes.saturating_add(missing);
+    eprintln!(
+        "warning: filesystem claims {} but only {} are present in the {medium} ({} missing); \
+         reads past that point will fail",
+        format_size_precise(claimed),
+        format_size_precise(available_bytes),
+        format_size_precise(missing),
+    );
 }
 
 /// Filesystem type label for a detected boot sector.

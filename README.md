@@ -141,12 +141,14 @@ Windows compiles the bundled Dokan sources with MSVC.
 fsmnt drives                 # list physical drives with size, bus, and access state
 fsmnt partitions 0           # list partitions on drive 0, with detected filesystem
 fsmnt partitions disk.bin    # same listing for a disk image, with GPT names
+fsmnt scan disk.bin          # find filesystems the partition table does not mention
 ```
 
 Drive IDs are what `fsmnt drives` prints: `0` on Windows, `sda` on Linux,
 `disk2` on macOS. `partitions` takes either a drive ID or the path to a raw,
 EWF, VHD, or VHDX image; anything that names an existing file, contains a
-path separator, or has a file extension is read as an image.
+path separator, or has a file extension is read as an image. `scan` takes an
+image only — see [Damaged and partial images](#damaged-and-partial-images).
 
 ### Mount a partition from a device
 
@@ -177,6 +179,7 @@ fsmnt mount-image disk.bin Z: --partition 3
 fsmnt mount-image evidence.E01 /mnt/evidence --partition 2
 fsmnt mount-image "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\Win11-dev.vhdx" Z: --partition 3
 fsmnt mount-image disk.img /mnt/img --offset 1048576
+fsmnt mount-image disk.img /mnt/img --offset 1M        # the same offset, written for humans
 ```
 
 Raw images, EWF v1/v2 physical evidence (`.E01`/`.Ex01`), legacy VHD, and VHDX
@@ -195,6 +198,88 @@ ordinal with `--partition N`. The filesystem is bounded to that partition's
 extent, and the numbering matches `mount-device --partition`. `--offset`
 remains for raw media no partition table describes; it always addresses
 decoded virtual media, not container storage.
+
+### Damaged and partial images
+
+Acquisitions are not always whole, and the partition table is not always
+right. Three things help when the image and its table disagree.
+
+**Find filesystems the table does not mention.** `fsmnt scan IMAGE` reads the
+decoded media once and reports every offset that starts a filesystem, ready
+to paste into `--offset`:
+
+```sh
+fsmnt scan dump.bin
+fsmnt scan dump.bin --stride 512      # search harder: filesystems off a 4 KiB boundary
+```
+
+```
+        OFFSET         SECTOR  TYPE                           SIZE  NOTE
+             0             0s  GptPartitioned                    -  partition table; list it with `fsmnt partitions`
+     270532608        528384s  Ext                          3.3 GB  4 backup superblocks (groups 1, 3, 7, 9)
+     903872512       1765376s  Ext                          2.2 GB  1 backup superblock (group 1)
+    3625975808       7081984s  Ext                          1.5 GB  5 backup superblocks (groups 1, 3, 5, 7, 9)
+```
+
+Each hit is classified with the same probes a mount uses, and the size shown
+is what the structure claims for itself. ext scatters backup superblocks
+through a filesystem, each stamped with its block group; `scan` folds them
+into the filesystem they belong to as corroboration rather than listing them
+as separate finds. A backup whose primary is gone — an overwritten partition
+front — is reported on its own, naming the offset its filesystem started at,
+which is the offset to try. Hits inside a filesystem whose size is known are
+suppressed so a multi-gigabyte partition does not report every stray `0xAA55`
+in its file data; ext superblocks are exempt, because one inside another
+filesystem's claimed extent means the extent is wrong.
+
+**Write offsets the way your notes have them.** `--offset` takes plain bytes,
+binary multiples (`K`/`M`/`G`/`T`, or the explicit `KiB`/`MiB`/`GiB`/`TiB`),
+decimal ones (`KB`/`MB`/`GB`/`TB`), and sector counts with an `s` suffix.
+These all name the same byte:
+
+```sh
+fsmnt mount-image dump.bin Z: --offset 270532608
+fsmnt mount-image dump.bin Z: --offset 258MiB
+fsmnt mount-image dump.bin Z: --offset 528384s     # sectors of --sector-size (512 by default)
+```
+
+**Say what a sector is.** `--sector-size BYTES` (a power of two of at least
+512, on `mount-image`, `partitions`, and `scan`) sets both the unit for an
+`s`-suffixed offset and the unit the image's own GPT or MBR is read in. A
+dump of a 4Kn drive keeps its GPT header at byte 4096 and counts entry LBAs
+in 4096-byte units, so reading it as 512-byte sectors puts every partition at
+one-eighth of its real offset — when it finds the table at all. Without the
+flag, `fsmnt` tries 512-byte sectors, and if they turn up no partition table
+it retries at 4096 and says so:
+
+```
+dump.bin: raw image, 512 GB, sector size 4096 (auto-detected)
+```
+
+**See what the image is missing.** `fsmnt partitions IMAGE` marks partitions
+the file does not fully carry, instead of reporting them as unreadable:
+
+```
+   9  android_system           Linux filesystem             3.3 GB      270532608  Ext
+  10  android_vendor           Linux filesystem             1.5 GB     3625975808  Ext  TRUNCATED (134 MB missing)
+  11  android_cache            Linux filesystem             2.2 GB     5198839808  beyond end of image
+```
+
+Mounting one of those still works whenever the front of the filesystem is
+there, so the shortfall is stated up front rather than surfacing later as
+per-file read errors:
+
+```
+warning: filesystem claims 3.32 GB but only 3.32 GB are present in the image (3 MB missing); reads past that point will fail
+```
+
+The same warning covers `mount-device` when a filesystem claims more than its
+partition provides. It is a comparison between what the filesystem's own
+superblock says and what the selected window holds — a *missing* tail, not a
+corrupt one. When the front is missing too, the mount is refused instead: the
+ext driver reads the root directory before reporting success (see
+[Read-only guarantees](#read-only-guarantees)), and an offset that lands on a
+backup superblock is rejected by name.
 
 ### Choosing what to expose
 
@@ -289,9 +374,15 @@ and `fsmnt_device::DriverRegistry` is the plug-in point — register your own
 `FilesystemDriver` alongside or instead of the built-in ones and hand the
 registry to `open_device_partition` or `open_image`. `ImageOpenOptions` selects
 either a partition ordinal or an offset in decoded media, plus the
-filesystem-owned root; `image_layout` returns the same enumeration the
+partition-table sector size and the filesystem-owned root; `image_layout`
+(and `image_layout_with_sector_size`) returns the same enumeration the
 `partitions` command prints, so a listed ordinal is what `with_partition`
-takes. Every container
+takes, and each `ImagePartition` carries the `missing_bytes` the image is
+short of its declared extent. `scan_image` backs the `scan` command, returning
+`ScanHit`s with their folded ext backup superblocks. `OpenedImage` and
+`OpenedPartition` report `truncated_by`, the bytes the opened filesystem
+claims that its window does not hold — `missing_filesystem_bytes` is the same
+comparison on its own. Every container
 implements the object-safe `fsmnt_device::ImageContainer` trait, so raw, EWF,
 VHD, and VHDX readers share one typed virtual-media boundary. The umbrella
 open functions return `OpenImageError`, retaining the failed path, decoded

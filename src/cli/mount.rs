@@ -1,6 +1,7 @@
 //! The mounting subcommands: host directories, disk images, and devices.
 
-use super::{block_on_mount, build_registry, ensure_unix_mountpoint, fs_label};
+use super::size::{DEFAULT_SECTOR_SIZE, SizeExpr};
+use super::{block_on_mount, build_registry, ensure_unix_mountpoint, fs_label, warn_if_truncated};
 
 use fsmnt::DirFilesystem;
 
@@ -29,8 +30,11 @@ pub(crate) struct MountImageOptions<'a> {
     pub(crate) mountpoint: &'a str,
     /// Partition ordinal to mount, as listed by `fsmnt partitions IMAGE`.
     pub(crate) partition: Option<usize>,
-    /// Byte offset of the filesystem; used when no partition is selected.
-    pub(crate) offset: u64,
+    /// Offset of the filesystem; used when no partition is selected. A
+    /// sector count here is resolved against `sector_size`.
+    pub(crate) offset: SizeExpr,
+    /// Logical sector size of the imaged drive, if the caller stated one.
+    pub(crate) sector_size: Option<u32>,
     /// Volume label override.
     pub(crate) volname: Option<&'a str>,
     /// `BitLocker` recovery password, if supplied.
@@ -47,10 +51,14 @@ pub(crate) fn handle_mount_image(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let image = options.image;
     let drivers = build_registry(options.recovery_password, options.bek_file)?;
-    let open_options = fsmnt::ImageOpenOptions::new().with_filesystem_options(options.filesystem);
+    let mut open_options =
+        fsmnt::ImageOpenOptions::new().with_filesystem_options(options.filesystem);
+    if let Some(sector_size) = options.sector_size {
+        open_options = open_options.with_sector_size(sector_size);
+    }
     let open_options = match options.partition {
         Some(partition) => open_options.with_partition(partition),
-        None => open_options.with_offset(options.offset),
+        None => open_options.with_offset(options.offset.resolve(sector_size(options.sector_size))?),
     };
     let opened = fsmnt::open_image_with_options(image, &drivers, open_options)?;
 
@@ -72,6 +80,7 @@ pub(crate) fn handle_mount_image(
         opened.format,
         image.display(),
     );
+    warn_if_truncated(opened.truncated_by, opened.size_bytes, "image");
     block_on_mount(
         opened.filesystem,
         options.mountpoint,
@@ -80,6 +89,11 @@ pub(crate) fn handle_mount_image(
         fs_label(opened.detected),
         opened.size_bytes,
     )
+}
+
+/// The sector size a size expression's `s` suffix counts.
+fn sector_size(requested: Option<u32>) -> u32 {
+    requested.unwrap_or(DEFAULT_SECTOR_SIZE)
 }
 
 /// Everything `mount-device` needs to open and mount a drive partition.
@@ -179,6 +193,7 @@ pub(crate) fn handle_mount_device(
         }
     }
 
+    warn_if_truncated(opened.truncated_by, opened.size_bytes, "partition");
     block_on_mount(
         opened.filesystem,
         options.mountpoint,

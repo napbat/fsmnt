@@ -41,6 +41,7 @@ pub fn open_device_partition_with_fstab<E: HostVolumeResolver>(
         mut filesystem,
         detected,
         size_bytes,
+        truncated_by,
         source,
     } = root;
     let contents = filesystem.read_to_string(fstab_path)?;
@@ -96,6 +97,7 @@ pub fn open_device_partition_with_fstab<E: HostVolumeResolver>(
         filesystem: Box::new(namespace),
         detected,
         size_bytes,
+        truncated_by,
         source,
     })
 }
