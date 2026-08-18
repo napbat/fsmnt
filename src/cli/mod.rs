@@ -2,12 +2,16 @@
 //!
 //! `main.rs` owns the clap definitions and dispatches into this module:
 //! [`mount`] implements the three mounting commands, [`partitions`] the two
-//! inspection commands, [`detach`] hands a mount to a background process,
-//! and the helpers below are used by all of them.
+//! inspection commands, [`scan`] searches media no partition table
+//! describes, [`size`] reads the size expressions their offsets are written
+//! in, [`detach`] hands a mount to a background process, and the helpers
+//! below are used by all of them.
 
 pub(crate) mod detach;
 pub(crate) mod mount;
 pub(crate) mod partitions;
+pub(crate) mod scan;
+pub(crate) mod size;
 
 #[cfg(test)]
 mod tests;
@@ -18,6 +22,7 @@ pub(crate) use mount::{MountImageOptions, handle_mount, handle_mount_image};
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) use partitions::handle_drives;
 pub(crate) use partitions::handle_partitions;
+pub(crate) use scan::{ScanImageOptions, handle_scan};
 
 /// On Unix the mountpoint is a directory; create it if needed.
 #[allow(
@@ -35,6 +40,11 @@ pub(crate) fn ensure_unix_mountpoint(mountpoint: &str) -> Result<(), Box<dyn std
 }
 
 /// Mount `fs` and block until the mount ends, printing progress.
+///
+/// `substitutions` is the best-effort-read counter of the source, when that
+/// mode is on; what it accumulated is reported once the mount ends, since
+/// that is when the caller knows how much of what they copied was really
+/// there.
 pub(crate) fn block_on_mount(
     fs: Box<dyn fsmnt::TargetFilesystem>,
     mountpoint: &str,
@@ -42,6 +52,7 @@ pub(crate) fn block_on_mount(
     volname: &str,
     fsname: &str,
     total_bytes: u64,
+    substitutions: Option<std::sync::Arc<fsmnt::device::ReadSubstitutions>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mp_display = mountpoint.to_string();
     // Anything the driver did that departs from a plain open — a backup
@@ -51,6 +62,12 @@ pub(crate) fn block_on_mount(
     for notice in fs.notices() {
         eprintln!("notice: {notice}");
     }
+    if substitutions.is_some() {
+        eprintln!(
+            "notice: best-effort reads are on — data the source cannot provide is served as \
+             zeros; a summary follows when the volume is unmounted"
+        );
+    }
     println!("Mounting {kind} volume at {mountpoint}...");
     fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
         println!(
@@ -59,7 +76,29 @@ pub(crate) fn block_on_mount(
         );
     })?;
     println!("Unmounted.");
+    if let Some(stats) = substitutions {
+        report_substitutions(&stats);
+    }
     Ok(())
+}
+
+/// Say how many bytes best-effort reads substituted with zeros, or that
+/// none were needed.
+fn report_substitutions(stats: &fsmnt::device::ReadSubstitutions) {
+    use size::format_size_precise;
+
+    if !stats.any() {
+        eprintln!("best-effort reads: every byte read was present in the source");
+        return;
+    }
+    eprintln!(
+        "best-effort reads: {} served as zeros — {} past the end of the source, {} from {} read \
+         error(s)",
+        format_size_precise(stats.missing_bytes() + stats.errored_bytes()),
+        format_size_precise(stats.missing_bytes()),
+        format_size_precise(stats.errored_bytes()),
+        stats.read_errors(),
+    );
 }
 
 /// Unmount whatever `fsmnt` has mounted at `mountpoint`.
@@ -80,6 +119,28 @@ pub(crate) fn format_size(bytes: u64) -> String {
     let gb = bytes / 1_000_000_000;
     let tenths = (bytes % 1_000_000_000) / 100_000_000;
     format!("{gb}.{tenths} GB")
+}
+
+/// Warn on stderr when the opened filesystem is larger than the bytes
+/// behind it.
+///
+/// The mount itself succeeds — the superblock is at the front — so without
+/// this the shortfall only shows up later as per-file read errors, which
+/// read like corruption rather than like a partial acquisition.
+pub(crate) fn warn_if_truncated(truncated_by: Option<u64>, available_bytes: u64, medium: &str) {
+    use size::format_size_precise;
+
+    let Some(missing) = truncated_by else {
+        return;
+    };
+    let claimed = available_bytes.saturating_add(missing);
+    eprintln!(
+        "warning: filesystem claims {} but only {} are present in the {medium} ({} missing); \
+         reads past that point will fail",
+        format_size_precise(claimed),
+        format_size_precise(available_bytes),
+        format_size_precise(missing),
+    );
 }
 
 /// Filesystem type label for a detected boot sector.

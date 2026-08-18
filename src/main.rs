@@ -48,6 +48,15 @@ struct FilesystemMountOptions {
     /// inode found by sweeping the readable block groups as `inode-N`.
     #[arg(long)]
     salvage: bool,
+
+    /// Keep reading when the source cannot deliver a sector: bytes past the
+    /// end of a truncated image (up to the partition's declared extent) and
+    /// sectors that fail with an I/O error are served as zeros instead of
+    /// failing the read, so what exists can still be copied out. Every
+    /// substituted byte is counted and reported when the mount ends. Off by
+    /// default: zeros are not data.
+    #[arg(long)]
+    best_effort_reads: bool,
 }
 
 impl FilesystemMountOptions {
@@ -140,10 +149,24 @@ enum Commands {
         #[arg(long, conflicts_with = "offset")]
         partition: Option<usize>,
 
-        /// Byte offset of the filesystem within the image, for media no
-        /// partition table describes.
-        #[arg(long, default_value_t = 0)]
-        offset: u64,
+        /// Offset of the filesystem within the image, for media no partition
+        /// table describes: bytes (`270532608`), a binary or decimal
+        /// multiple (`258MiB`, `1M`, `270MB`), or sectors of
+        /// `--sector-size` (`528384s`). `fsmnt scan IMAGE` finds them.
+        #[arg(
+            long,
+            value_name = "SIZE",
+            value_parser = cli::size::parse_size_expr,
+            default_value = "0"
+        )]
+        offset: cli::size::SizeExpr,
+
+        /// Logical sector size of the imaged drive, in bytes (a power of two
+        /// of at least 512). Sets the unit for an `s`-suffixed `--offset`
+        /// and the unit the image's GPT/MBR is read in — a dump of a 4Kn
+        /// drive needs 4096. Detected when omitted.
+        #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
+        sector_size: Option<u32>,
 
         /// Volume label shown in the OS file manager.
         #[arg(long)]
@@ -176,6 +199,35 @@ enum Commands {
         /// names an existing file, contains a path separator, or has a file
         /// extension is treated as an image.
         target: String,
+
+        /// Logical sector size the partition table is written in, in bytes
+        /// (a power of two of at least 512). A dump of a 4Kn drive needs
+        /// 4096; without this, 512 is tried first and 4096 second.
+        #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
+        sector_size: Option<u32>,
+    },
+
+    /// Search an image for filesystems, wherever they sit.
+    ///
+    /// For media with no partition table, a corrupt one, or one that
+    /// disagrees with the bytes: reads the image once and reports every
+    /// offset that starts a filesystem, ready to pass to
+    /// `mount-image --offset`. ext backup superblocks are reported as
+    /// evidence for their filesystem, including the start they imply when
+    /// the primary is gone.
+    Scan {
+        /// Image path or first EWF segment.
+        image: PathBuf,
+
+        /// Distance between candidate offsets, in bytes. Filesystems start
+        /// on a block boundary, so the 4 KiB default finds them; use 512 to
+        /// search harder at eight times the cost.
+        #[arg(long, value_name = "BYTES", default_value_t = fsmnt::DEFAULT_STRIDE)]
+        stride: u64,
+
+        /// Logical sector size the offsets are also reported in.
+        #[arg(long, value_name = "BYTES", value_parser = cli::size::parse_sector_size)]
+        sector_size: Option<u32>,
     },
 
     /// Mount a partition from a physical drive (NTFS, FAT, exFAT, ext, APFS,
@@ -272,7 +324,7 @@ impl Commands {
             } => (detach, mountpoint),
             #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             Self::Drives => return None,
-            Self::Partitions { .. } | Self::Unmount { .. } => return None,
+            Self::Partitions { .. } | Self::Scan { .. } | Self::Unmount { .. } => return None,
         };
         detach.requested().then_some(mountpoint.as_str())
     }
@@ -306,6 +358,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mountpoint,
             partition,
             offset,
+            sector_size,
             volname,
             recovery_password,
             bek_file,
@@ -316,14 +369,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mountpoint: &mountpoint,
             partition,
             offset,
+            sector_size,
             volname: volname.as_deref(),
             recovery_password,
             bek_file: bek_file.as_deref(),
             filesystem: filesystem.open_options(),
+            best_effort_reads: filesystem.best_effort_reads,
         }),
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Commands::Drives => cli::handle_drives(),
-        Commands::Partitions { target } => cli::handle_partitions(&target),
+        Commands::Partitions {
+            target,
+            sector_size,
+        } => cli::handle_partitions(&target, sector_size),
+        Commands::Scan {
+            image,
+            stride,
+            sector_size,
+        } => cli::handle_scan(&cli::ScanImageOptions {
+            image: &image,
+            stride,
+            sector_size,
+        }),
         #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Commands::MountDevice {
             drive,
@@ -350,6 +417,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             bek_file: bek_file.as_deref(),
             fstab: fstab.as_deref(),
             filesystem: filesystem.open_options(),
+            best_effort_reads: filesystem.best_effort_reads,
         }),
     }
 }

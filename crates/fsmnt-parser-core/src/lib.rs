@@ -27,8 +27,9 @@ pub mod traverse;
 pub use boot_sector::{
     BOOT_SECTOR_SIZE, BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_MAGIC,
     BTRFS_SUPERBLOCK_PROBE_SIZE, BootSectorDiagnosis, BootSectorUnknownReason, DetectedBootSector,
-    ExtBackupSuperblock, FS_DETECT_PROBE_SIZE, diagnose_boot_sector, ext_backup_superblock_group,
-    ext_backup_superblock_info, is_btrfs_primary_superblock,
+    ExtBackupSuperblock, ExtSuperblockInfo, FS_DETECT_PROBE_SIZE, diagnose_boot_sector,
+    ext_backup_superblock_group, ext_backup_superblock_info, ext_superblock_info,
+    is_btrfs_primary_superblock,
 };
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]

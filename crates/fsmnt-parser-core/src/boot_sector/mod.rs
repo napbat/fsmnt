@@ -47,20 +47,13 @@ pub const FS_DETECT_PROBE_SIZE: usize = 2048;
 /// Boot signature value (little-endian: 0x55 at offset 510, 0xAA at offset 511)
 pub const BOOT_SIGNATURE: u16 = 0xAA55;
 
-const EXT_SUPERBLOCK_OFFSET: usize = 1024;
-const SB_S_FIRST_DATA_BLOCK: usize = 0x14;
-const SB_S_LOG_BLOCK_SIZE: usize = 0x18;
-const SB_S_BLOCKS_PER_GROUP: usize = 0x20;
-const SB_S_INODES_PER_GROUP: usize = 0x28;
-const SB_S_MAGIC: usize = 0x38;
-/// `s_block_group_nr`: the block group this superblock copy belongs to.
-/// e2fsprogs writes 0 into the primary and the group number into every
-/// backup (`sparse_super` puts them in groups 1, 3, 5, 7, 9, 25, 27, …),
-/// which is what lets a probe tell a filesystem start from a copy that
-/// merely sits somewhere inside one.
-const SB_S_BLOCK_GROUP_NR: usize = 0x5A;
-const EXT_PROBE_MIN_LEN: usize = EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR + 2; // 0x45C
-const EXT_MAGIC: u16 = 0xEF53;
+mod ext;
+
+use ext::probe_ext;
+pub use ext::{
+    ExtBackupSuperblock, ExtSuperblockInfo, ext_backup_superblock_group,
+    ext_backup_superblock_info, ext_superblock_info,
+};
 
 fn read_u16_le(buf: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([buf[off], buf[off + 1]])
@@ -81,136 +74,6 @@ fn read_u64_le(buf: &[u8], off: usize) -> u64 {
         buf[off + 6],
         buf[off + 7],
     ])
-}
-
-/// Structural sanity of an ext superblock at offset 1024 of `buf`: the
-/// magic plus the cheap field checks that keep a coincidental 0xEF53 in a
-/// GPT partition-entry array from passing. Says nothing about whether the
-/// copy is the primary — see [`probe_ext`] and [`ext_backup_superblock_group`].
-fn ext_superblock_plausible(buf: &[u8]) -> bool {
-    if buf.len() < EXT_PROBE_MIN_LEN {
-        return false;
-    }
-    if read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_MAGIC) != EXT_MAGIC {
-        return false;
-    }
-    // s_log_block_size gates 0..=6 (block size 1 KiB .. 64 KiB) per
-    // fs-ext's own superblock parser.
-    if read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_LOG_BLOCK_SIZE) > 6 {
-        return false;
-    }
-    if read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCKS_PER_GROUP) == 0 {
-        return false;
-    }
-    if read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_INODES_PER_GROUP) == 0 {
-        return false;
-    }
-    true
-}
-
-/// Prefix probe for the *start* of an ext2/ext3/ext4 filesystem: a
-/// plausible superblock whose `s_block_group_nr` is 0.
-///
-/// Backup superblocks carry their own group number there, so an offset
-/// that lands on one partway into a filesystem is not reported as `Ext`.
-/// Mounting from a backup used to "succeed" — the group descriptors were
-/// then read from the wrong place and the volume exposed no files, which
-/// in a forensic context reads as "this partition is empty".
-fn probe_ext(buf: &[u8]) -> bool {
-    ext_superblock_plausible(buf)
-        && read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR) == 0
-}
-
-/// If `buf` (the first bytes at a candidate offset) holds an ext **backup**
-/// superblock, return the block group it belongs to.
-///
-/// Returns `None` for a primary superblock and for anything that is not a
-/// plausible ext superblock, so callers can turn a `Unknown` detection
-/// into a precise diagnosis: "this is a copy from group N, not the start of
-/// the filesystem".
-#[must_use]
-pub fn ext_backup_superblock_group(buf: &[u8]) -> Option<u16> {
-    ext_backup_superblock_info(buf).map(|info| info.group)
-}
-
-/// An ext **backup** superblock together with the geometry needed to work
-/// out where its filesystem begins.
-///
-/// Produced by [`ext_backup_superblock_info`]. Every field is read from the
-/// copy itself, so the numbers describe the filesystem the copy belongs to
-/// even when nothing else of it is readable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExtBackupSuperblock {
-    /// `s_block_group_nr` — the block group this copy belongs to. Always
-    /// non-zero; group 0 is the primary and is not reported here.
-    pub group: u16,
-    /// Block size in bytes (`1024 << s_log_block_size`).
-    pub block_size: u32,
-    /// `s_blocks_per_group`.
-    pub blocks_per_group: u32,
-    /// `s_first_data_block`: 1 for 1 KiB blocks, 0 otherwise.
-    pub first_data_block: u32,
-}
-
-impl ExtBackupSuperblock {
-    /// Byte distance from the start of the filesystem to the first block of
-    /// [`group`](Self::group), i.e. to this backup copy.
-    ///
-    /// `None` on arithmetic overflow, which only a nonsensical copy can
-    /// produce.
-    #[must_use]
-    pub fn group_start_bytes(&self) -> Option<u64> {
-        u64::from(self.group)
-            .checked_mul(u64::from(self.blocks_per_group))?
-            .checked_add(u64::from(self.first_data_block))?
-            .checked_mul(u64::from(self.block_size))
-    }
-
-    /// Where the filesystem starts, given that this copy was found by a
-    /// probe at `probe_offset`.
-    ///
-    /// Probes read the superblock at `probe_offset + 1024`, matching a
-    /// filesystem start, whereas a backup copy occupies its block group's
-    /// first block from byte zero — hence the `+ 1024` correction before
-    /// stepping back over the groups that precede it.
-    ///
-    /// `None` when the recorded geometry places the start before the
-    /// beginning of the source, which means the copy is stale or
-    /// coincidental rather than a backup of a filesystem living here.
-    #[must_use]
-    pub fn filesystem_start(&self, probe_offset: u64) -> Option<u64> {
-        let superblock_offset = u64::try_from(EXT_SUPERBLOCK_OFFSET).ok()?;
-        probe_offset
-            .checked_add(superblock_offset)?
-            .checked_sub(self.group_start_bytes()?)
-    }
-}
-
-/// If `buf` (the first bytes at a candidate offset) holds an ext **backup**
-/// superblock, describe it.
-///
-/// Returns `None` for a primary superblock and for anything that is not a
-/// plausible ext superblock. The geometry travels with the copy, so a
-/// caller can turn "no filesystem here" into "this is group N's copy and
-/// the filesystem starts at byte X" — see
-/// [`ExtBackupSuperblock::filesystem_start`].
-#[must_use]
-pub fn ext_backup_superblock_info(buf: &[u8]) -> Option<ExtBackupSuperblock> {
-    if !ext_superblock_plausible(buf) {
-        return None;
-    }
-    let group = match read_u16_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCK_GROUP_NR) {
-        0 => return None,
-        group => group,
-    };
-    // `ext_superblock_plausible` already gated s_log_block_size to 0..=6.
-    let block_size = 1024_u32 << read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_LOG_BLOCK_SIZE);
-    Some(ExtBackupSuperblock {
-        group,
-        block_size,
-        blocks_per_group: read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_BLOCKS_PER_GROUP),
-        first_data_block: read_u32_le(buf, EXT_SUPERBLOCK_OFFSET + SB_S_FIRST_DATA_BLOCK),
-    })
 }
 
 /// `nx_magic` of an APFS container superblock — the bytes `NXSB`.

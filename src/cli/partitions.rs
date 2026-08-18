@@ -48,11 +48,14 @@ pub(crate) fn handle_drives() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// The positional argument is overloaded, so decide which it is before
 /// touching either backend; see [`is_image_target`].
-pub(crate) fn handle_partitions(target: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_partitions(
+    target: &str,
+    sector_size: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if is_image_target(target) {
-        image_partitions(Path::new(target))
+        image_partitions(Path::new(target), sector_size)
     } else {
-        drive_partitions(target)
+        drive_partitions(target, sector_size)
     }
 }
 
@@ -67,12 +70,24 @@ pub(super) fn is_image_target(target: &str) -> bool {
 }
 
 /// List the partitions inside a disk image.
-fn image_partitions(image: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use fsmnt::ImageLayoutKind;
+fn image_partitions(
+    image: &Path,
+    sector_size: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use fsmnt::{ImageLayoutKind, ImageLayoutOptions};
 
-    let layout = fsmnt::image_layout(image)?;
+    let mut options = ImageLayoutOptions::new();
+    if let Some(sector_size) = sector_size {
+        options = options.with_sector_size(sector_size);
+    }
+    let layout = fsmnt::image_layout_with_options(image, options)?;
+    let detected_note = if layout.sector_size_auto_detected {
+        " (auto-detected)"
+    } else {
+        ""
+    };
     println!(
-        "{}: {} image, {}, sector size {}",
+        "{}: {} image, {}, sector size {}{detected_note}",
         image.display(),
         layout.format,
         format_size(layout.size_bytes),
@@ -94,7 +109,7 @@ fn image_partitions(image: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     partition.type_name.as_deref().unwrap_or("Unknown"),
                     format_size(partition.size_bytes),
                     partition.offset,
-                    detected_label(partition.detected),
+                    filesystem_column(partition),
                 );
             }
         }
@@ -111,7 +126,7 @@ fn image_partitions(image: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     partition.type_name.as_deref().unwrap_or("Unknown"),
                     format_size(partition.size_bytes),
                     partition.offset,
-                    detected_label(partition.detected),
+                    filesystem_column(partition),
                 );
             }
         }
@@ -145,15 +160,41 @@ fn detected_label(detected: Option<fsmnt::device::DetectedBootSector>) -> String
     detected.map_or_else(|| "unreadable".to_string(), |d| format!("{d:?}"))
 }
 
+/// Column text for an image partition: what it holds, and how much of it the
+/// image is missing.
+///
+/// A partition table describes the drive it was written on, not the file
+/// that was captured from it. Saying "unreadable" for an extent the
+/// acquisition never reached invites a hunt for corruption; saying it is
+/// past the end of the image says what happened.
+fn filesystem_column(partition: &fsmnt::ImagePartition) -> String {
+    if partition.is_beyond_end() {
+        return "beyond end of image".to_string();
+    }
+    let detected = detected_label(partition.detected);
+    if partition.is_truncated() {
+        return format!(
+            "{detected}  TRUNCATED ({} missing)",
+            format_size(partition.missing_bytes)
+        );
+    }
+    detected
+}
+
 /// List the partitions on a physical drive.
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-fn drive_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn drive_partitions(
+    drive: &str,
+    requested_sector_size: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
     use fsmnt::device::{Disk, DiskLayout, HostDriveEnumerator, HostDriveId};
 
     let id = HostDriveId::new(drive);
     let info = HostDrives::get_drive_info(&id).ok();
-    let sector_size = info.as_ref().and_then(|i| i.sector_size).unwrap_or(512);
+    let sector_size = requested_sector_size
+        .or_else(|| info.as_ref().and_then(|i| i.sector_size))
+        .unwrap_or(super::size::DEFAULT_SECTOR_SIZE);
     let reader = HostDrives::open_drive(&id)?;
     let mut disk = Disk::with_sector_size(reader, sector_size)?;
     let sector = disk.sector_size();
@@ -217,7 +258,10 @@ fn drive_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Physical drives cannot be enumerated on this platform.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn drive_partitions(drive: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn drive_partitions(
+    drive: &str,
+    _requested_sector_size: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     Err(format!(
         "'{drive}' is not an image file, and physical drives cannot be enumerated on this platform"
     )

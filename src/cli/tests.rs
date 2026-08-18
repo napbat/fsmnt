@@ -6,6 +6,7 @@ use clap::Parser;
 use fsmnt::device::FilesystemRoot;
 
 use crate::cli::partitions::is_image_target;
+use crate::cli::size::SizeExpr;
 use crate::{Cli, Commands, FilesystemMountOptions};
 
 #[test]
@@ -19,7 +20,7 @@ fn image_partition_is_parsed_and_defaults_to_none() {
         panic!("wrong command");
     };
     assert_eq!(partition, Some(3));
-    assert_eq!(offset, 0);
+    assert_eq!(offset, SizeExpr::Bytes(0));
 
     let cli =
         Cli::try_parse_from(["fsmnt", "mount-image", "disk.bin", "Z:"]).expect("plain image mount");
@@ -62,7 +63,114 @@ fn image_offset_still_works_on_its_own() {
         panic!("wrong command");
     };
     assert_eq!(partition, None);
-    assert_eq!(offset, 32_768);
+    assert_eq!(offset, SizeExpr::Bytes(32_768));
+}
+
+#[test]
+fn image_offset_accepts_size_suffixes_and_sector_counts() {
+    for (argument, expected) in [
+        ("270532608", SizeExpr::Bytes(270_532_608)),
+        ("258MiB", SizeExpr::Bytes(270_532_608)),
+        ("1M", SizeExpr::Bytes(1_048_576)),
+        ("528384s", SizeExpr::Sectors(528_384)),
+    ] {
+        let cli = Cli::try_parse_from([
+            "fsmnt",
+            "mount-image",
+            "disk.bin",
+            "Z:",
+            "--offset",
+            argument,
+        ])
+        .expect("size expression");
+        let Commands::MountImage { offset, .. } = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(offset, expected, "--offset {argument}");
+    }
+
+    let result = Cli::try_parse_from([
+        "fsmnt",
+        "mount-image",
+        "disk.bin",
+        "Z:",
+        "--offset",
+        "258 flurbs",
+    ]);
+    assert!(result.is_err(), "an unknown unit is rejected by clap");
+}
+
+#[test]
+fn a_sector_count_offset_is_resolved_against_the_sector_size() {
+    let cli = Cli::try_parse_from([
+        "fsmnt",
+        "mount-image",
+        "disk.bin",
+        "Z:",
+        "--offset",
+        "4096s",
+        "--sector-size",
+        "65536",
+    ])
+    .expect("sector offset");
+    let Commands::MountImage {
+        offset,
+        sector_size,
+        ..
+    } = cli.command
+    else {
+        panic!("wrong command");
+    };
+    assert_eq!(sector_size, Some(65_536));
+    assert_eq!(offset.resolve(65_536), Ok(268_435_456));
+}
+
+#[test]
+fn sector_sizes_are_validated_by_clap() {
+    for command in [
+        vec![
+            "fsmnt",
+            "mount-image",
+            "disk.bin",
+            "Z:",
+            "--sector-size",
+            "4096",
+        ],
+        vec!["fsmnt", "partitions", "disk.bin", "--sector-size", "4096"],
+        vec!["fsmnt", "scan", "disk.bin", "--sector-size", "4096"],
+    ] {
+        assert!(
+            Cli::try_parse_from(&command).is_ok(),
+            "4096 is a valid sector size for {command:?}"
+        );
+    }
+    for bad in ["0", "256", "1000", "notanumber"] {
+        let result = Cli::try_parse_from(["fsmnt", "partitions", "disk.bin", "--sector-size", bad]);
+        assert!(result.is_err(), "--sector-size {bad} should be rejected");
+    }
+}
+
+#[test]
+fn scan_takes_an_image_and_optional_stride() {
+    let cli = Cli::try_parse_from(["fsmnt", "scan", "disk.bin"]).expect("scan defaults");
+    let Commands::Scan {
+        image,
+        stride,
+        sector_size,
+    } = cli.command
+    else {
+        panic!("wrong command");
+    };
+    assert_eq!(image.to_string_lossy(), "disk.bin");
+    assert_eq!(stride, fsmnt::DEFAULT_STRIDE);
+    assert_eq!(sector_size, None);
+
+    let cli = Cli::try_parse_from(["fsmnt", "scan", "disk.bin", "--stride", "512"])
+        .expect("scan with a finer stride");
+    let Commands::Scan { stride, .. } = cli.command else {
+        panic!("wrong command");
+    };
+    assert_eq!(stride, 512);
 }
 
 #[test]
@@ -70,10 +178,15 @@ fn partitions_accepts_a_drive_id_or_an_image_path() {
     for target in ["0", "sda", "disk2", "nvme0n1", "disk.bin", "/mnt/e.E01"] {
         let cli =
             Cli::try_parse_from(["fsmnt", "partitions", target]).expect("partitions target parses");
-        let Commands::Partitions { target: parsed } = cli.command else {
+        let Commands::Partitions {
+            target: parsed,
+            sector_size,
+        } = cli.command
+        else {
             panic!("wrong command");
         };
         assert_eq!(parsed, target);
+        assert_eq!(sector_size, None);
     }
 }
 

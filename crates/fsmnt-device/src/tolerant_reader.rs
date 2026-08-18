@@ -97,18 +97,33 @@ impl<R: Read + Seek> TolerantReader<R> {
     /// # Errors
     ///
     /// Returns an error if the source's length cannot be determined.
-    pub fn new(mut inner: R, declared_length: u64) -> io::Result<(Self, Arc<ReadSubstitutions>)> {
+    pub fn new(inner: R, declared_length: u64) -> io::Result<(Self, Arc<ReadSubstitutions>)> {
+        let stats = Arc::new(ReadSubstitutions::default());
+        let reader = Self::with_stats(inner, declared_length, Arc::clone(&stats))?;
+        Ok((reader, stats))
+    }
+
+    /// Like [`new`](Self::new), but charge substitutions to an existing
+    /// counter — so several readers (the members of a multi-device
+    /// filesystem, say) report one total.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source's length cannot be determined.
+    pub fn with_stats(
+        mut inner: R,
+        declared_length: u64,
+        stats: Arc<ReadSubstitutions>,
+    ) -> io::Result<Self> {
         let inner_len = inner.seek(SeekFrom::End(0))?;
         inner.seek(SeekFrom::Start(0))?;
-        let stats = Arc::new(ReadSubstitutions::default());
-        let reader = Self {
+        Ok(Self {
             inner,
             inner_len,
             length: declared_length.max(inner_len),
             position: 0,
-            stats: Arc::clone(&stats),
-        };
-        Ok((reader, stats))
+            stats,
+        })
     }
 
     /// The length this reader presents.

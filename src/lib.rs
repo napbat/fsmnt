@@ -86,6 +86,19 @@
 //!
 //! [`ImageOpenOptions::with_offset`] remains for media whose filesystem sits
 //! at a byte offset no partition table describes.
+//!
+//! # Damaged and partial images
+//!
+//! When the table and the media disagree, [`scan_image`] reads the decoded
+//! media once and reports every offset that starts a filesystem, folding ext
+//! backup superblocks into the filesystem they corroborate; each
+//! [`ImagePartition`] carries the [`missing_bytes`](ImagePartition::missing_bytes)
+//! the image is short of its declared extent; and a filesystem that opens
+//! from a window smaller than it claims reports the shortfall as
+//! [`OpenedImage::truncated_by`]. Partition tables written in 4 KiB sectors
+//! are read as such, either on request
+//! ([`ImageOpenOptions::with_sector_size`]) or by detection
+//! ([`ImageLayout::sector_size_auto_detected`]).
 
 pub use fsmnt_core::{
     DirFilesystem, FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, Fstab, FstabEntry,
@@ -101,10 +114,24 @@ mod backend;
 mod ext_backup;
 mod fstab_mount;
 mod image_layout;
+mod open_image;
+mod scan;
+mod truncation;
 
 pub use backend::{is_mounted, mount, unmount};
 pub use fstab_mount::open_device_partition_with_fstab;
-pub use image_layout::{ImageLayout, ImageLayoutKind, ImagePartition, image_layout};
+pub use image_layout::{
+    ImageLayout, ImageLayoutKind, ImageLayoutOptions, ImagePartition, image_layout,
+    image_layout_with_options, image_layout_with_sector_size,
+};
+pub use open_image::{
+    ImageOpenOptions, OpenImageError, OpenedImage, open_image, open_image_with_options,
+};
+pub use scan::{
+    DEFAULT_STRIDE, ExtBackupSuperblock, ScanError, ScanHit, ScanHitKind, ScanOptions, scan_image,
+    scan_image_with_options,
+};
+pub use truncation::missing_filesystem_bytes;
 
 #[cfg(target_os = "linux")]
 pub use fsmnt_device_linux::LinuxHostDrives as HostDrives;
@@ -113,411 +140,16 @@ pub use fsmnt_device_macos::MacOsHostDrives as HostDrives;
 #[cfg(windows)]
 pub use fsmnt_device_windows::WindowsHostDrives as HostDrives;
 
+use std::io::{Read, Seek};
+use std::sync::Arc;
+
 use fsmnt_device::{
-    DetectedBootSector, DeviceMember, DeviceSet, Disk, DiskLayout, DriverRegistry,
+    DetectedBootSector, DeviceMember, DeviceReader, DeviceSet, Disk, DiskLayout, DriverRegistry,
     FilesystemMemberId, FilesystemOpenOptions, FilesystemRoot, HostDriveEnumerator, HostDriveId,
     HostVolumeResolver, LogicalVolumeId, PartitionAddress, PartitionReader, PhysicalExtent,
-    ResolvedMemberDiscovery, SectorReader, SourceMemberId, SourceOrigin, SourceSelection,
-    select_logical_volume,
+    ReadSubstitutions, ResolvedMemberDiscovery, SectorReader, SourceMemberId, SourceOrigin,
+    SourceSelection, TolerantReader, select_logical_volume,
 };
-
-/// A filesystem opened from a decoded disk-image container, ready to mount.
-pub struct OpenedImage {
-    /// The filesystem opened by a registered driver.
-    pub filesystem: Box<dyn TargetFilesystem>,
-    /// The detected boot-sector type at the selected image offset.
-    pub detected: DetectedBootSector,
-    /// Byte offset the filesystem was opened at within the decoded media.
-    /// For a selected partition this is the partition's start, not the
-    /// offset originally requested.
-    pub offset: u64,
-    /// Size of the selected decoded media range in bytes.
-    pub size_bytes: u64,
-    /// Container format used to expose the decoded media.
-    pub format: ImageFormat,
-}
-
-/// Failure to decode an image or open a filesystem within its virtual media.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum OpenImageError {
-    /// The image container could not be opened or decoded.
-    #[error(transparent)]
-    Container(#[from] ImageOpenError),
-    /// The selected byte offset does not address decoded media.
-    #[error("offset {offset} is at or past the end of {path:?} ({size_bytes} decoded bytes)")]
-    OffsetOutOfRange {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Requested decoded-media offset.
-        offset: u64,
-        /// Total decoded-media size.
-        size_bytes: u64,
-    },
-    /// The selected offset identifies another partition table.
-    #[error(
-        "{path:?} contains a partition table at offset {offset} ({detected:?}); select a partition with `--partition N` (see `fsmnt partitions {}`)",
-        path.display()
-    )]
-    PartitionTable {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Decoded-media offset that contains the partition table.
-        offset: u64,
-        /// Partition-table type detected at the offset.
-        detected: DetectedBootSector,
-    },
-    /// The image layout could not be read to enumerate its partitions.
-    #[error("failed to read the partition layout of {path:?}: {source}")]
-    Layout {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Underlying seek or read failure.
-        #[source]
-        source: std::io::Error,
-    },
-    /// The requested partition ordinal is not present in the image.
-    #[error(
-        "partition {partition} not found in {path:?}: the image has {available} partition(s); list them with `fsmnt partitions {}`",
-        path.display()
-    )]
-    PartitionNotFound {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Requested 0-based partition ordinal.
-        partition: usize,
-        /// Number of partitions the image actually exposes.
-        available: usize,
-    },
-    /// The selected offset holds an ext *backup* superblock, not the start
-    /// of a filesystem.
-    ///
-    /// Backup copies sit partway into an ext filesystem (with
-    /// `sparse_super`, at block groups 1, 3, 5, 7, 9, 25, 27, …). Opening
-    /// from one would locate every structure relative to the wrong place
-    /// and present an empty volume, so it is refused with the group number
-    /// as a hint that the real start is earlier.
-    #[error(
-        "offset {offset} in {path:?} holds an ext backup superblock (block group {group}); {} — mount that, or list partitions with `fsmnt partitions {}`",
-        primary_location(*filesystem_start),
-        path.display()
-    )]
-    ExtBackupSuperblock {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Decoded-media offset that holds the backup copy.
-        offset: u64,
-        /// Block group the backup superblock belongs to.
-        group: u16,
-        /// Where the filesystem this copy belongs to begins, computed from
-        /// the geometry the copy itself records. `None` when that geometry
-        /// places the start before the beginning of the media, which means
-        /// the copy is stale or coincidental rather than a backup of a
-        /// filesystem living here.
-        filesystem_start: Option<u64>,
-    },
-    /// Nothing is readable at the selected offset, but an ext backup
-    /// superblock one block group in says a filesystem starts there.
-    ///
-    /// The offset was right and its primary metadata is destroyed —
-    /// zeroed, overwritten, or simply never copied by a partial imaging
-    /// run. The volume is still openable from the copy.
-    #[error(
-        "no filesystem at offset {offset} in {path:?}, but an ext backup superblock for it exists at {backup_offset} (group {group}); retry with `--backup-superblock {group}`"
-    )]
-    ExtPrimaryDamaged {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Decoded-media offset whose primary metadata is unreadable.
-        offset: u64,
-        /// Block group holding the usable copy.
-        group: u32,
-        /// Decoded-media offset of that copy.
-        backup_offset: u64,
-    },
-    /// Reading or classifying the selected boot sector failed.
-    #[error("failed to detect a filesystem at offset {offset} in {path:?}: {source}")]
-    Detection {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Decoded-media offset being inspected.
-        offset: u64,
-        /// Underlying seek or read failure.
-        #[source]
-        source: std::io::Error,
-    },
-    /// A registered filesystem driver could not open the detected media.
-    #[error("failed to open {detected:?} at offset {offset} in {path:?}: {source}")]
-    Filesystem {
-        /// Image path supplied by the caller.
-        path: std::path::PathBuf,
-        /// Decoded-media offset handed to the driver.
-        offset: u64,
-        /// Filesystem type detected at the offset.
-        detected: DetectedBootSector,
-        /// Driver or filesystem parser failure.
-        #[source]
-        source: FsError,
-    },
-}
-
-/// Phrase naming where a filesystem starts, for
-/// [`OpenImageError::ExtBackupSuperblock`].
-fn primary_location(filesystem_start: Option<u64>) -> String {
-    filesystem_start.map_or_else(
-        || "the primary lies earlier".to_string(),
-        |start| format!("the filesystem starts at offset {start}"),
-    )
-}
-
-/// Location and filesystem-root choices for opening a disk image.
-#[derive(Clone, Debug)]
-pub struct ImageOpenOptions {
-    offset: u64,
-    partition: Option<usize>,
-    filesystem: FilesystemOpenOptions,
-}
-
-impl ImageOpenOptions {
-    /// Use the beginning of the decoded image and the filesystem's default
-    /// root.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            offset: 0,
-            partition: None,
-            filesystem: FilesystemOpenOptions::new(),
-        }
-    }
-
-    /// Select the byte offset of the filesystem within decoded image media.
-    ///
-    /// Use this for media whose filesystem no partition table describes;
-    /// prefer [`with_partition`](Self::with_partition) for a partitioned
-    /// whole-disk image.
-    #[must_use]
-    pub const fn with_offset(mut self, offset: u64) -> Self {
-        self.offset = offset;
-        self
-    }
-
-    /// Select a partition of the image by its ordinal, counting non-empty
-    /// partition-table entries from 0 — the same numbering
-    /// [`image_layout`] prints and `mount-device --partition` uses.
-    ///
-    /// The partition's own start offset and length bound the filesystem, so
-    /// this supersedes [`with_offset`](Self::with_offset): any offset set
-    /// alongside a partition is ignored, and callers that select a partition
-    /// should leave the offset at 0.
-    #[must_use]
-    pub const fn with_partition(mut self, partition: usize) -> Self {
-        self.partition = Some(partition);
-        self
-    }
-
-    /// Choose the filesystem-owned tree or container volume to expose.
-    #[must_use]
-    pub fn with_filesystem_root(mut self, root: FilesystemRoot) -> Self {
-        self.filesystem = self.filesystem.with_root(root);
-        self
-    }
-
-    /// Allow (default) or decline journal and orphan replay into an
-    /// in-memory overlay; see
-    /// [`FilesystemOpenOptions::with_journal_replay`]. The source is never
-    /// written either way.
-    #[must_use]
-    pub fn with_journal_replay(mut self, replay: bool) -> Self {
-        self.filesystem = self.filesystem.with_journal_replay(replay);
-        self
-    }
-
-    /// Replace every filesystem-level option (root selector, journal
-    /// replay, backup-superblock group, salvage) with `filesystem` at once.
-    #[must_use]
-    pub fn with_filesystem_options(mut self, filesystem: FilesystemOpenOptions) -> Self {
-        self.filesystem = filesystem;
-        self
-    }
-
-    /// Byte offset of the filesystem within decoded image media. Ignored
-    /// when [`partition`](Self::partition) selects a partition.
-    #[must_use]
-    pub const fn offset(&self) -> u64 {
-        self.offset
-    }
-
-    /// Partition ordinal to open, if one was selected.
-    #[must_use]
-    pub const fn partition(&self) -> Option<usize> {
-        self.partition
-    }
-
-    /// Requested filesystem-open options.
-    #[must_use]
-    pub const fn filesystem(&self) -> &FilesystemOpenOptions {
-        &self.filesystem
-    }
-}
-
-impl Default for ImageOpenOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Open a filesystem at the beginning of a supported disk image.
-///
-/// EWF container signatures are detected automatically and sibling segments
-/// are discovered from the supplied segment path. Fixed, dynamic, and
-/// differencing VHD/VHDX containers are decoded into virtual media; parent
-/// locators resolve accessible `.avhd` and `.avhdx` chains. Use
-/// [`open_image_with_options`] when the decoded image starts with a partition
-/// table or when a non-default filesystem root is needed.
-///
-/// # Errors
-///
-/// Returns an error if the image cannot be opened or decoded, its selected
-/// range is empty, it starts with a partition table, filesystem detection
-/// fails, or no registered driver can open it.
-pub fn open_image(
-    path: impl AsRef<std::path::Path>,
-    drivers: &DriverRegistry,
-) -> Result<OpenedImage, OpenImageError> {
-    open_image_with_options(path, drivers, ImageOpenOptions::new())
-}
-
-/// Open a filesystem from a supported disk image with explicit options.
-///
-/// A partitioned whole-disk image is addressed by partition ordinal with
-/// [`ImageOpenOptions::with_partition`], which bounds the filesystem to that
-/// partition's extent; [`image_layout`] lists the ordinals. Without a
-/// partition the offset is used as-is, addressing decoded logical media
-/// rather than EWF segment bytes or VHD/VHDX container storage, and the
-/// filesystem spans the rest of the image.
-///
-/// # Errors
-///
-/// Returns an error if the image cannot be opened or decoded, the selected
-/// partition does not exist, the resolved offset is at or past the end of
-/// the decoded image, the selected range starts with a partition table,
-/// filesystem detection fails, or no registered driver can open the detected
-/// filesystem and requested root.
-pub fn open_image_with_options(
-    path: impl AsRef<std::path::Path>,
-    drivers: &DriverRegistry,
-    options: ImageOpenOptions,
-) -> Result<OpenedImage, OpenImageError> {
-    let path = path.as_ref();
-    let ImageOpenOptions {
-        offset,
-        partition,
-        filesystem,
-    } = options;
-    let (mut image, offset, size_bytes) = if let Some(partition) = partition {
-        image_layout::locate_image_partition(path, partition)?
-    } else {
-        open_image_tail(path, offset)?
-    };
-
-    let detected = fsmnt_device::detect_boot_sector_at(&mut image, offset).map_err(|source| {
-        OpenImageError::Detection {
-            path: path.to_path_buf(),
-            offset,
-            source,
-        }
-    })?;
-    if matches!(
-        detected,
-        DetectedBootSector::MbrPartitioned | DetectedBootSector::GptPartitioned
-    ) {
-        return Err(OpenImageError::PartitionTable {
-            path: path.to_path_buf(),
-            offset,
-            detected,
-        });
-    }
-    let detected = ext_backup::detection_with_backup_request(detected, &filesystem);
-    if detected == DetectedBootSector::Unknown {
-        // Detection refuses ext backup superblocks; say so precisely rather
-        // than "no filesystem driver for Unknown" — the offset came from a
-        // magic-number scan more often than not, and the group number tells
-        // the user how far back the real start is.
-        let backup =
-            fsmnt_device::ext_backup_superblock_info_at(&mut image, offset).map_err(|source| {
-                OpenImageError::Detection {
-                    path: path.to_path_buf(),
-                    offset,
-                    source,
-                }
-            })?;
-        if let Some(info) = backup {
-            return Err(OpenImageError::ExtBackupSuperblock {
-                path: path.to_path_buf(),
-                offset,
-                group: info.group,
-                filesystem_start: info.filesystem_start(offset),
-            });
-        }
-        // Not a copy either — but the primary metadata of a filesystem
-        // that really does start here may simply be destroyed, in which
-        // case its own group-1 backup is still standing one block group
-        // in and names this offset as its start.
-        let recoverable = ext_backup::find_group_one_backup(&mut image, offset, size_bytes)
-            .map_err(|source| OpenImageError::Detection {
-                path: path.to_path_buf(),
-                offset,
-                source,
-            })?;
-        if let Some(backup_offset) = recoverable {
-            return Err(OpenImageError::ExtPrimaryDamaged {
-                path: path.to_path_buf(),
-                offset,
-                group: 1,
-                backup_offset,
-            });
-        }
-    }
-
-    let format = image.format();
-    let reader = PartitionReader::new(image, offset, size_bytes);
-    let filesystem = drivers
-        .open_with_options(Box::new(reader), detected, &filesystem)
-        .map_err(|source| OpenImageError::Filesystem {
-            path: path.to_path_buf(),
-            offset,
-            detected,
-            source,
-        })?;
-
-    Ok(OpenedImage {
-        filesystem,
-        detected,
-        offset,
-        size_bytes,
-        format,
-    })
-}
-
-/// Open the decoded media and take everything from `offset` to its end.
-///
-/// This is the no-partition path: without a partition table entry to bound
-/// the filesystem, the rest of the image is all the extent there is.
-fn open_image_tail(
-    path: &std::path::Path,
-    offset: u64,
-) -> Result<(ImageReader, u64, u64), OpenImageError> {
-    let image = ImageReader::open(path)?;
-    let image_size = image.len();
-    if offset >= image_size {
-        return Err(OpenImageError::OffsetOutOfRange {
-            path: path.to_path_buf(),
-            offset,
-            size_bytes: image_size,
-        });
-    }
-    Ok((image, offset, image_size - offset))
-}
 
 /// A partition opened from a block device, ready to mount.
 pub struct OpenedPartition {
@@ -527,8 +159,17 @@ pub struct OpenedPartition {
     pub detected: DetectedBootSector,
     /// Size of the partition in bytes (0 if unknown).
     pub size_bytes: u64,
+    /// Bytes the opened filesystem claims for itself that the partition does
+    /// not provide, or `None` when it fits or the partition size is unknown
+    /// (see [`missing_filesystem_bytes`]).
+    pub truncated_by: Option<u64>,
     /// Physical or operating-system logical source actually opened.
     pub source: SourceOrigin,
+    /// Running totals of bytes served as zeros in place of data the source
+    /// could not provide — present only when opened with
+    /// [`PartitionOpenOptions::with_best_effort_reads`]; shared with every
+    /// member's reader so a caller can report them after the mount ends.
+    pub substitutions: Option<Arc<ReadSubstitutions>>,
 }
 
 /// Independent source-layer and filesystem-root choices for opening a
@@ -536,6 +177,7 @@ pub struct OpenedPartition {
 #[derive(Clone, Debug)]
 pub struct PartitionOpenOptions {
     source: SourceSelection,
+    best_effort_reads: bool,
     filesystem: FilesystemOpenOptions,
 }
 
@@ -546,8 +188,26 @@ impl PartitionOpenOptions {
     pub fn new() -> Self {
         Self {
             source: SourceSelection::Auto,
+            best_effort_reads: false,
             filesystem: FilesystemOpenOptions::new(),
         }
+    }
+
+    /// Zero-fill what the device cannot provide instead of failing the read
+    /// — a bad sector, or a partition extent that runs past the end of the
+    /// media. Off by default; every substitution is counted in
+    /// [`OpenedPartition::substitutions`].
+    #[must_use]
+    pub const fn with_best_effort_reads(mut self, best_effort: bool) -> Self {
+        self.best_effort_reads = best_effort;
+        self
+    }
+
+    /// Whether reads the device cannot satisfy are zero-filled rather than
+    /// failed.
+    #[must_use]
+    pub const fn best_effort_reads(&self) -> bool {
+        self.best_effort_reads
     }
 
     /// Choose the logical or physical block source.
@@ -674,13 +334,18 @@ pub fn open_device_partition_with_options<E: HostVolumeResolver>(
     options: PartitionOpenOptions,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
     let located = locate_partition::<E>(drive, partition)?;
+    let policy = ReadPolicy {
+        substitutions: options
+            .best_effort_reads
+            .then(|| Arc::new(ReadSubstitutions::default())),
+    };
 
     match options.source {
         SourceSelection::Auto => {
-            open_logical_partition::<E>(&located, None, drivers, &options.filesystem)
+            open_logical_partition::<E>(&located, None, drivers, &options.filesystem, &policy)
         }
         SourceSelection::Logical(id) => {
-            open_logical_partition::<E>(&located, Some(&id), drivers, &options.filesystem)
+            open_logical_partition::<E>(&located, Some(&id), drivers, &options.filesystem, &policy)
         }
         SourceSelection::Raw {
             additional_partitions,
@@ -689,7 +354,33 @@ pub fn open_device_partition_with_options<E: HostVolumeResolver>(
             &additional_partitions,
             drivers,
             &options.filesystem,
+            &policy,
         ),
+    }
+}
+
+/// How member readers treat data the source cannot provide.
+#[derive(Clone, Default)]
+struct ReadPolicy {
+    /// When set, members zero-fill unreadable bytes and charge them here.
+    substitutions: Option<Arc<ReadSubstitutions>>,
+}
+
+impl ReadPolicy {
+    /// Wrap a member's reader according to the policy.
+    fn wrap<R: Read + Seek + Send + 'static>(
+        &self,
+        reader: R,
+        length: u64,
+    ) -> std::io::Result<Box<dyn DeviceReader>> {
+        Ok(match &self.substitutions {
+            Some(stats) => Box::new(TolerantReader::with_stats(
+                reader,
+                length,
+                Arc::clone(stats),
+            )?),
+            None => Box::new(reader),
+        })
     }
 }
 
@@ -763,6 +454,7 @@ fn open_logical_partition<E: HostVolumeResolver>(
     requested: Option<&LogicalVolumeId>,
     drivers: &DriverRegistry,
     filesystem: &FilesystemOpenOptions,
+    policy: &ReadPolicy,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
     let candidates = E::logical_volumes(&located.extent)?;
     let volume = select_logical_volume(&located.extent, &candidates, requested)?;
@@ -774,7 +466,7 @@ fn open_logical_partition<E: HostVolumeResolver>(
     let reader = SectorReader::new(reader, length, sector_size)?;
     let mut member = DeviceMember::new(
         SourceMemberId::Logical(identity),
-        Box::new(reader),
+        policy.wrap(reader, length)?,
         length,
         sector_size,
     )?;
@@ -787,6 +479,7 @@ fn open_logical_partition<E: HostVolumeResolver>(
         length,
         drivers,
         filesystem,
+        policy,
     )
 }
 
@@ -795,10 +488,11 @@ fn open_raw_partitions<E: HostVolumeResolver>(
     additional: &[PartitionAddress],
     drivers: &DriverRegistry,
     filesystem: &FilesystemOpenOptions,
+    policy: &ReadPolicy,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
     let mut extents = Vec::with_capacity(additional.len().saturating_add(1));
     extents.push(primary.extent.clone());
-    let mut primary_member = open_raw_member::<E>(primary)?;
+    let mut primary_member = open_raw_member::<E>(primary, policy)?;
     let primary_discovery = discover_member(drivers, &mut primary_member)?;
     let mut discovered_ids = primary_discovery
         .as_ref()
@@ -808,7 +502,7 @@ fn open_raw_partitions<E: HostVolumeResolver>(
 
     for address in additional {
         let located = locate_partition::<E>(address.drive(), address.partition())?;
-        let mut member = open_raw_member::<E>(&located)?;
+        let mut member = open_raw_member::<E>(&located, policy)?;
         if let (Some(primary), Some(candidate)) = (
             primary_discovery.as_ref(),
             discover_member(drivers, &mut member)?,
@@ -828,6 +522,7 @@ fn open_raw_partitions<E: HostVolumeResolver>(
             &mut devices,
             &mut extents,
             drivers,
+            policy,
         );
     }
 
@@ -842,6 +537,7 @@ fn open_raw_partitions<E: HostVolumeResolver>(
         size,
         drivers,
         filesystem,
+        policy,
     )
 }
 
@@ -888,6 +584,7 @@ fn discover_raw_partitions<E: HostVolumeResolver>(
     devices: &mut DeviceSet,
     extents: &mut Vec<PhysicalExtent>,
     drivers: &DriverRegistry,
+    policy: &ReadPolicy,
 ) {
     if discovery_complete(primary, discovered_ids) {
         return;
@@ -910,7 +607,7 @@ fn discover_raw_partitions<E: HostVolumeResolver>(
             if extents.contains(&located.extent) {
                 continue;
             }
-            let Ok(mut member) = open_raw_member::<E>(&located) else {
+            let Ok(mut member) = open_raw_member::<E>(&located, policy) else {
                 continue;
             };
             let Ok(Some(candidate)) = discover_member(drivers, &mut member) else {
@@ -933,6 +630,7 @@ fn discover_raw_partitions<E: HostVolumeResolver>(
 
 fn open_raw_member<E: HostVolumeResolver>(
     located: &LocatedPartition,
+    policy: &ReadPolicy,
 ) -> Result<DeviceMember, Box<dyn std::error::Error>> {
     let reader = E::open_drive(located.extent.drive())?;
     let zone_reporter = E::physical_zone_reporter(&located.extent)?;
@@ -940,7 +638,7 @@ fn open_raw_member<E: HostVolumeResolver>(
     let reader = SectorReader::new(partition, located.extent.length(), located.sector_size)?;
     let mut member = DeviceMember::new(
         SourceMemberId::Physical(located.extent.clone()),
-        Box::new(reader),
+        policy.wrap(reader, located.extent.length())?,
         located.extent.length(),
         located.sector_size,
     )?;
@@ -956,8 +654,13 @@ fn open_devices(
     size: u64,
     drivers: &DriverRegistry,
     filesystem: &FilesystemOpenOptions,
+    policy: &ReadPolicy,
 ) -> Result<OpenedPartition, Box<dyn std::error::Error>> {
-    let detected = fsmnt_device::detect_boot_sector_at(devices.primary_mut().reader_mut(), 0)?;
+    // Bounded to the member so a dead sector 0 can still be classified from
+    // the format's backup copies (see `detect_boot_sector_within`).
+    let length = devices.primary_mut().length();
+    let detected =
+        fsmnt_device::detect_boot_sector_within(devices.primary_mut().reader_mut(), 0, length)?;
     std::io::Seek::seek(
         devices.primary_mut().reader_mut(),
         std::io::SeekFrom::Start(0),
@@ -965,11 +668,19 @@ fn open_devices(
     let detected = ext_backup::detection_with_backup_request(detected, filesystem);
     let opened = drivers.open_devices_with_options_resolved(devices, detected, filesystem)?;
 
+    let size_bytes = if size == u64::MAX { 0 } else { size };
+    // A partition whose size is unknown (0) cannot contradict anything the
+    // filesystem claims, so it never reports a shortfall.
+    let truncated_by = (size_bytes > 0)
+        .then(|| truncation::missing_filesystem_bytes(opened.filesystem.total_size(), size_bytes))
+        .flatten();
     Ok(OpenedPartition {
         filesystem: opened.filesystem,
         detected: opened.detected,
-        size_bytes: if size == u64::MAX { 0 } else { size },
+        size_bytes,
+        truncated_by,
         source,
+        substitutions: policy.substitutions.clone(),
     })
 }
 
