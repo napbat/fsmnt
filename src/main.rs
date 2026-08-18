@@ -50,6 +50,25 @@ impl FilesystemMountOptions {
     }
 }
 
+/// Shared option for the commands that mount something.
+#[derive(Args, Clone, Debug, Default)]
+struct DetachOption {
+    /// Mount in a background process and return as soon as the volume is
+    /// ready, instead of blocking until it is unmounted. Stop it later with
+    /// `fsmnt unmount MOUNTPOINT`.
+    #[arg(long)]
+    detach: bool,
+}
+
+impl DetachOption {
+    /// Whether this command should hand its mount to a background
+    /// process. The background process runs the same command with the
+    /// flag removed, so it always mounts in the foreground itself.
+    fn requested(&self) -> bool {
+        self.detach && !cli::detach::is_background_mount()
+    }
+}
+
 /// The `fsmnt` subcommands.
 #[derive(Subcommand)]
 enum Commands {
@@ -69,6 +88,21 @@ enum Commands {
         /// Filesystem type label reported to the OS.
         #[arg(long, default_value = "fsmnt")]
         fsname: String,
+
+        #[command(flatten)]
+        detach: DetachOption,
+    },
+
+    /// Unmount a volume, from anywhere.
+    ///
+    /// Works from another shell while a mount command is blocking, which
+    /// then returns. On Windows it also restores a mountpoint directory
+    /// left behind by a mount process that was killed.
+    #[command(alias = "umount")]
+    Unmount {
+        /// Mountpoint to release: the directory on Unix; the drive letter
+        /// (e.g. `Z:`) or directory on Windows.
+        mountpoint: String,
     },
 
     /// Mount a raw, EWF, VHD, or VHDX image (NTFS, FAT, exFAT, ext, APFS,
@@ -110,6 +144,9 @@ enum Commands {
 
         #[command(flatten)]
         filesystem: FilesystemMountOptions,
+
+        #[command(flatten)]
+        detach: DetachOption,
     },
 
     /// List physical drives on this machine.
@@ -181,6 +218,9 @@ enum Commands {
 
         #[command(flatten)]
         filesystem: FilesystemMountOptions,
+
+        #[command(flatten)]
+        detach: DetachOption,
     },
 }
 
@@ -199,9 +239,42 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+impl Commands {
+    /// The mountpoint to wait for when this command hands its mount to a
+    /// background process, or `None` when it runs in the foreground.
+    fn detached_mountpoint(&self) -> Option<&str> {
+        let (detach, mountpoint) = match self {
+            Self::Mount {
+                detach, mountpoint, ..
+            }
+            | Self::MountImage {
+                detach, mountpoint, ..
+            } => (detach, mountpoint),
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            Self::MountDevice {
+                detach, mountpoint, ..
+            } => (detach, mountpoint),
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            Self::Drives => return None,
+            Self::Partitions { .. } | Self::Unmount { .. } => return None,
+        };
+        detach.requested().then_some(mountpoint.as_str())
+    }
+}
+
 /// Parse the command line and dispatch to the selected subcommand.
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // `--detach`: hand the whole command to a background process and wait
+    // here only until its volume is live.
+    if let Some(mountpoint) = cli.command.detached_mountpoint() {
+        let pid = cli::detach::spawn(mountpoint)?;
+        println!(
+            "Volume mounted at {mountpoint} (pid {pid}); run 'fsmnt unmount {mountpoint}' to unmount."
+        );
+        return Ok(());
+    }
 
     match cli.command {
         Commands::Mount {
@@ -209,7 +282,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mountpoint,
             volname,
             fsname,
+            detach: _,
         } => cli::handle_mount(&source, &mountpoint, &volname, &fsname),
+        Commands::Unmount { mountpoint } => cli::handle_unmount(&mountpoint),
         Commands::MountImage {
             image,
             mountpoint,
@@ -219,6 +294,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             recovery_password,
             bek_file,
             filesystem,
+            detach: _,
         } => cli::handle_mount_image(cli::MountImageOptions {
             image: &image,
             mountpoint: &mountpoint,
@@ -245,6 +321,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             bek_file,
             fstab,
             filesystem,
+            detach: _,
         } => cli::handle_mount_device(cli::MountDeviceOptions {
             drive: &drive,
             partition,

@@ -25,6 +25,11 @@
 //! .unwrap();
 //! ```
 //!
+//! [`mount`] blocks until the process is asked to stop or the volume is
+//! unmounted; [`unmount`] does the latter from anywhere, including from
+//! another process, and [`is_mounted`] reports whether a mountpoint is
+//! live.
+//!
 //! # Mounting block devices
 //!
 //! The [`device`] layer provides cross-platform block-device access:
@@ -92,9 +97,11 @@ pub use fsmnt_device::{ImageContainer, ImageFormat, ImageOpenError, ImageReader}
 pub use fsmnt_drivers as drivers;
 pub use fsmnt_proxy as proxy;
 
+mod backend;
 mod fstab_mount;
 mod image_layout;
 
+pub use backend::{is_mounted, mount, unmount};
 pub use fstab_mount::open_device_partition_with_fstab;
 pub use image_layout::{ImageLayout, ImageLayoutKind, ImagePartition, image_layout};
 
@@ -112,49 +119,6 @@ use fsmnt_device::{
     ResolvedMemberDiscovery, SectorReader, SourceMemberId, SourceOrigin, SourceSelection,
     select_logical_volume,
 };
-
-/// Mount a [`TargetFilesystem`] as a read-only volume.
-///
-/// - `mountpoint` — directory path (Unix) or drive letter / directory
-///   (Windows, e.g. `"Z:"`).
-/// - `fsname` — filesystem type label (e.g. `"ntfs"`, `"fat32"`).
-/// - `volname` — volume label shown in the OS file manager.
-/// - `total_bytes` — total size of the underlying volume in bytes, reported
-///   by the OS in volume properties.  Pass 0 to fall back to the
-///   filesystem's [`TargetFilesystem::total_size`].
-/// - `on_mount` — called once the volume is successfully mounted and
-///   accessible, *before* blocking on Ctrl+C.
-///
-/// Blocks until Ctrl+C (or `umount` on Unix).  The volume is automatically
-/// unmounted when the function returns.
-///
-/// # Errors
-///
-/// Returns an error if the platform mount backend fails to create the
-/// volume (e.g. missing FUSE/Dokan driver or an invalid mountpoint), or on
-/// platforms with no mount backend.
-pub fn mount(
-    fs: Box<dyn TargetFilesystem>,
-    mountpoint: &str,
-    fsname: &str,
-    volname: &str,
-    total_bytes: u64,
-    on_mount: impl FnOnce(),
-) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    {
-        fsmnt_fuse::mount(fs, mountpoint, fsname, volname, total_bytes, on_mount)
-    }
-    #[cfg(windows)]
-    {
-        fsmnt_dokan::mount(fs, mountpoint, fsname, volname, total_bytes, on_mount)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (fs, mountpoint, fsname, volname, total_bytes, on_mount);
-        Err("fsmnt is not supported on this platform".into())
-    }
-}
 
 /// A filesystem opened from a decoded disk-image container, ready to mount.
 pub struct OpenedImage {

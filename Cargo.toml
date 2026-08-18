@@ -124,7 +124,10 @@ zeroize = { version = "1.7", default-features = false, features = [
 ] }
 
 # Unix mount backend (FUSE)
-ctrlc = "3.5"
+# `termination` also installs the handler for SIGTERM and SIGHUP, so a
+# mount started by a script unmounts cleanly when the script kills it or
+# the owning terminal goes away.
+ctrlc = { version = "3.5", features = ["termination"] }
 fuser = "0.17"
 libc = "0.2"
 linux-raw-sys = { version = "0.12", default-features = false }
@@ -175,6 +178,7 @@ fsmnt-fuse = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 fsmnt-device-windows = { workspace = true }
 fsmnt-dokan = { workspace = true }
+windows-sys = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fsmnt-device-linux = { workspace = true }

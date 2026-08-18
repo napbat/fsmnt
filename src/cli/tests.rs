@@ -138,6 +138,40 @@ fn default_filesystem_root_is_typed() {
 }
 
 #[test]
+fn unmount_is_also_spelled_umount() {
+    for name in ["unmount", "umount"] {
+        let cli = Cli::try_parse_from(["fsmnt", name, "Z:"]).expect("unmount command");
+        let Commands::Unmount { mountpoint } = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(mountpoint, "Z:");
+    }
+}
+
+#[test]
+fn every_mount_command_can_detach() {
+    let commands: &[&[&str]] = &[
+        &["fsmnt", "mount", "source", "Z:", "--detach"],
+        &["fsmnt", "mount-image", "image", "Z:", "--detach"],
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+        &["fsmnt", "mount-device", "0", "Z:", "--detach"],
+    ];
+    for args in commands {
+        let cli = Cli::try_parse_from(*args).expect("detached mount");
+        assert_eq!(cli.command.detached_mountpoint(), Some("Z:"));
+    }
+}
+
+#[test]
+fn mounts_stay_in_the_foreground_without_the_detach_flag() {
+    let cli = Cli::try_parse_from(["fsmnt", "mount-image", "image", "Z:"]).expect("mount");
+    assert_eq!(cli.command.detached_mountpoint(), None);
+
+    let cli = Cli::try_parse_from(["fsmnt", "unmount", "Z:"]).expect("unmount");
+    assert_eq!(cli.command.detached_mountpoint(), None);
+}
+
+#[test]
 fn journal_replay_is_on_unless_declined() {
     let cli = Cli::try_parse_from(["fsmnt", "mount-image", "image", "Z:"]).expect("default mount");
     let Commands::MountImage { filesystem, .. } = cli.command else {

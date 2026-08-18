@@ -236,7 +236,38 @@ fsmnt mount ./export Z: --volname Evidence
 Exposes an ordinary directory as a read-only volume — handy for testing the
 mount backends without a disk image.
 
-All mount commands block until Ctrl+C and unmount on exit.
+### Unmounting
+
+Mount commands block for as long as the volume exists. Ctrl+C unmounts and
+exits — as do `SIGTERM` and `SIGHUP` on Unix, and closing the console,
+logging off, or shutting down on Windows.
+
+From another shell, or from a script, the mountpoint is enough:
+
+```sh
+fsmnt unmount Z:                  # `umount` works too
+fsmnt unmount /mnt/evidence
+```
+
+The volume is released and the blocked mount command returns. On Windows
+this also restores a mountpoint directory left behind by a mount process
+that was killed: `taskkill /F` is `TerminateProcess`, which no program can
+intercept, so the directory keeps a dangling reparse point that reports
+"a device which does not exist was specified" for every access until
+`fsmnt unmount` clears it.
+
+To mount without a process to babysit, add `--detach` to any mount command.
+The mount moves to a background process and the command returns as soon as
+the volume is usable, or fails if it does not come up within 30 seconds:
+
+```sh
+fsmnt mount-image disk.img Z: --detach
+fsmnt mount-image evidence.E01 Y: --detach --offset 1048576
+fsmnt unmount Z: && fsmnt unmount Y:
+```
+
+Run the command without `--detach` to see why a mount failed — the
+background process has no console to report to.
 
 ## Library
 

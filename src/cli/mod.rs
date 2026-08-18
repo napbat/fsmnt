@@ -2,8 +2,10 @@
 //!
 //! `main.rs` owns the clap definitions and dispatches into this module:
 //! [`mount`] implements the three mounting commands, [`partitions`] the two
-//! inspection commands, and the helpers below are used by both.
+//! inspection commands, [`detach`] hands a mount to a background process,
+//! and the helpers below are used by all of them.
 
+pub(crate) mod detach;
 pub(crate) mod mount;
 pub(crate) mod partitions;
 
@@ -32,7 +34,7 @@ pub(crate) fn ensure_unix_mountpoint(mountpoint: &str) -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// Mount `fs` and block until Ctrl+C, printing progress.
+/// Mount `fs` and block until the mount ends, printing progress.
 pub(crate) fn block_on_mount(
     fs: Box<dyn fsmnt::TargetFilesystem>,
     mountpoint: &str,
@@ -44,9 +46,19 @@ pub(crate) fn block_on_mount(
     let mp_display = mountpoint.to_string();
     println!("Mounting {kind} volume at {mountpoint}...");
     fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
-        println!("Volume mounted at {mp_display}. Press Ctrl+C to unmount.");
+        println!(
+            "Volume mounted at {mp_display}. Press Ctrl+C, or run 'fsmnt unmount {mp_display}' \
+             from another shell, to unmount."
+        );
     })?;
     println!("Unmounted.");
+    Ok(())
+}
+
+/// Unmount whatever `fsmnt` has mounted at `mountpoint`.
+pub(crate) fn handle_unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fsmnt::unmount(mountpoint)?;
+    println!("Unmounted {mountpoint}.");
     Ok(())
 }
 

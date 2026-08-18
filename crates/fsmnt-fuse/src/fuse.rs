@@ -30,15 +30,26 @@ const ATTR_TTL: Duration = Duration::from_hours(1);
 /// Inode number of the root directory.
 const ROOT_INO: u64 = 1;
 
+/// How often the mount loop re-checks whether the volume is still mounted.
+const LIVENESS_POLL: Duration = Duration::from_millis(200);
+
 /// Mounts `fs` as a read-only FUSE volume at `mountpoint`.
 ///
 /// Calls `on_mount` once the volume is mounted, then blocks the calling
-/// thread until Ctrl+C, unmounts, and returns.
+/// thread until either
+///
+/// - a termination signal arrives — `SIGINT` (Ctrl+C), `SIGTERM`, or
+///   `SIGHUP`, all handled through `ctrlc`'s `termination` feature — after
+///   which the session is dropped, which unmounts the volume; or
+/// - the volume is unmounted from elsewhere ([`unmount`], `fusermount -u`,
+///   `umount`), which [`is_mounted`] detects.
+///
+/// Either way the volume is unmounted by the time this returns.
 ///
 /// # Errors
 ///
 /// Returns an error if the FUSE session cannot be created (e.g. the
-/// mountpoint does not exist or FUSE is unavailable) or the Ctrl+C
+/// mountpoint does not exist or FUSE is unavailable) or the signal
 /// handler cannot be installed.
 pub fn mount(
     fs: Box<dyn TargetFilesystem>,
@@ -57,7 +68,7 @@ pub fn mount(
         MountOption::CUSTOM(format!("volname={volname}")),
     ];
 
-    let _session = fuser::spawn_mount2(fuse_fs, mountpoint, &config)?;
+    let session = fuser::spawn_mount2(fuse_fs, mountpoint, &config)?;
 
     on_mount();
 
@@ -65,9 +76,128 @@ pub fn mount(
     ctrlc::set_handler(move || {
         let _ = tx.send(());
     })?;
-    let _ = rx.recv();
 
+    loop {
+        match rx.recv_timeout(LIVENESS_POLL) {
+            // A termination signal arrived.
+            Ok(()) => break,
+            // Waking up regularly means an unmount from outside this
+            // process ends the mount too, instead of leaving it blocked
+            // on a signal that will never come.
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !is_mounted(mountpoint) {
+                    break;
+                }
+            }
+            // No signal can arrive any more; keep watching the volume.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                if !is_mounted(mountpoint) {
+                    break;
+                }
+                std::thread::sleep(LIVENESS_POLL);
+            }
+        }
+    }
+
+    // Dropping the session unmounts the volume (and is a no-op once it has
+    // been unmounted from elsewhere).
+    drop(session);
     Ok(())
+}
+
+/// Unmount helper commands to try in order, each run as
+/// `program [args…] <mountpoint>`.
+///
+/// `fusermount3` is the standard Linux helper, and the one `fuser`'s own
+/// pure-Rust mount uses to attach the volume in the first place, so it is
+/// already a run-time requirement of this crate.  The FUSE 2 helper and
+/// plain `umount` are fallbacks for hosts without it.
+#[cfg(target_os = "linux")]
+const UNMOUNT_HELPERS: &[&[&str]] = &[&["fusermount3", "-u"], &["fusermount", "-u"], &["umount"]];
+
+/// Unmount helper commands to try in order, each run as
+/// `program [args…] <mountpoint>`.
+///
+/// macOS releases a `macFUSE` volume with `umount`; `diskutil unmount` is
+/// the fallback, as it can also detach a volume the Finder keeps busy.
+#[cfg(target_os = "macos")]
+const UNMOUNT_HELPERS: &[&[&str]] = &[&["umount"], &["diskutil", "unmount"]];
+
+/// Unmount helper commands to try in order, each run as
+/// `program [args…] <mountpoint>`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const UNMOUNT_HELPERS: &[&[&str]] = &[&["umount"]];
+
+/// Unmounts the FUSE volume at the directory `mountpoint`, from any
+/// process.
+///
+/// Runs the platform's unmount helper (see [`UNMOUNT_HELPERS`]), trying the
+/// next one whenever a helper is missing or fails.  A [`mount`] blocked on
+/// that mountpoint returns once the volume is gone.
+///
+/// # Errors
+///
+/// Returns an error if every helper failed, quoting what each of them
+/// reported — typically that nothing is mounted at `mountpoint`, or that
+/// the volume is busy.
+pub fn unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut failures = Vec::with_capacity(UNMOUNT_HELPERS.len());
+
+    for helper in UNMOUNT_HELPERS {
+        let Some((program, args)) = helper.split_first() else {
+            continue;
+        };
+        match std::process::Command::new(program)
+            .args(args)
+            .arg(mountpoint)
+            .output()
+        {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => failures.push(format!("{program}: {}", helper_failure(&output))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                failures.push(format!("{program}: not installed"));
+            }
+            Err(error) => failures.push(format!("{program}: {error}")),
+        }
+    }
+
+    Err(format!("failed to unmount {mountpoint} ({})", failures.join("; ")).into())
+}
+
+/// Describes why an unmount helper failed, preferring its own message.
+fn helper_failure(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let message = stderr.trim();
+    if message.is_empty() {
+        output.status.to_string()
+    } else {
+        message.to_string()
+    }
+}
+
+/// Whether a filesystem is currently mounted at `mountpoint`.
+///
+/// A mountpoint carries a different device number than the directory it
+/// lives in exactly while something is mounted on it, which is what this
+/// compares.  When the parent directory cannot be inspected the answer is
+/// `true`, so a caller waiting for an unmount keeps waiting rather than
+/// giving up on an unreadable path.
+#[must_use]
+pub fn is_mounted(mountpoint: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = std::path::Path::new(mountpoint);
+    let Ok(mounted) = std::fs::metadata(path) else {
+        return false;
+    };
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    match std::fs::metadata(parent) {
+        Ok(parent) => parent.dev() != mounted.dev(),
+        Err(_) => true,
+    }
 }
 
 /// Bidirectional inode ↔ path mapping.
@@ -350,5 +480,37 @@ impl Filesystem for FuseFs {
         reply: fuser::ReplyEmpty,
     ) {
         reply.ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{ExitStatus, Output};
+
+    use super::helper_failure;
+
+    /// A failed helper run: `0x100` is the wait status of exit code 1.
+    fn failed_run(stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(0x100),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_failure_is_described_by_the_helpers_own_message() {
+        let failure = failed_run("fusermount3: entry for /mnt/evidence not found in /etc/mtab\n");
+        assert_eq!(
+            helper_failure(&failure),
+            "fusermount3: entry for /mnt/evidence not found in /etc/mtab"
+        );
+    }
+
+    #[test]
+    fn a_silent_failure_falls_back_to_the_exit_status() {
+        let failure = helper_failure(&failed_run("   \n"));
+        assert!(failure.contains('1'), "unexpected description: {failure}");
     }
 }
