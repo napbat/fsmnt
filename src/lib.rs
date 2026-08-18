@@ -61,6 +61,26 @@
 //! [`open_image`] or [`open_image_with_options`]. Segment sets, sparse blocks,
 //! and VHD/VHDX differencing chains are decoded into the same seekable
 //! [`ImageContainer`] media view consumed by the filesystem drivers.
+//!
+//! A whole-disk image does not start with a filesystem. [`image_layout`]
+//! enumerates its partition table — ordinal, offset, size, type, label, and
+//! detected filesystem per partition — and
+//! [`ImageOpenOptions::with_partition`] mounts one of those ordinals without
+//! any offset arithmetic:
+//!
+//! ```rust,no_run
+//! use fsmnt::{ImageOpenOptions, drivers, image_layout, open_image_with_options};
+//!
+//! for partition in image_layout("disk.bin")?.partitions {
+//!     println!("{} {:?}", partition.ordinal, partition.detected);
+//! }
+//! let options = ImageOpenOptions::new().with_partition(3);
+//! let opened = open_image_with_options("disk.bin", &drivers::default_registry(), options)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! [`ImageOpenOptions::with_offset`] remains for media whose filesystem sits
+//! at a byte offset no partition table describes.
 
 pub use fsmnt_core::{
     DirFilesystem, FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, Fstab, FstabEntry,
@@ -73,8 +93,10 @@ pub use fsmnt_drivers as drivers;
 pub use fsmnt_proxy as proxy;
 
 mod fstab_mount;
+mod image_layout;
 
 pub use fstab_mount::open_device_partition_with_fstab;
+pub use image_layout::{ImageLayout, ImageLayoutKind, ImagePartition, image_layout};
 
 #[cfg(target_os = "linux")]
 pub use fsmnt_device_linux::LinuxHostDrives as HostDrives;
@@ -140,6 +162,10 @@ pub struct OpenedImage {
     pub filesystem: Box<dyn TargetFilesystem>,
     /// The detected boot-sector type at the selected image offset.
     pub detected: DetectedBootSector,
+    /// Byte offset the filesystem was opened at within the decoded media.
+    /// For a selected partition this is the partition's start, not the
+    /// offset originally requested.
+    pub offset: u64,
     /// Size of the selected decoded media range in bytes.
     pub size_bytes: u64,
     /// Container format used to expose the decoded media.
@@ -165,7 +191,8 @@ pub enum OpenImageError {
     },
     /// The selected offset identifies another partition table.
     #[error(
-        "{path:?} contains a partition table at offset {offset} ({detected:?}); select the byte offset of a filesystem-containing partition"
+        "{path:?} contains a partition table at offset {offset} ({detected:?}); select a partition with `--partition N` (see `fsmnt partitions {}`)",
+        path.display()
     )]
     PartitionTable {
         /// Image path supplied by the caller.
@@ -174,6 +201,28 @@ pub enum OpenImageError {
         offset: u64,
         /// Partition-table type detected at the offset.
         detected: DetectedBootSector,
+    },
+    /// The image layout could not be read to enumerate its partitions.
+    #[error("failed to read the partition layout of {path:?}: {source}")]
+    Layout {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Underlying seek or read failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The requested partition ordinal is not present in the image.
+    #[error(
+        "partition {partition} not found in {path:?}: the image has {available} partition(s); list them with `fsmnt partitions {}`",
+        path.display()
+    )]
+    PartitionNotFound {
+        /// Image path supplied by the caller.
+        path: std::path::PathBuf,
+        /// Requested 0-based partition ordinal.
+        partition: usize,
+        /// Number of partitions the image actually exposes.
+        available: usize,
     },
     /// Reading or classifying the selected boot sector failed.
     #[error("failed to detect a filesystem at offset {offset} in {path:?}: {source}")]
@@ -201,10 +250,11 @@ pub enum OpenImageError {
     },
 }
 
-/// Offset and filesystem-root choices for opening a disk image.
+/// Location and filesystem-root choices for opening a disk image.
 #[derive(Clone, Debug)]
 pub struct ImageOpenOptions {
     offset: u64,
+    partition: Option<usize>,
     filesystem: FilesystemOpenOptions,
 }
 
@@ -215,14 +265,33 @@ impl ImageOpenOptions {
     pub const fn new() -> Self {
         Self {
             offset: 0,
+            partition: None,
             filesystem: FilesystemOpenOptions::new(),
         }
     }
 
     /// Select the byte offset of the filesystem within decoded image media.
+    ///
+    /// Use this for media whose filesystem no partition table describes;
+    /// prefer [`with_partition`](Self::with_partition) for a partitioned
+    /// whole-disk image.
     #[must_use]
     pub const fn with_offset(mut self, offset: u64) -> Self {
         self.offset = offset;
+        self
+    }
+
+    /// Select a partition of the image by its ordinal, counting non-empty
+    /// partition-table entries from 0 — the same numbering
+    /// [`image_layout`] prints and `mount-device --partition` uses.
+    ///
+    /// The partition's own start offset and length bound the filesystem, so
+    /// this supersedes [`with_offset`](Self::with_offset): any offset set
+    /// alongside a partition is ignored, and callers that select a partition
+    /// should leave the offset at 0.
+    #[must_use]
+    pub const fn with_partition(mut self, partition: usize) -> Self {
+        self.partition = Some(partition);
         self
     }
 
@@ -233,10 +302,17 @@ impl ImageOpenOptions {
         self
     }
 
-    /// Byte offset of the filesystem within decoded image media.
+    /// Byte offset of the filesystem within decoded image media. Ignored
+    /// when [`partition`](Self::partition) selects a partition.
     #[must_use]
     pub const fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Partition ordinal to open, if one was selected.
+    #[must_use]
+    pub const fn partition(&self) -> Option<usize> {
+        self.partition
     }
 
     /// Requested filesystem-open options.
@@ -275,32 +351,36 @@ pub fn open_image(
 
 /// Open a filesystem from a supported disk image with explicit options.
 ///
-/// The offset addresses decoded logical media, not EWF segment bytes or
-/// VHD/VHDX container storage. A partitioned whole-disk image requires the
-/// byte offset of the filesystem-containing partition.
+/// A partitioned whole-disk image is addressed by partition ordinal with
+/// [`ImageOpenOptions::with_partition`], which bounds the filesystem to that
+/// partition's extent; [`image_layout`] lists the ordinals. Without a
+/// partition the offset is used as-is, addressing decoded logical media
+/// rather than EWF segment bytes or VHD/VHDX container storage, and the
+/// filesystem spans the rest of the image.
 ///
 /// # Errors
 ///
-/// Returns an error if the image cannot be opened or decoded, `offset` is at
-/// or past the end of the decoded image, the selected range starts with a
-/// partition table, filesystem detection fails, or no registered driver can
-/// open the detected filesystem and requested root.
+/// Returns an error if the image cannot be opened or decoded, the selected
+/// partition does not exist, the resolved offset is at or past the end of
+/// the decoded image, the selected range starts with a partition table,
+/// filesystem detection fails, or no registered driver can open the detected
+/// filesystem and requested root.
 pub fn open_image_with_options(
     path: impl AsRef<std::path::Path>,
     drivers: &DriverRegistry,
     options: ImageOpenOptions,
 ) -> Result<OpenedImage, OpenImageError> {
     let path = path.as_ref();
-    let ImageOpenOptions { offset, filesystem } = options;
-    let mut image = ImageReader::open(path)?;
-    let image_size = image.len();
-    if offset >= image_size {
-        return Err(OpenImageError::OffsetOutOfRange {
-            path: path.to_path_buf(),
-            offset,
-            size_bytes: image_size,
-        });
-    }
+    let ImageOpenOptions {
+        offset,
+        partition,
+        filesystem,
+    } = options;
+    let (mut image, offset, size_bytes) = if let Some(partition) = partition {
+        image_layout::locate_image_partition(path, partition)?
+    } else {
+        open_image_tail(path, offset)?
+    };
 
     let detected = fsmnt_device::detect_boot_sector_at(&mut image, offset).map_err(|source| {
         OpenImageError::Detection {
@@ -321,7 +401,6 @@ pub fn open_image_with_options(
     }
 
     let format = image.format();
-    let size_bytes = image_size - offset;
     let reader = PartitionReader::new(image, offset, size_bytes);
     let filesystem = drivers
         .open_with_options(Box::new(reader), detected, &filesystem)
@@ -335,9 +414,30 @@ pub fn open_image_with_options(
     Ok(OpenedImage {
         filesystem,
         detected,
+        offset,
         size_bytes,
         format,
     })
+}
+
+/// Open the decoded media and take everything from `offset` to its end.
+///
+/// This is the no-partition path: without a partition table entry to bound
+/// the filesystem, the rest of the image is all the extent there is.
+fn open_image_tail(
+    path: &std::path::Path,
+    offset: u64,
+) -> Result<(ImageReader, u64, u64), OpenImageError> {
+    let image = ImageReader::open(path)?;
+    let image_size = image.len();
+    if offset >= image_size {
+        return Err(OpenImageError::OffsetOutOfRange {
+            path: path.to_path_buf(),
+            offset,
+            size_bytes: image_size,
+        });
+    }
+    Ok((image, offset, image_size - offset))
 }
 
 /// A partition opened from a block device, ready to mount.
