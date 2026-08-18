@@ -8,9 +8,8 @@ use fsmnt_device::{
     SourceSelection,
 };
 
-use crate::{
-    OpenedPartition, PartitionOpenOptions, locate_partitions, open_device_partition_with_options,
-};
+use crate::open_device::locate_partitions;
+use crate::{OpenedPartition, PartitionOpenOptions, open_device_partition_with_options};
 
 /// Open a device partition and compose child filesystems declared by fstab.
 ///
@@ -44,6 +43,7 @@ pub fn open_device_partition_with_fstab<E: HostVolumeResolver>(
         truncated_by,
         source,
         substitutions,
+        layout_origin,
     } = root;
     let contents = filesystem.read_to_string(fstab_path)?;
     let fstab: Fstab = contents.parse()?;
@@ -101,6 +101,9 @@ pub fn open_device_partition_with_fstab<E: HostVolumeResolver>(
         truncated_by,
         source,
         substitutions,
+        // The namespace is rooted at the partition that was opened, so the
+        // provenance of that partition is the provenance of the whole tree.
+        layout_origin,
     })
 }
 
@@ -175,7 +178,9 @@ fn discover_uuid_partitions<E: HostVolumeResolver>(
         }
     }
     for drive in host_drives {
-        let Ok(partitions) = locate_partitions::<E>(&drive) else {
+        // Each host drive is read in its own geometry: the root's sector
+        // size says nothing about the drives a sibling UUID might live on.
+        let Ok(partitions) = locate_partitions::<E>(&drive, None) else {
             continue;
         };
         for partition in 0..partitions.len() {
