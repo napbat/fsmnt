@@ -10,11 +10,9 @@
 //! [`AdiantumCipher::new`] + [`AdiantumCipher::decrypt_in_place`]. All
 //! NH / Poly1305 wrapping and subkey types stay private.
 
-#![cfg(feature = "fscrypt")]
-
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::error::{ExtError, Result};
+use crate::error::{FscryptError, Result};
 
 // === Constants ===========================================================
 
@@ -145,7 +143,7 @@ impl AdiantumCipher {
         use chacha20::cipher::{KeyIvInit, StreamCipher};
 
         if buf.len() < 16 {
-            return Err(ExtError::InvalidFscryptPolicy {
+            return Err(FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "Adiantum ciphertext < 16 bytes",
             });

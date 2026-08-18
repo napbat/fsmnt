@@ -3,7 +3,7 @@
 //! Distinguished from the on-disk `FscryptContext` (in `policy.rs`) so
 //! the public API doesn't change when the on-disk format does.
 
-use crate::error::{ExtError, Result};
+use crate::error::{FscryptError, Result};
 
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -28,18 +28,18 @@ impl FscryptMasterKey {
     ///
     /// # Errors
     ///
-    /// Returns [`ExtError::InvalidFscryptPolicy`] when `bytes` is shorter
+    /// Returns [`FscryptError::InvalidPolicy`] when `bytes` is shorter
     /// than 16 bytes or longer than 64 bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < FSCRYPT_MIN_KEY_SIZE || bytes.len() > FSCRYPT_MAX_KEY_SIZE {
-            return Err(ExtError::InvalidFscryptPolicy {
+            return Err(FscryptError::InvalidPolicy {
                 inode: 0,
                 reason: "fscrypt master key length outside [16, 64] range",
             });
         }
         let mut buf = [0u8; FSCRYPT_MAX_KEY_SIZE];
         buf[..bytes.len()].copy_from_slice(bytes);
-        let len = u8::try_from(bytes.len()).map_err(|_| ExtError::InvalidFscryptPolicy {
+        let len = u8::try_from(bytes.len()).map_err(|_| FscryptError::InvalidPolicy {
             inode: 0,
             reason: "fscrypt master key length does not fit its encoded field",
         })?;
@@ -164,36 +164,53 @@ impl FscryptPolicy {
     }
 }
 
-/// fscrypt content/filenames mode identifiers (one-byte values on the
-/// wire, per `include/uapi/linux/fscrypt.h`).
-pub(crate) const FSCRYPT_MODE_AES_256_XTS: u8 = 1;
-pub(crate) const FSCRYPT_MODE_AES_256_CTS: u8 = 4;
-pub(crate) const FSCRYPT_MODE_AES_128_CBC: u8 = 5;
-pub(crate) const FSCRYPT_MODE_AES_128_CTS: u8 = 6;
-pub(crate) const FSCRYPT_MODE_SM4_XTS: u8 = 7;
-pub(crate) const FSCRYPT_MODE_SM4_CTS: u8 = 8;
-pub(crate) const FSCRYPT_MODE_ADIANTUM: u8 = 9;
-pub(crate) const FSCRYPT_MODE_AES_256_HCTR2: u8 = 10;
+// fscrypt content/filenames mode identifiers (one-byte values on the
+// wire, per `include/uapi/linux/fscrypt.h`). Modes 2 and 3 were
+// AES-256-GCM and AES-256-CBC in the pre-4.0 drafts and were never
+// shipped; the kernel leaves the numbers reserved.
+
+/// `FSCRYPT_MODE_AES_256_XTS` — AES-256-XTS file contents.
+pub const FSCRYPT_MODE_AES_256_XTS: u8 = 1;
+/// `FSCRYPT_MODE_AES_256_CTS` — AES-256-CBC-CTS filenames.
+pub const FSCRYPT_MODE_AES_256_CTS: u8 = 4;
+/// `FSCRYPT_MODE_AES_128_CBC` — AES-128-CBC-ESSIV file contents.
+pub const FSCRYPT_MODE_AES_128_CBC: u8 = 5;
+/// `FSCRYPT_MODE_AES_128_CTS` — AES-128-CBC-CTS filenames.
+pub const FSCRYPT_MODE_AES_128_CTS: u8 = 6;
+/// `FSCRYPT_MODE_SM4_XTS` — SM4-XTS file contents.
+pub const FSCRYPT_MODE_SM4_XTS: u8 = 7;
+/// `FSCRYPT_MODE_SM4_CTS` — SM4-CBC-CTS filenames.
+pub const FSCRYPT_MODE_SM4_CTS: u8 = 8;
+/// `FSCRYPT_MODE_ADIANTUM` — Adiantum contents *and* filenames.
+pub const FSCRYPT_MODE_ADIANTUM: u8 = 9;
+/// `FSCRYPT_MODE_AES_256_HCTR2` — AES-256-HCTR2 filenames.
+pub const FSCRYPT_MODE_AES_256_HCTR2: u8 = 10;
 
 /// Strategy used to derive the per-block content IV (AES-XTS tweak /
 /// Adiantum tweak). Selected by `policy.flags` at cipher-construction
 /// time so `decrypt_block` only has to look up a value, not branch on
 /// policy state on every block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IvDerivation {
+pub enum IvDerivation {
     /// Default: IV is the logical block index, used directly as the
     /// XTS tweak / Adiantum tweak low bytes (low 64 bits stored little-
     /// endian for both ciphers).
     PerFileBlockIndex,
     /// `IV_INO_LBLK_64`: low 8 bytes = LE u64 of
     /// `(lblk_num & 0xFFFFFFFF) | (inode_number << 32)`.
-    InoLblk64 { inode_number: u32 },
+    InoLblk64 {
+        /// Inode the IV is anchored to.
+        inode_number: u32,
+    },
     /// `IV_INO_LBLK_32`: low 8 bytes = LE u64 of
     /// `((lblk_num & 0xFFFFFFFF) + hashed_ino) & 0xFFFFFFFF`,
     /// where `hashed_ino = (siphash24(inode_le8, INODE_HASH_KEY)) as u32`.
     /// The siphash key is per-FS so the hash is precomputed at cipher
     /// construction.
-    InoLblk32 { hashed_ino: u32 },
+    InoLblk32 {
+        /// Low 32 bits of `siphash24(le8(inode), INODE_HASH_KEY)`.
+        hashed_ino: u32,
+    },
     /// `DIRECT_KEY` (v2 + Adiantum only): IV is `lblk_le8 || ci_nonce_16
     /// || zero_remainder` per kernel `fscrypt_generate_iv`:
     ///   `memcpy(iv->nonce, ci->ci_nonce, FSCRYPT_FILE_NONCE_SIZE);`
@@ -201,7 +218,10 @@ pub(crate) enum IvDerivation {
     /// The mode key is the per-mode HKDF derivation (`HKDF_CONTEXT_DIRECT_KEY`,
     /// info = `[mode_num]`, no FS UUID); the per-file nonce only enters
     /// through the IV here.
-    DirectKey { nonce: [u8; 16] },
+    DirectKey {
+        /// The object's per-file nonce, written into IV bytes 8..24.
+        nonce: [u8; 16],
+    },
 }
 
 impl IvDerivation {
@@ -214,7 +234,8 @@ impl IvDerivation {
     /// `memcpy(iv->nonce, ci->ci_nonce, 16)` at offset 8..24 → final
     /// `iv->index = cpu_to_le64(index)` at offset 0..8. The index write
     /// happens last so it does not overlap the nonce.
-    pub(crate) fn full_iv(self, lblk_num: u64) -> [u8; 32] {
+    #[must_use]
+    pub fn full_iv(self, lblk_num: u64) -> [u8; 32] {
         let mut iv = [0u8; 32];
         // DIRECT_KEY: write ci_nonce at offset 8..24 (matches kernel
         // `union fscrypt_iv::nonce` offset). For Adiantum, ivsize=32 so
@@ -253,7 +274,8 @@ impl IvDerivation {
     /// Compute the AES-XTS tweak — the low 16 bytes of [`Self::full_iv`].
     /// Provided as a convenience for callers wired to AES-XTS specifically;
     /// wide-block callers should use `full_iv` directly.
-    pub(crate) fn xts_tweak(self, lblk_num: u64) -> [u8; 16] {
+    #[must_use]
+    pub fn xts_tweak(self, lblk_num: u64) -> [u8; 16] {
         let mut tweak = [0u8; 16];
         tweak.copy_from_slice(&self.full_iv(lblk_num)[..16]);
         tweak
@@ -263,13 +285,12 @@ impl IvDerivation {
 /// Per-file key length required by `mode`.
 ///
 /// Returns `None` for modes that are not yet supported; callers map
-/// `None` to [`ExtError::UnsupportedFscryptMode`] at the call site,
+/// `None` to [`FscryptError::UnsupportedMode`] at the call site,
 /// where the full `(contents, filenames, flags)` policy diagnostic is
 /// available. A single-mode helper cannot construct that diagnostic
 /// alone, which is why this returns `Option` rather than `Result`.
-// Callers land in Tasks 12 (ContentCipher), 13 (FilenameCipher).
-#[allow(dead_code)]
-pub(crate) fn mode_keysize(mode: u8) -> Option<usize> {
+#[must_use]
+pub fn mode_keysize(mode: u8) -> Option<usize> {
     match mode {
         FSCRYPT_MODE_AES_256_XTS => Some(64),
         FSCRYPT_MODE_AES_256_CTS
@@ -305,7 +326,7 @@ mod tests {
         let err = FscryptMasterKey::from_bytes(&[0u8; 15]).unwrap_err();
         assert!(matches!(
             err,
-            crate::error::ExtError::InvalidFscryptPolicy { .. }
+            crate::error::FscryptError::InvalidPolicy { .. }
         ));
     }
 
@@ -314,7 +335,7 @@ mod tests {
         let err = FscryptMasterKey::from_bytes(&[0u8; 65]).unwrap_err();
         assert!(matches!(
             err,
-            crate::error::ExtError::InvalidFscryptPolicy { .. }
+            crate::error::FscryptError::InvalidPolicy { .. }
         ));
     }
 

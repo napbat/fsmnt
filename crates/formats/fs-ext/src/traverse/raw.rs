@@ -91,7 +91,7 @@ impl<'a> ExtRawDirEntry<'a> {
         // defensive against a future iterator that surfaces them — the
         // public method must mirror the kernel invariant regardless.
         if self.encrypted && self.name != b"." && self.name != b".." {
-            crate::fscrypt::nokey::encode_nokey_name(self.dirhash, self.name)
+            crate::fscrypt::encode_nokey_name(self.dirhash, self.name)
         } else {
             self.name.to_vec()
         }

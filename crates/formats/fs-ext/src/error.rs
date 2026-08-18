@@ -402,6 +402,51 @@ impl From<io::Error> for ExtError {
     }
 }
 
+/// The fscrypt crate's four failure modes are the four fscrypt variants
+/// here, one for one, so the conversion at the glue boundary is a
+/// rename. Field values pass through untouched — including the inode
+/// number, which the crate fills in wherever a caller gave it one.
+#[cfg(feature = "fscrypt")]
+impl From<linux_fscrypt::FscryptError> for ExtError {
+    fn from(error: linux_fscrypt::FscryptError) -> Self {
+        use linux_fscrypt::FscryptError as E;
+        match error {
+            E::InvalidPolicy { inode, reason } => Self::InvalidFscryptPolicy { inode, reason },
+            E::MissingKey {
+                inode,
+                policy_kind,
+                key_ref,
+            } => Self::MissingFscryptKey {
+                inode,
+                policy_kind,
+                key_ref,
+            },
+            E::KeyUnwrapFailed {
+                inode,
+                policy_kind,
+                key_ref,
+                reason,
+            } => Self::FscryptKeyUnwrapFailed {
+                inode,
+                policy_kind,
+                key_ref,
+                reason,
+            },
+            E::UnsupportedMode {
+                inode,
+                contents,
+                filenames,
+                flags,
+            } => Self::UnsupportedFscryptMode {
+                inode,
+                contents,
+                filenames,
+                flags,
+            },
+        }
+    }
+}
+
 // In no_std mode, io::Error = IoError, so From<io::Error> already covers this.
 // In std mode, we need an explicit conversion via From<IoError> for std::io::Error.
 #[cfg(feature = "std")]

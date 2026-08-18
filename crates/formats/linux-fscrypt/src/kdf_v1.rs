@@ -3,31 +3,39 @@
 //! Mirrors `fs/crypto/keysetup_v1.c::derive_key_aes`: AES-128 keyed by
 //! the file nonce, used to encrypt the master-key bytes block-by-block.
 
-#![cfg(feature = "fscrypt")]
-
 use aes::Aes128;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockEncrypt, KeyInit};
 
-use crate::error::{ExtError, Result};
-use crate::fscrypt::types::FscryptMasterKey;
+use crate::error::{FscryptError, Result};
+use crate::types::FscryptMasterKey;
 
 /// Derive `out_len` bytes per the kernel v1 KDF.
 ///
 /// `out_len` must be a positive multiple of 16, ≤ `master_key` length.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::InvalidPolicy`] when `out_len` is zero, not a
+/// multiple of the AES block size, or longer than the master key.
+///
+/// # Panics
+///
+/// Never: the nonce is 16 bytes by type, which is exactly an AES-128
+/// key, so the cipher construction below cannot fail.
 pub fn derive(
     master_key: &FscryptMasterKey,
     nonce: &[u8; 16],
     out_len: usize,
 ) -> Result<alloc::vec::Vec<u8>> {
     if out_len == 0 || !out_len.is_multiple_of(16) {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode: 0,
             reason: "v1 KDF output length must be a positive multiple of 16",
         });
     }
     if out_len > master_key.as_bytes().len() {
-        return Err(ExtError::InvalidFscryptPolicy {
+        return Err(FscryptError::InvalidPolicy {
             inode: 0,
             reason: "v1 KDF output length exceeds master key length",
         });

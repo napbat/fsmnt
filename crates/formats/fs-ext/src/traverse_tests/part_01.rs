@@ -88,11 +88,11 @@ fn name_nokey_encoded_forwards_dirhash_trailer() {
     // the trailer reaches the wire form rather than being dropped.
     assert_eq!(
         cf_entry.name_nokey_encoded(),
-        crate::fscrypt::nokey::encode_nokey_name([0x1122_3344, 0x5566_7788], name),
+        crate::fscrypt::encode_nokey_name([0x1122_3344, 0x5566_7788], name),
     );
     assert_ne!(
         cf_entry.name_nokey_encoded(),
-        crate::fscrypt::nokey::encode_nokey_name([0, 0], name),
+        crate::fscrypt::encode_nokey_name([0, 0], name),
     );
 
     // A non-casefolded encrypted entry keeps the zero dirhash.
@@ -105,7 +105,7 @@ fn name_nokey_encoded_forwards_dirhash_trailer() {
     };
     assert_eq!(
         plain_enc.name_nokey_encoded(),
-        crate::fscrypt::nokey::encode_nokey_name([0, 0], name),
+        crate::fscrypt::encode_nokey_name([0, 0], name),
     );
 }
 

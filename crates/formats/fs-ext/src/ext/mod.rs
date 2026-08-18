@@ -284,7 +284,7 @@ pub struct Ext {
     pub(crate) mmp_update_interval: u16,
     pub(crate) forensics: ExtSuperblockForensics,
     #[cfg(feature = "fscrypt")]
-    pub(crate) fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore,
+    pub(crate) fscrypt_keys: crate::fscrypt::FscryptKeystore,
 }
 
 struct OpenParts<'a> {
@@ -347,7 +347,7 @@ fn ext_from_open_parts(parts: OpenParts<'_>) -> Ext {
         mmp_update_interval: sb.s_mmp_update_interval.get(),
         forensics: ExtSuperblockForensics::from_raw(sb),
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     }
 }
 

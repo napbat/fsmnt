@@ -753,9 +753,12 @@ under `crates/`:
 | `crates/formats/*` | the format parsers themselves ([details](crates/formats/README.md)) |
 
 The parsers (`fs-ntfs`, `fs-fat`, `fs-exfat`, `fs-ext`, `fs-apfs`, `fs-btrfs`,
-`nt-compression`) are `no_std` by default with `std` behind a feature;
-`nt-bitlocker` is std-only. Platform crates self-gate and compile to empty
-libraries elsewhere, so a workspace-wide build succeeds on every OS.
+`nt-compression`, `linux-fscrypt`) are `no_std` by default with `std` behind a
+feature; `nt-bitlocker` is std-only. `linux-fscrypt` is not a parser but the
+kernel's file-based-encryption layer, which sits above the filesystem drivers
+and is shared by all of them — `fs-ext` supplies only the ext4 glue. Platform
+crates self-gate and compile to empty libraries elsewhere, so a workspace-wide
+build succeeds on every OS.
 
 ## Development
 

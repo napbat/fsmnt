@@ -657,20 +657,15 @@ fn encrypted_mapped_read<T: Read + Seek>(
     let block_size = u64::from(context.ext.block_size);
     let window = block_read_window(context.size, context.stream_pos, block_size, buffer.len())?;
     let cipher = once_get_or_try_init(context.cipher, || {
-        crate::fscrypt::content::build_cipher_for_inode(
-            context.ext,
-            fs,
-            context.inode_number,
-            |source| {
-                let inode = context.ext.inode(source, context.inode_number)?;
-                inode
-                    .xattr(source, "encryption.c")?
-                    .ok_or(ExtError::InvalidFscryptPolicy {
-                        inode: context.inode_number,
-                        reason: "ENCRYPT_FL set but encryption.c xattr missing",
-                    })
-            },
-        )
+        crate::fscrypt::build_cipher_for_inode(context.ext, fs, context.inode_number, |source| {
+            let inode = context.ext.inode(source, context.inode_number)?;
+            inode
+                .xattr(source, "encryption.c")?
+                .ok_or(ExtError::InvalidFscryptPolicy {
+                    inode: context.inode_number,
+                    reason: "ENCRYPT_FL set but encryption.c xattr missing",
+                })
+        })
     })?;
     let physical = resolve_data_extent(
         context.ext,
@@ -719,7 +714,7 @@ fn ensure_encrypted_file_key<R: Read + Seek>(
         return Ok(());
     };
     once_get_or_try_init(cipher, || {
-        crate::fscrypt::content::build_cipher_for_inode(ext, fs, *inode_number, |source| {
+        crate::fscrypt::build_cipher_for_inode(ext, fs, *inode_number, |source| {
             let inode = ext.inode(source, *inode_number)?;
             inode
                 .xattr(source, "encryption.c")?

@@ -624,28 +624,19 @@ dependencies = [
 name = "fs-ext"
 version = "0.1.0"
 dependencies = [
- "aes",
  "bitflags",
- "chacha20",
  "chrono",
  "crc32c",
  "crc32fast",
  "fsmnt-parser-core",
  "fsmnt-testkit",
- "hkdf",
- "hmac",
+ "linux-fscrypt",
  "mutants",
- "poly1305",
- "polyval",
  "sha2",
- "siphasher",
- "sm4",
- "subtle",
  "thiserror",
  "time",
  "unicode-casefold",
  "unicode-normalization",
- "xts-mode",
  "zerocopy",
  "zeroize",
 ]
@@ -1006,6 +997,25 @@ checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "linux-fscrypt"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "chacha20",
+ "hkdf",
+ "hmac",
+ "poly1305",
+ "polyval",
+ "sha2",
+ "siphasher",
+ "sm4",
+ "subtle",
+ "thiserror",
+ "xts-mode",
+ "zeroize",
 ]
 
 [[package]]

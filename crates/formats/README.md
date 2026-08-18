@@ -7,6 +7,12 @@ parser API. The parsers depend on the first-party, `no_std`-capable
 `fsmnt-parser-core` foundation; they do not depend on the std-based mount
 interfaces.
 
+Two crates here are shared layers rather than parsers, because the formats
+themselves share them: `nt-compression` (NTFS/WOF/CAB compression) and
+`linux-fscrypt` (the kernel's file-based encryption, which lives above the
+filesystem drivers and is wired up identically by ext4, f2fs, UBIFS, and
+Ceph — `fs-ext` contributes only the ext4 glue).
+
 Mount integration lives in `fsmnt-drivers`, whose adapters implement
 `fsmnt_core::TargetFilesystem` and `fsmnt_device::FilesystemDriver`.
 

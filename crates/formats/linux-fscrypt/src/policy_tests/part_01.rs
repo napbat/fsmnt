@@ -43,7 +43,7 @@ fn parse_v1_wrong_size_rejected() {
     let err = parse_context(&buf, 1).unwrap_err();
     assert!(matches!(
         err,
-        ExtError::InvalidFscryptPolicy { inode: 1, .. }
+        FscryptError::InvalidPolicy { inode: 1, .. }
     ));
 }
 
@@ -55,7 +55,7 @@ fn parse_v2_nonzero_reserved_rejected() {
     let err = parse_context(&buf, 9).unwrap_err();
     assert!(matches!(
         err,
-        ExtError::InvalidFscryptPolicy { inode: 9, .. }
+        FscryptError::InvalidPolicy { inode: 9, .. }
     ));
 }
 
@@ -65,7 +65,7 @@ fn parse_unknown_version_rejected() {
     let err = parse_context(&buf, 11).unwrap_err();
     assert!(matches!(
         err,
-        ExtError::InvalidFscryptPolicy { inode: 11, .. }
+        FscryptError::InvalidPolicy { inode: 11, .. }
     ));
 }
 
@@ -75,7 +75,7 @@ fn parse_empty_rejected() {
     let err = parse_context(&buf, 13).unwrap_err();
     assert!(matches!(
         err,
-        ExtError::InvalidFscryptPolicy { inode: 13, .. }
+        FscryptError::InvalidPolicy { inode: 13, .. }
     ));
 }
 
@@ -110,13 +110,13 @@ fn validate_supported_rejects_direct_key_with_xts() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
 #[test]
 fn validate_supported_accepts_v2_adiantum_direct_key() {
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -134,7 +134,7 @@ fn validate_supported_accepts_v2_adiantum_direct_key() {
 #[test]
 fn validate_supported_rejects_v1_direct_key() {
     // Kernel allows v1 + DIRECT_KEY but issue #154 scopes our work to v2.
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V1,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -147,14 +147,14 @@ fn validate_supported_rejects_v1_direct_key() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
 #[test]
 fn validate_supported_rejects_direct_key_with_iv_ino_lblk_64() {
     // Kernel `fscrypt_supported_v2_policy` mutex (count > 1).
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -167,13 +167,13 @@ fn validate_supported_rejects_direct_key_with_iv_ino_lblk_64() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
 #[test]
 fn validate_supported_rejects_direct_key_with_iv_ino_lblk_32() {
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -186,7 +186,7 @@ fn validate_supported_rejects_direct_key_with_iv_ino_lblk_32() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
@@ -222,7 +222,7 @@ fn validate_supported_rejects_iv_ino_lblk_64_without_stable_inodes() {
     };
     assert!(matches!(
         validate_supported(&p, 7, 12, false).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { inode: 7, .. }
+        FscryptError::UnsupportedMode { inode: 7, .. }
     ));
 }
 
@@ -240,7 +240,7 @@ fn validate_supported_rejects_iv_ino_lblk_32_without_stable_inodes() {
     };
     assert!(matches!(
         validate_supported(&p, 9, 12, false).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { inode: 9, .. }
+        FscryptError::UnsupportedMode { inode: 9, .. }
     ));
 }
 
@@ -293,7 +293,7 @@ fn validate_supported_rejects_iv_ino_lblk_both_set() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
@@ -314,7 +314,7 @@ fn validate_supported_rejects_iv_ino_lblk_on_v1() {
 
 #[test]
 fn validate_supported_rejects_iv_ino_lblk_on_adiantum() {
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -358,7 +358,7 @@ fn validate_supported_rejects_unknown_high_bits() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
@@ -464,7 +464,7 @@ fn validate_supported_rejects_v1_dus_non_default() {
 
 #[test]
 fn validate_supported_accepts_adiantum_pair() {
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -480,7 +480,7 @@ fn validate_supported_accepts_adiantum_pair() {
 
 #[test]
 fn validate_supported_accepts_v2_aes128_pair() {
-    use crate::fscrypt::types::{FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS};
+    use crate::types::{FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_AES_128_CBC,
@@ -496,7 +496,7 @@ fn validate_supported_accepts_v2_aes128_pair() {
 
 #[test]
 fn validate_supported_accepts_v1_aes128_pair() {
-    use crate::fscrypt::types::{FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS};
+    use crate::types::{FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V1,
         contents_mode: FSCRYPT_MODE_AES_128_CBC,
@@ -515,7 +515,7 @@ fn validate_supported_rejects_iv_ino_lblk_with_aes128() {
     // Kernel `fscrypt_supported_iv_ino_lblk_policy` only allows
     // IV_INO_LBLK_* with AES-256-XTS contents — AES-128-CBC has no
     // inline-crypto wiring.
-    use crate::fscrypt::types::{FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS};
+    use crate::types::{FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS};
     for flag in [
         FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64,
         FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32,
@@ -539,7 +539,7 @@ fn validate_supported_rejects_iv_ino_lblk_with_aes128() {
 
 #[test]
 fn validate_supported_accepts_v2_sm4_pair() {
-    use crate::fscrypt::types::{FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS};
+    use crate::types::{FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_SM4_XTS,
@@ -556,7 +556,7 @@ fn validate_supported_accepts_v2_sm4_pair() {
 #[test]
 fn validate_supported_rejects_v1_sm4_pair() {
     // Kernel `fscrypt_valid_enc_modes_v1` does not list SM4.
-    use crate::fscrypt::types::{FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS};
+    use crate::types::{FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V1,
         contents_mode: FSCRYPT_MODE_SM4_XTS,
@@ -569,7 +569,7 @@ fn validate_supported_rejects_v1_sm4_pair() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
@@ -577,7 +577,7 @@ fn validate_supported_rejects_v1_sm4_pair() {
 fn validate_supported_rejects_iv_ino_lblk_with_sm4() {
     // Kernel `supported_iv_ino_lblk_policy` requires AES-256-XTS
     // contents; SM4-XTS does not qualify.
-    use crate::fscrypt::types::{FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS};
+    use crate::types::{FSCRYPT_MODE_SM4_CTS, FSCRYPT_MODE_SM4_XTS};
     for flag in [
         FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64,
         FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32,
@@ -601,7 +601,7 @@ fn validate_supported_rejects_iv_ino_lblk_with_sm4() {
 
 #[test]
 fn validate_supported_accepts_v2_xts_hctr2_pair() {
-    use crate::fscrypt::types::{FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS};
+    use crate::types::{FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_AES_256_XTS,
@@ -620,7 +620,7 @@ fn validate_supported_rejects_v1_xts_hctr2_pair() {
     // Kernel `fscrypt_valid_enc_modes_v1` does not list HCTR2;
     // mirror that even though the (XTS, HCTR2) pair is in
     // SUPPORTED_PAIRS at the version-agnostic layer.
-    use crate::fscrypt::types::{FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS};
+    use crate::types::{FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V1,
         contents_mode: FSCRYPT_MODE_AES_256_XTS,
@@ -633,7 +633,7 @@ fn validate_supported_rejects_v1_xts_hctr2_pair() {
     };
     assert!(matches!(
         validate_supported(&p, 1, 12, true).unwrap_err(),
-        ExtError::UnsupportedFscryptMode { .. }
+        FscryptError::UnsupportedMode { .. }
     ));
 }
 
@@ -643,7 +643,7 @@ fn validate_supported_rejects_iv_ino_lblk_with_hctr2() {
     // XTS, which is the mode the kernel `supported_iv_ino_lblk_policy`
     // explicitly whitelists. fs-ext scopes this combo out per
     // issue #153 ("Out of scope: HCTR2 + IV_INO_LBLK_*").
-    use crate::fscrypt::types::{FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS};
+    use crate::types::{FSCRYPT_MODE_AES_256_HCTR2, FSCRYPT_MODE_AES_256_XTS};
     for flag in [
         FSCRYPT_POLICY_FLAG_IV_INO_LBLK_64,
         FSCRYPT_POLICY_FLAG_IV_INO_LBLK_32,
@@ -667,7 +667,7 @@ fn validate_supported_rejects_iv_ino_lblk_with_hctr2() {
 
 #[test]
 fn validate_supported_accepts_v1_adiantum() {
-    use crate::fscrypt::types::FSCRYPT_MODE_ADIANTUM;
+    use crate::types::FSCRYPT_MODE_ADIANTUM;
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V1,
         contents_mode: FSCRYPT_MODE_ADIANTUM,
@@ -684,7 +684,7 @@ fn validate_supported_accepts_v1_adiantum() {
 #[test]
 fn validate_supported_rejects_mismatched_pair() {
     // (XTS contents, Adiantum filenames) — not in SUPPORTED_PAIRS.
-    use crate::fscrypt::types::{FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_256_XTS};
+    use crate::types::{FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_256_XTS};
     let p = FscryptPolicy {
         kind: FscryptPolicyKind::V2,
         contents_mode: FSCRYPT_MODE_AES_256_XTS,
@@ -696,5 +696,5 @@ fn validate_supported_rejects_mismatched_pair() {
         nonce: [0u8; 16],
     };
     let err = validate_supported(&p, 7, 12, true).unwrap_err();
-    assert!(matches!(err, ExtError::UnsupportedFscryptMode { .. }));
+    assert!(matches!(err, FscryptError::UnsupportedMode { .. }));
 }

@@ -1,0 +1,34 @@
+[package]
+name = "linux-fscrypt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Read-only Linux fscrypt (file-based encryption) shared by ext4, f2fs, ubifs, and ceph"
+
+[dependencies]
+# The crate *is* the fscrypt crypto stack, so every cipher it can be
+# asked for is unconditional: a policy names its modes on disk, and a
+# forensic reader that cannot decrypt a mode it encounters is worse than
+# one that carries the code. All of these are no_std (`default-features
+# = false` in `[workspace.dependencies]`); none of them may pull `std`.
+aes = { workspace = true }
+chacha20 = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+poly1305 = { workspace = true }
+polyval = { workspace = true }
+sha2 = { workspace = true }
+siphasher = { workspace = true }
+sm4 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+xts-mode = { workspace = true }
+zeroize = { workspace = true }
+
+[features]
+default = []
+std = ["thiserror/std"]
+
+[lints]
+workspace = true

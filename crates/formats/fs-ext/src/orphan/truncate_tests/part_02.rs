@@ -293,7 +293,7 @@ fn ext_for_extent_tests(blocks_count: u64) -> &'static crate::ext::Ext {
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     });
     Box::leak(ext)
 }
@@ -376,7 +376,7 @@ fn ext_for_extent_tests_with_checksum(
             last_error: None,
         },
         #[cfg(feature = "fscrypt")]
-        fscrypt_keys: crate::fscrypt::keystore::FscryptKeystore::default(),
+        fscrypt_keys: crate::fscrypt::FscryptKeystore::default(),
     });
     Box::leak(ext)
 }

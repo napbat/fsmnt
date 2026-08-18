@@ -1,17 +1,23 @@
-//! Directory-hash key derivation and dispatch for fscrypt v2 + casefold
-//! (htree hash version 6 = SipHash-2-4).
-
-#![cfg(feature = "fscrypt")]
+//! Directory-hash key derivation for fscrypt v2 + casefold, where ext4
+//! switches its htree to hash version 6 (SipHash-2-4 of the plaintext
+//! name) because the on-disk name is ciphertext.
+//!
+//! The `SipHash` primitive here also serves `IV_INO_LBLK_32`, which hashes
+//! the inode number to build its IV.
 
 use core::hash::Hasher;
 use siphasher::sip::SipHasher24;
 
-use crate::fscrypt::kdf_v2;
-use crate::fscrypt::types::{FscryptMasterKey, FscryptPolicyKind};
+use crate::error::{FscryptError, Result};
+use crate::kdf_v2;
+use crate::keystore::FscryptKeystore;
+use crate::params::FsParams;
+use crate::types::{FscryptMasterKey, FscryptPolicy, FscryptPolicyKind};
 
 /// Derive the 16-byte `SipHash` key for an encrypted+casefolded directory
 /// (v2 only; v1 + casefold is rejected by the kernel).
-pub(crate) fn derive_dirhash_key(master_key: &FscryptMasterKey, nonce: &[u8; 16]) -> [u8; 16] {
+#[must_use]
+pub fn derive_dirhash_key(master_key: &FscryptMasterKey, nonce: &[u8; 16]) -> [u8; 16] {
     use zeroize::Zeroizing;
 
     // Zeroizing wraps the heap derivation buffer so the bytes are
@@ -31,13 +37,20 @@ pub(crate) fn derive_dirhash_key(master_key: &FscryptMasterKey, nonce: &[u8; 16]
 /// `ino_hash_key`. Returns the low 32 bits, mirroring the kernel's
 /// `(u32)siphash_1u64(ci_inode->i_ino, ino_hash_key)` used by
 /// `IV_INO_LBLK_32` to derive `ci_hashed_ino`.
-pub(crate) fn inode_hash_low32(ino_hash_key: &[u8; 16], inode_number: u32) -> u32 {
+#[must_use]
+pub fn inode_hash_low32(ino_hash_key: &[u8; 16], inode_number: u32) -> u32 {
     siphash24(ino_hash_key, &u64::from(inode_number).to_le_bytes()).1
 }
 
 /// Compute the SipHash-2-4 digest of `name` keyed by `key`.
 /// Returns (major, minor) — major = top 32 bits, minor = bottom 32 bits.
-pub(crate) fn siphash24(key: &[u8; 16], name: &[u8]) -> (u32, u32) {
+///
+/// # Panics
+///
+/// Never: the slice-to-array and 32-bit-half conversions below are
+/// exact by construction, and their `expect`s are unreachable.
+#[must_use]
+pub fn siphash24(key: &[u8; 16], name: &[u8]) -> (u32, u32) {
     let k0 = u64::from_le_bytes(
         key[0..8]
             .try_into()
@@ -58,34 +71,41 @@ pub(crate) fn siphash24(key: &[u8; 16], name: &[u8]) -> (u32, u32) {
     (major, minor)
 }
 
-/// Compute the v2 dirhash SipHash-2-4 key for an encrypted+casefolded
-/// directory inode. Returns `Ok(None)` when:
-///   - the directory is not encrypted/casefolded,
-///   - no fscrypt key is registered for the policy.
+/// Compute the v2 dirhash SipHash-2-4 key for an encrypted + casefolded
+/// directory whose `policy` the host has already read off disk.
 ///
-/// Returns `Err(InvalidFscryptPolicy)` for v1 policies on
-/// casefolded directories (the kernel rejects this combination), and
-/// `Err(UnsupportedFscryptMode)` via `validate_supported` for any
-/// unsupported mode/flag combination.
-pub(crate) fn dirhash_key_for_directory<R: crate::io::Read + crate::io::Seek>(
-    ext: &crate::ext::Ext,
-    fs: &mut R,
-    inode: &crate::inode::ExtInode<'_>,
-) -> crate::error::Result<Option<[u8; 16]>> {
-    let Some(policy) = inode.fscrypt_policy(fs)? else {
-        return Ok(None);
-    };
-    crate::fscrypt::policy::validate_supported(
-        &policy,
-        inode.inode_number(),
-        u8::try_from(ext.block_size.trailing_zeros())
-            .expect("a u32 trailing-zero count never exceeds 32"),
-        ext.compat
-            .contains(crate::feature_flags::CompatFeatures::STABLE_INODES),
+/// Returns `Ok(None)` when no master key is registered for the policy —
+/// the caller then falls back to a sequential scan rather than failing
+/// the lookup.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::InvalidPolicy`] for a v1 policy (the kernel
+/// rejects v1 + casefold, having no v1 path to a dirhash key),
+/// [`FscryptError::UnsupportedMode`] via
+/// [`crate::policy::validate_supported`] for any unsupported mode or
+/// flag combination, and [`FscryptError::KeyUnwrapFailed`] when a
+/// hardware-wrapped key will not unwrap.
+///
+/// # Panics
+///
+/// Never: a v2 policy always carries an identifier — the parser only
+/// produces one that does — and the v1 case has already returned.
+pub fn dirhash_key(
+    keys: &FscryptKeystore,
+    policy: &FscryptPolicy,
+    inode_number: u32,
+    params: &FsParams,
+) -> Result<Option<[u8; 16]>> {
+    crate::policy::validate_supported(
+        policy,
+        inode_number,
+        params.block_size_log2(),
+        params.has_stable_inodes,
     )?;
     if policy.kind != FscryptPolicyKind::V2 {
-        return Err(crate::error::ExtError::InvalidFscryptPolicy {
-            inode: inode.inode_number(),
+        return Err(FscryptError::InvalidPolicy {
+            inode: inode_number,
             reason: "v1 policies do not support htree-v6 (kernel rejects v1+casefold)",
         });
     }
@@ -96,7 +116,7 @@ pub(crate) fn dirhash_key_for_directory<R: crate::io::Read + crate::io::Seek>(
     // adapter, mismatched identifier) loudly. A missing entry (no
     // wrap or unwrap involved) still degrades gracefully to
     // `Ok(None)` so callers can fall back to non-decryptable dirhash.
-    let Some(mk) = ext.fscrypt_keys.get_v2(&id)? else {
+    let Some(mk) = keys.get_v2(&id)? else {
         return Ok(None);
     };
     Ok(Some(derive_dirhash_key(mk, &policy.nonce)))
