@@ -50,6 +50,9 @@ pub struct ExtFilesystem<R: Read + Seek + Send> {
     /// listed. Walking every inode table costs one pass over the metadata,
     /// so a mount that never opens the directory never pays for it.
     salvaged: Option<Vec<salvage::SalvagedInode>>,
+    /// How the volume was opened, when that departed from a plain open —
+    /// reported through [`TargetFilesystem::notices`].
+    notices: Vec<String>,
 }
 
 /// What a path names inside the mounted volume.
@@ -223,14 +226,42 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         Ok(fs)
     }
 
-    /// Assemble a handle in the default (non-salvage) view.
+    /// Assemble a handle in the default (non-salvage) view, noting how the
+    /// volume's dirty state (if any) is being presented.
     fn from_parts(reader: R, ext: Ext, overlay: Overlay) -> Self {
+        let mut notices = Vec::new();
+        match &overlay {
+            Overlay::Clean => {}
+            Overlay::Journal(_) => notices.push(
+                "the volume was not cleanly unmounted; its journal was replayed into an in-memory
+                 overlay (nothing is written to the source) — pass --no-journal-replay for the
+                 on-disk state"
+                    .to_string(),
+            ),
+            Overlay::Orphan(_) => notices.push(
+                "the volume was not cleanly unmounted; its journal and orphan list were replayed
+                 into an in-memory overlay (nothing is written to the source) — pass
+                 --no-journal-replay for the on-disk state"
+                    .to_string(),
+            ),
+            Overlay::Unreplayed => {
+                if ext.needs_journal_recovery() || ext.has_orphan_present() {
+                    notices.push(
+                        "the volume was not cleanly unmounted and replay was declined: this is the
+                         on-disk state, and files touched by the pending journal or orphan list may
+                         read stale"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         Self {
             reader,
             ext,
             overlay,
             salvage: false,
             salvaged: None,
+            notices,
         }
     }
 
@@ -272,6 +303,12 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             Self::from_parts(reader, ext, Overlay::Unreplayed)
         };
         fs.salvage = true;
+        fs.notices.push(
+            "salvage mode: every in-use inode found by sweeping the inode tables is listed under
+             /.fsmnt-salvage as inode-N; the root directory is presented as empty if it cannot
+             be listed"
+                .to_string(),
+        );
         Ok(fs)
     }
 
@@ -593,6 +630,10 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     fn volume_uuid(&self) -> Option<String> {
         Some(identity::uuid(self.ext.uuid()))
     }
+
+    fn notices(&self) -> Vec<String> {
+        self.notices.clone()
+    }
 }
 
 /// [`FilesystemDriver`] for ext2/ext3/ext4 volumes.
@@ -640,8 +681,15 @@ impl FilesystemDriver for ExtDriver {
         let replay = options.journal_replay();
         let salvage = options.salvage();
         match options.ext_backup_superblock() {
-            Some(group) => open_view(backup::patch_from_backup(reader, group)?, replay, salvage),
-            None => open_view(reader, replay, salvage),
+            Some(group) => {
+                let mut fs = open_view(backup::patch_from_backup(reader, group)?, replay, salvage)?;
+                fs.notices.push(format!(
+                    "opened through the backup superblock (and group descriptors) of block group
+                     {group}; the primary copies at the start of the volume were not used"
+                ));
+                Ok(Box::new(fs))
+            }
+            None => Ok(Box::new(open_view(reader, replay, salvage)?)),
         }
     }
 }
@@ -655,17 +703,14 @@ fn open_view<R: Read + Seek + Send + 'static>(
     reader: R,
     journal_replay: bool,
     salvage: bool,
-) -> FsResult<Box<dyn TargetFilesystem>> {
+) -> FsResult<ExtFilesystem<R>> {
     if salvage {
-        return Ok(Box::new(ExtFilesystem::new_salvaging(
-            reader,
-            journal_replay,
-        )?));
+        return ExtFilesystem::new_salvaging(reader, journal_replay);
     }
     if journal_replay {
-        Ok(Box::new(ExtFilesystem::new(reader)?))
+        ExtFilesystem::new(reader)
     } else {
-        Ok(Box::new(ExtFilesystem::new_without_replay(reader)?))
+        ExtFilesystem::new_without_replay(reader)
     }
 }
 
