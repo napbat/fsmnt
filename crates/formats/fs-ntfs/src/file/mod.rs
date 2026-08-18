@@ -5,8 +5,8 @@ use core::num::NonZeroU64;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::bitflags;
+use core::mem::offset_of;
 use fsmnt_parser_core::error::IoError;
-use memoffset::offset_of;
 use nt_string::u16strle::U16StrLe;
 
 use crate::attribute::{

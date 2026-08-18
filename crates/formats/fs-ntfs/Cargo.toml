@@ -13,7 +13,6 @@ chrono = { workspace = true, default-features = false, optional = true }
 derive_more = { workspace = true, default-features = false, features = ["display", "from"] }
 fsmnt-parser-core = { workspace = true, default-features = false }
 nt-compression = { workspace = true, optional = true, features = ["lznt1", "xpress", "lzx"] }
-memoffset = { workspace = true }
 nt-string = { workspace = true, default-features = false, features = ["alloc"] }
 strum_macros = { workspace = true }
 thiserror = { workspace = true }
@@ -26,9 +25,6 @@ arbitrary = { workspace = true }
 fsmnt-testkit = { workspace = true }
 mutants = { workspace = true }
 time = { workspace = true, default-features = false, features = ["formatting", "large-dates", "macros"] }
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-embed-resource = { workspace = true }
 
 [features]
 default = []

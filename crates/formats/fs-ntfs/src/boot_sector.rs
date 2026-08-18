@@ -1,6 +1,6 @@
 use core::ops::RangeInclusive;
 
-use memoffset::offset_of;
+use core::mem::offset_of;
 
 use crate::error::{NtfsError, Result};
 use crate::types::{Lcn, NtfsPosition};

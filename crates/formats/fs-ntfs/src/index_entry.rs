@@ -5,7 +5,7 @@ use core::{fmt, mem};
 
 use alloc::vec::Vec;
 use bitflags::bitflags;
-use memoffset::offset_of;
+use core::mem::offset_of;
 
 use crate::error::{NtfsError, Result};
 use crate::file::NtfsFile;

@@ -2,9 +2,9 @@ use core::ops::Range;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem::offset_of;
 use fsmnt_parser_core::error::IoError;
 use fsmnt_parser_core::io::FsReadSeek;
-use memoffset::offset_of;
 
 use crate::attribute_value::NtfsAttributeValue;
 use crate::error::{NtfsError, Result};

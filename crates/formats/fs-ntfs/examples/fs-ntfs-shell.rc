@@ -1,5 +1,0 @@
-// Windows resource script for fs-ntfs-shell example
-// Embeds the application manifest that requests administrator privileges
-
-#define RT_MANIFEST 24
-1 RT_MANIFEST "fs-ntfs-shell.exe.manifest"

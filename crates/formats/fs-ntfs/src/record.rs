@@ -1,8 +1,8 @@
 use core::mem;
 
 use alloc::vec::Vec;
+use core::mem::offset_of;
 use fsmnt_parser_core::error::IoError;
-use memoffset::{offset_of, span_of};
 
 use crate::error::{NtfsError, Result};
 use crate::types::NtfsPosition;
@@ -113,9 +113,8 @@ impl Record {
 
     pub(crate) fn signature(&self) -> Result<[u8; 4]> {
         self.validate_header_size()?;
-        Ok(self.data[span_of!(RecordHeader, signature)]
-            .try_into()
-            .unwrap())
+        let start = offset_of!(RecordHeader, signature);
+        Ok(self.data[start..start + 4].try_into().unwrap())
     }
 
     fn update_sequence_array_count(&self) -> Result<u16> {

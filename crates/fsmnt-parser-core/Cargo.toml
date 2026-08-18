@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-memoffset = { workspace = true }
 zerocopy = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
