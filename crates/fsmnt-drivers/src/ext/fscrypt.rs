@@ -42,8 +42,10 @@ use super::{EXT4_ROOT_INO, Reader};
 pub(super) fn register_keys(ext: &mut Ext, specs: &[FscryptKeySpec]) -> FsResult<()> {
     for (index, spec) in specs.iter().enumerate() {
         let position = index + 1;
+        // `from_bytes` reports in linux-fscrypt's own error type; routing it
+        // through `ExtError` keeps one wording for every key failure.
         let key = FscryptMasterKey::from_bytes(spec.key())
-            .map_err(|error| key_error(position, &error))?;
+            .map_err(|error| key_error(position, &ExtError::from(error)))?;
         if let Some(descriptor) = spec.descriptor() {
             ext.add_fscrypt_v1_key(FscryptKeyDescriptor(descriptor), key)
                 .map_err(|error| key_error(position, &error))?;
