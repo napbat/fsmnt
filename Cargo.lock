@@ -706,6 +706,8 @@ dependencies = [
  "fsmnt-testkit",
  "tempfile",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
  "windows-sys",
 ]
 

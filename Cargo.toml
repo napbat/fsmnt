@@ -168,13 +168,28 @@ license.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+# The library half of this package needs neither an argument parser nor a
+# subscriber; both serve the `fsmnt` binary only. Cargo has no bin-only
+# dependencies, so the binary is gated on a (default-on) feature instead and
+# `--no-default-features` builds the library alone.
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:tracing-subscriber"]
+
+[[bin]]
+name = "fsmnt"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
-clap = { workspace = true }
+clap = { workspace = true, optional = true }
 fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
 fsmnt-drivers = { workspace = true }
 fsmnt-proxy = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 crc32c = { workspace = true }
