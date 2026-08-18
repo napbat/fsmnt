@@ -12,6 +12,7 @@ use tracing::info;
 
 use fsmnt::DirFilesystem;
 
+use super::json::{MountReport, Output, SourceRef, media_size};
 use super::size::DEFAULT_SECTOR_SIZE;
 use super::source::{Source, SourceKind, check_applicability, resolve};
 use super::{
@@ -35,13 +36,16 @@ const DRIVE_ONLY: &[SourceKind] = &[SourceKind::Drive];
 /// Returns an error if the source cannot be resolved, an option does not
 /// apply to what it resolved to, the filesystem cannot be located or
 /// opened, or the mount backend refuses the mountpoint.
-pub(crate) fn handle_mount(args: &MountArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_mount(
+    args: &MountArgs,
+    output: Output,
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = resolve(&args.source, args.source_kind())?;
     check_options(args, &source)?;
     match &source {
-        Source::Directory(path) => mount_directory(args, path),
-        Source::Image(path) => mount_image(args, &source, path),
-        Source::Drive(drive) => mount_drive(args, &source, drive),
+        Source::Directory(path) => mount_directory(args, &source, path, output),
+        Source::Image(path) => mount_image(args, &source, path, output),
+        Source::Drive(drive) => mount_drive(args, &source, drive, output),
     }
 }
 
@@ -99,7 +103,12 @@ pub(super) fn check_options(
 }
 
 /// Expose a host directory as a volume of its own.
-fn mount_directory(args: &MountArgs, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn mount_directory(
+    args: &MountArgs,
+    source: &Source,
+    path: &Path,
+    output: Output,
+) -> Result<(), Box<dyn std::error::Error>> {
     ensure_unix_mountpoint(&args.mountpoint)?;
 
     let volname = args.volname.clone().unwrap_or_else(|| {
@@ -108,14 +117,30 @@ fn mount_directory(args: &MountArgs, path: &Path) -> Result<(), Box<dyn std::err
             |name| name.to_string_lossy().into_owned(),
         )
     });
+    // A directory is already a filesystem, so none of the questions a medium
+    // raises — where the filesystem starts, which table said so, how much of
+    // it is present — has an answer here.
+    let report = MountReport {
+        source: SourceRef::new(source),
+        filesystem: "directory",
+        volname,
+        fsname: args
+            .fsname
+            .clone()
+            .unwrap_or_else(|| "fsmnt-dir".to_string()),
+        offset: None,
+        partition: None,
+        size_bytes: None,
+        layout_origin: None,
+        truncated_by: None,
+        head_absent: None,
+    };
     block_on_mount(
         Box::new(DirFilesystem::new(path)),
         &args.mountpoint,
-        "directory",
-        &volname,
-        args.fsname.as_deref().unwrap_or("fsmnt-dir"),
-        0,
+        &report,
         None,
+        output,
     )
 }
 
@@ -124,6 +149,7 @@ fn mount_image(
     args: &MountArgs,
     source: &Source,
     path: &Path,
+    output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let drivers = build_registry(args.recovery_password.clone(), args.bek_file.as_deref())?;
     let mut options = fsmnt::ImageOpenOptions::new()
@@ -135,9 +161,10 @@ fn mount_image(
     if args.scan {
         options = options.with_scan(args.stride);
     }
+    let location = requested_location(args)?;
     options = match args.partition {
         Some(partition) => options.with_partition(partition),
-        None => match requested_location(args)? {
+        None => match location {
             Location::Offset(offset) => options.with_offset(offset),
             Location::HeadAbsent(bytes) => {
                 warn_head_absent(bytes, args.filesystem.best_effort_reads);
@@ -174,14 +201,24 @@ fn mount_image(
     );
     warn_layout_origin(opened.layout_origin, args.partition, source);
     warn_if_truncated(opened.truncated_by, opened.size_bytes, "image");
+    let report = MountReport {
+        source: SourceRef::new(source),
+        filesystem: label,
+        volname,
+        fsname: args.fsname.clone().unwrap_or_else(|| label.to_string()),
+        offset: Some(opened.offset),
+        partition: args.partition,
+        size_bytes: media_size(opened.size_bytes),
+        layout_origin: opened.layout_origin,
+        truncated_by: opened.truncated_by,
+        head_absent: location.head_absent(),
+    };
     block_on_mount(
         opened.filesystem,
         &args.mountpoint,
-        label,
-        &volname,
-        args.fsname.as_deref().unwrap_or(label),
-        opened.size_bytes,
+        &report,
         opened.substitutions,
+        output,
     )
 }
 
@@ -196,6 +233,26 @@ enum Location {
     Offset(u64),
     /// The medium starts this many bytes into the filesystem.
     HeadAbsent(u64),
+}
+
+impl Location {
+    /// The bytes of the filesystem this medium does not begin with, which a
+    /// report has to state because a mount that succeeds otherwise looks
+    /// like a mount that found everything.
+    const fn head_absent(self) -> Option<u64> {
+        match self {
+            Self::HeadAbsent(bytes) => Some(bytes),
+            Self::Offset(_) => None,
+        }
+    }
+
+    /// The offset within the medium, when the filesystem has one.
+    const fn offset(self) -> Option<u64> {
+        match self {
+            Self::Offset(offset) => Some(offset),
+            Self::HeadAbsent(_) => None,
+        }
+    }
 }
 
 /// The location `--offset` asks for, or the start of the media.
@@ -238,6 +295,7 @@ fn mount_drive(
     args: &MountArgs,
     source: &Source,
     drive: &fsmnt::device::HostDriveId,
+    output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
     use fsmnt::device::{HostDriveEnumerator, LogicalVolumeId, SourceOrigin, SourceSelection};
@@ -267,7 +325,8 @@ fn mount_drive(
         options = options.with_scan(args.stride);
     }
 
-    let opened = open_drive_location(args, source, drive, &drivers, options)?;
+    let location = requested_location(args)?;
+    let opened = open_drive_location(args, source, drive, &drivers, options, location)?;
 
     ensure_unix_mountpoint(&args.mountpoint)?;
 
@@ -285,14 +344,27 @@ fn mount_drive(
     let label = fs_label(opened.detected);
     warn_layout_origin(opened.layout_origin, args.partition, source);
     warn_if_truncated(opened.truncated_by, opened.size_bytes, "partition");
+    let report = MountReport {
+        source: SourceRef::new(source),
+        filesystem: label,
+        volname,
+        fsname: args.fsname.clone().unwrap_or_else(|| label.to_string()),
+        // A drive partition is located by ordinal or by the offset the
+        // command line gave; there is no offset to report for the logical
+        // volume the operating system laid over it.
+        offset: args.offset.and(location.offset()),
+        partition: args.partition,
+        size_bytes: media_size(opened.size_bytes),
+        layout_origin: opened.layout_origin,
+        truncated_by: opened.truncated_by,
+        head_absent: location.head_absent(),
+    };
     block_on_mount(
         opened.filesystem,
         &args.mountpoint,
-        label,
-        &volname,
-        args.fsname.as_deref().unwrap_or(label),
-        opened.size_bytes,
+        &report,
         opened.substitutions,
+        output,
     )
 }
 
@@ -309,6 +381,7 @@ fn open_drive_location(
     drive: &fsmnt::device::HostDriveId,
     drivers: &fsmnt::device::DriverRegistry,
     options: fsmnt::PartitionOpenOptions,
+    location: Location,
 ) -> Result<fsmnt::OpenedPartition, Box<dyn std::error::Error>> {
     use fsmnt::HostDrives;
 
@@ -326,7 +399,7 @@ fn open_drive_location(
         // A negative offset is not a place on the drive: the drive is the
         // tail of a filesystem that started before it, so the opener is
         // given offset 0 and told how much of the volume is missing.
-        return match requested_location(args)? {
+        return match location {
             Location::Offset(offset) => {
                 fsmnt::open_device_at_offset::<HostDrives>(drive, offset, drivers, options)
             }
@@ -397,6 +470,7 @@ fn mount_drive(
     _args: &MountArgs,
     _source: &Source,
     _drive: &fsmnt::device::HostDriveId,
+    _output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Err(super::NO_DRIVE_SUPPORT.into())
 }

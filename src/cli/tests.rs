@@ -5,6 +5,7 @@
 use clap::Parser;
 use fsmnt::device::FilesystemRoot;
 
+use crate::cli::json::Output;
 use crate::cli::mount::check_options;
 use crate::cli::size::{SignedSizeExpr, SizeExpr};
 use crate::cli::source::{Source, SourceKind, resolve};
@@ -92,6 +93,60 @@ fn logging_flags_are_accepted_on_either_side_of_the_subcommand() {
     assert!(
         Cli::try_parse_from(["fsmnt", "-q", "-v", "drives"]).is_err(),
         "saying less and saying more are contradictory"
+    );
+}
+
+#[test]
+fn json_is_global_like_the_other_output_flags() {
+    for argv in [
+        vec!["fsmnt", "--json", "partitions", "disk.bin"],
+        vec!["fsmnt", "partitions", "disk.bin", "--json"],
+        vec!["fsmnt", "--json", "scan", "disk.bin"],
+        vec!["fsmnt", "scan", "disk.bin", "--json"],
+        vec!["fsmnt", "--json", "drives"],
+        vec!["fsmnt", "drives", "--json"],
+        vec!["fsmnt", "--json", "mount", "disk.bin", "Z:"],
+        vec!["fsmnt", "mount", "disk.bin", "Z:", "--json"],
+        vec!["fsmnt", "--json", "unmount", "Z:"],
+        vec!["fsmnt", "unmount", "Z:", "--json"],
+    ] {
+        let cli = Cli::try_parse_from(&argv).expect("--json is accepted everywhere");
+        assert!(cli.log.json, "{argv:?}");
+        assert!(Output::new(cli.log.json).is_json(), "{argv:?}");
+    }
+
+    let cli = Cli::try_parse_from(["fsmnt", "partitions", "disk.bin"]).expect("no --json");
+    assert!(!cli.log.json);
+    assert_eq!(
+        Output::new(cli.log.json),
+        Output::Human,
+        "tables remain the default; nothing about them changes"
+    );
+}
+
+#[test]
+fn json_composes_with_the_verbosity_flags_it_sits_beside() {
+    let cli = Cli::try_parse_from(["fsmnt", "-q", "--json", "scan", "disk.bin"])
+        .expect("quiet machine-readable output");
+    assert!(cli.log.quiet);
+    assert!(cli.log.json, "--json chooses the format, -q the volume");
+
+    let cli = Cli::try_parse_from([
+        "fsmnt",
+        "mount",
+        "disk.bin",
+        "Z:",
+        "--json",
+        "--log-file",
+        "run.log",
+        "-v",
+    ])
+    .expect("a machine-readable run with a human log file");
+    assert!(cli.log.json);
+    assert_eq!(cli.log.verbose, 1);
+    assert_eq!(
+        cli.log.log_file.as_deref(),
+        Some(std::path::Path::new("run.log"))
     );
 }
 

@@ -62,6 +62,11 @@ clap = { version = "4", features = ["derive"] }
 ewf = { version = "0.4", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 lzokay = { version = "2", default-features = false, features = ["alloc", "decompress"] }
+# The CLI's `--json` reports. Only the binary serializes anything: the
+# library types stay free of serde so the wire format can outlive their
+# field names.
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
 thiserror = { version = "2", default-features = false }
 time = { version = "0.3", default-features = false }
@@ -71,10 +76,13 @@ tracing = { version = "0.1", default-features = false, features = [
     "attributes",
 ] }
 # Subscriber side (binaries only); `tracing-log` also catches fuser's and ewf's `log` records.
+# `json` is what `--json` puts on stderr, so a program driving the CLI reads
+# one object per event instead of `level: message` prose.
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "ansi",
     "env-filter",
+    "json",
     "std",
     "tracing-log",
 ] }
@@ -178,7 +186,7 @@ readme = "README.md"
 # `--no-default-features` builds the library alone.
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:tracing-subscriber"]
+cli = ["dep:clap", "dep:serde", "dep:serde_json", "dep:tracing-subscriber"]
 
 [[bin]]
 name = "fsmnt"
@@ -191,6 +199,8 @@ fsmnt-core = { workspace = true }
 fsmnt-device = { workspace = true }
 fsmnt-drivers = { workspace = true }
 fsmnt-proxy = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }

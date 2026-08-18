@@ -21,12 +21,14 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args};
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::format::{Format, Json, JsonFields, Writer};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
-use tracing_subscriber::{EnvFilter, Layer as _};
+use tracing_subscriber::{EnvFilter, Layer};
+
+use super::json::SCHEMA;
 
 /// Environment variable holding [`EnvFilter`] directives.
 ///
@@ -34,11 +36,13 @@ use tracing_subscriber::{EnvFilter, Layer as _};
 /// because "`fsmnt_device=trace,info`" is a statement `-vv` cannot make.
 const FILTER_ENV: &str = "FSMNT_LOG";
 
-/// How much the command says, and where it says it.
+/// How much the command says, where it says it, and in what form.
 ///
 /// Global on purpose: `fsmnt -v partitions disk.bin` and
 /// `fsmnt partitions disk.bin -v` are the same command, and a flag whose
-/// position matters is a flag people get wrong.
+/// position matters is a flag people get wrong. `--json` sits here for the
+/// same reason and because it answers the same question — who is reading —
+/// rather than anything about the media.
 #[derive(Args, Clone, Debug, Default)]
 pub(crate) struct LogOptions {
     /// Say more on stderr: once for the decisions inside the library
@@ -63,6 +67,15 @@ pub(crate) struct LogOptions {
     /// still say why.
     #[arg(long, value_name = "PATH", global = true, display_order = 902)]
     pub(crate) log_file: Option<PathBuf>,
+
+    /// Speak to a program instead of a person: stdout carries JSON only —
+    /// one document for `drives`, `partitions`, `scan` and `unmount`, one
+    /// event per line for `mount` — and every message on stderr becomes one
+    /// JSON object keyed by `level`. `-v`/`-q` still choose how much is
+    /// said, and `--log-file` stays plain text. See "Machine-readable
+    /// output" in the README for the documents and the stability promise.
+    #[arg(long, global = true, display_order = 903)]
+    pub(crate) json: bool,
 }
 
 /// Install the subscriber these options describe.
@@ -71,6 +84,10 @@ pub(crate) struct LogOptions {
 /// the optional log file. Both are filtered the same way, so the file is a
 /// transcript of the console rather than a different account of the run.
 ///
+/// The log file keeps its plain-text format even under `--json`, because a
+/// log file is read by a person after the fact while the stream a program
+/// parses is stderr.
+///
 /// # Errors
 ///
 /// Returns an error if `FSMNT_LOG` holds directives that do not parse, the
@@ -78,13 +95,7 @@ pub(crate) struct LogOptions {
 /// installed in this process.
 pub(crate) fn init(options: &LogOptions) -> Result<(), Box<dyn Error>> {
     let show_target = options.verbose > 0;
-    let console = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        // Escape codes are for a person watching; a redirected stream gets
-        // plain text so a captured log stays greppable.
-        .with_ansi(std::io::stderr().is_terminal())
-        .event_format(CompactFormat { show_target })
-        .with_filter(filter(options)?);
+    let console = console_layer(options)?;
 
     let file = match options.log_file.as_deref() {
         Some(path) => Some(
@@ -105,6 +116,40 @@ pub(crate) fn init(options: &LogOptions) -> Result<(), Box<dyn Error>> {
         .with(file)
         .try_init()?;
     Ok(())
+}
+
+/// The stderr layer, in whichever of the two formats was asked for.
+///
+/// Boxed because the two are different types and the choice is made at
+/// runtime; the filter is built inside, since [`EnvFilter`] keeps
+/// per-callsite state and cannot be cloned into both branches.
+///
+/// # Errors
+///
+/// Returns an error if `FSMNT_LOG` holds directives that do not parse.
+fn console_layer<S>(options: &LogOptions) -> Result<Box<dyn Layer<S> + Send + Sync>, Box<dyn Error>>
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    if options.json {
+        return Ok(tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .fmt_fields(JsonFields::new())
+            .event_format(SchemaJson::new())
+            .with_filter(filter(options)?)
+            .boxed());
+    }
+    Ok(tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        // Escape codes are for a person watching; a redirected stream gets
+        // plain text so a captured log stays greppable.
+        .with_ansi(std::io::stderr().is_terminal())
+        .event_format(CompactFormat {
+            show_target: options.verbose > 0,
+        })
+        .with_filter(filter(options)?)
+        .boxed())
 }
 
 /// Open the `--log-file` for appending, creating it if it does not exist.
@@ -196,6 +241,54 @@ where
         }
         ctx.format_fields(writer.by_ref(), event)?;
         writeln!(writer)
+    }
+}
+
+/// One JSON object per event, for `--json`.
+///
+/// The subscriber's own JSON format does the work — a flattened event, so
+/// `message` and the event's fields sit beside `level`, `timestamp` and
+/// `target`, with no span machinery a command-line tool has no use for. It
+/// offers no way to add a constant field, so the object it produces is
+/// reopened here to put [`SCHEMA`] in front: a program then reads the same
+/// version marker off a stderr event as off a stdout document, without
+/// having to know which stream it came from.
+struct SchemaJson(Format<Json>);
+
+impl SchemaJson {
+    /// The format as `--json` configures it.
+    fn new() -> Self {
+        Self(
+            tracing_subscriber::fmt::format()
+                .json()
+                .flatten_event(true)
+                .with_current_span(false)
+                .with_span_list(false)
+                .with_target(true),
+        )
+    }
+}
+
+impl<S, N> FormatEvent<S, N> for SchemaJson
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut line = String::new();
+        self.0.format_event(ctx, Writer::new(&mut line), event)?;
+        // Anything that is not the object it always is goes out untouched:
+        // a malformed line is easier to diagnose than a mangled one.
+        let Some(body) = line.trim_end().strip_prefix('{') else {
+            return writer.write_str(&line);
+        };
+        let separator = if body.starts_with('}') { "" } else { "," };
+        writeln!(writer, "{{\"schema\":{SCHEMA}{separator}{body}")
     }
 }
 

@@ -12,8 +12,14 @@
 //! a script may key on — while everything that describes how the command
 //! got there is a `tracing` event, so `-q`, `-v` and `--log-file` control
 //! it without changing what a pipeline reads.
+//!
+//! [`json`] is the same division stated for a program rather than a person:
+//! each handler builds one typed report and then renders it, so the table
+//! and the document are two views of one gathering rather than two paths
+//! through the media.
 
 pub(crate) mod detach;
+pub(crate) mod json;
 pub(crate) mod logging;
 pub(crate) mod mount;
 pub(crate) mod partitions;
@@ -29,6 +35,10 @@ pub(crate) use partitions::{handle_drives, handle_partitions};
 pub(crate) use scan::handle_scan;
 
 use tracing::{info, warn};
+
+use json::{
+    BestEffort, MountReport, MountedEvent, OpenedEvent, Output, UnmountDocument, UnmountedEvent,
+};
 
 /// What every drive operation reports on a platform with no drive
 /// enumerator, instead of the command not existing at all: the source
@@ -54,26 +64,31 @@ pub(crate) fn ensure_unix_mountpoint(mountpoint: &str) -> Result<(), Box<dyn std
 
 /// Mount `fs` and block until the mount ends.
 ///
-/// `substitutions` is the best-effort-read counter of the source, when that
-/// mode is on; what it accumulated is reported once the mount ends, since
-/// that is when the caller knows how much of what they copied was really
-/// there.
+/// `report` is what the mount already established about itself — where the
+/// filesystem was, how it was located, what the medium is short of — which
+/// the backend needs the labels from and which `--json` emits as the
+/// `opened` event. `substitutions` is the best-effort-read counter of the
+/// source, when that mode is on; what it accumulated is reported once the
+/// mount ends, since that is when the caller knows how much of what they
+/// copied was really there.
 pub(crate) fn block_on_mount(
     fs: Box<dyn fsmnt::TargetFilesystem>,
     mountpoint: &str,
-    kind: &str,
-    volname: &str,
-    fsname: &str,
-    total_bytes: u64,
+    report: &MountReport,
     substitutions: Option<std::sync::Arc<fsmnt::device::ReadSubstitutions>>,
+    output: Output,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mp_display = mountpoint.to_string();
     // Anything the driver did that departs from a plain open — a backup
     // boot sector or superblock standing in for the primary, a degraded
     // mode — is said out loud before the volume appears, so a scripted
     // mount leaves that fact in its log even at `-q`.
-    for notice in fs.notices() {
+    let notices = fs.notices();
+    for notice in &notices {
         warn!("{notice}");
+    }
+    if output.is_json() {
+        json::print_event(&OpenedEvent::new(report, notices));
     }
     if substitutions.is_some() {
         warn!(
@@ -81,14 +96,32 @@ pub(crate) fn block_on_mount(
              summary follows when the volume is unmounted"
         );
     }
-    info!("mounting {kind} volume at {mountpoint}");
-    fsmnt::mount(fs, mountpoint, fsname, volname, total_bytes, move || {
-        println!(
-            "Volume mounted at {mp_display}. Press Ctrl+C, or run 'fsmnt unmount {mp_display}' \
-             from another shell, to unmount."
-        );
-    })?;
-    println!("Unmounted.");
+    info!("mounting {} volume at {mountpoint}", report.filesystem);
+    fsmnt::mount(
+        fs,
+        mountpoint,
+        &report.fsname,
+        &report.volname,
+        report.size_bytes.unwrap_or(0),
+        move || {
+            if output.is_json() {
+                // The pid is this process: it is the one holding the mount,
+                // and the one `fsmnt unmount` releases it from.
+                json::print_event(&MountedEvent::new(&mp_display, std::process::id()));
+            } else {
+                println!(
+                    "Volume mounted at {mp_display}. Press Ctrl+C, or run 'fsmnt unmount \
+                     {mp_display}' from another shell, to unmount."
+                );
+            }
+        },
+    )?;
+    if output.is_json() {
+        let best_effort = substitutions.as_deref().map(BestEffort::new);
+        json::print_event(&UnmountedEvent::new(mountpoint, best_effort));
+    } else {
+        println!("Unmounted.");
+    }
     if let Some(stats) = substitutions {
         report_substitutions(&stats);
     }
@@ -130,9 +163,15 @@ fn report_substitutions(stats: &fsmnt::device::ReadSubstitutions) {
 }
 
 /// Unmount whatever `fsmnt` has mounted at `mountpoint`.
-pub(crate) fn handle_unmount(mountpoint: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn handle_unmount(
+    mountpoint: &str,
+    output: Output,
+) -> Result<(), Box<dyn std::error::Error>> {
     fsmnt::unmount(mountpoint)?;
-    println!("Unmounted {mountpoint}.");
+    match output {
+        Output::Json => json::print_document(&UnmountDocument::new(mountpoint)),
+        Output::Human => println!("Unmounted {mountpoint}."),
+    }
     Ok(())
 }
 
