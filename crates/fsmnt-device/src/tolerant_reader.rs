@@ -13,39 +13,85 @@
 //! This is opt-in: substituted zeros can look like an empty file or a
 //! zeroed directory block, and the default open would rather fail loudly.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Granularity at which a failing read is written off as zeros: one
 /// sector, so a bad-sector error costs 512 bytes, not the whole request.
 const ERROR_ZERO_FILL_GRANULE: u64 = 512;
 
-/// Running totals of what a [`TolerantReader`] substituted.
+/// What a [`TolerantReader`] substituted, as *distinct* byte ranges.
+///
+/// Filesystems re-read the same blocks many times over the life of a mount
+/// (a whole-file read behind every chunk, directory blocks on every lookup),
+/// so a per-read tally would say "gigabytes of zeros" about a 100 MB gap.
+/// The ranges are coalesced instead: the totals are the bytes of the media
+/// that were asked for and were not there, each counted once.
 ///
 /// Shared (`Arc`) between the reader and whoever reports at the end, since
 /// the reader is moved into the filesystem driver.
 #[derive(Debug, Default)]
 pub struct ReadSubstitutions {
-    /// Bytes returned as zeros because they lie past the end of the source.
-    pub missing_bytes: AtomicU64,
-    /// Bytes returned as zeros because the source reported an I/O error.
-    pub errored_bytes: AtomicU64,
-    /// Number of I/O errors that were absorbed.
-    pub read_errors: AtomicU64,
+    /// Coalesced `start..end` ranges served as zeros because they lie past
+    /// the end of the source.
+    missing: Mutex<Ranges>,
+    /// Coalesced ranges served as zeros because the source reported an I/O
+    /// error.
+    errored: Mutex<Ranges>,
+    /// Number of I/O errors that were absorbed (every occurrence, since a
+    /// sector that fails on every read is still one bad sector but the
+    /// count says how often it was hit).
+    read_errors: AtomicU64,
+}
+
+/// A coalesced set of half-open byte ranges keyed by start.
+#[derive(Debug, Default)]
+struct Ranges(BTreeMap<u64, u64>);
+
+impl Ranges {
+    /// Add `start..end`, merging with anything it touches.
+    fn add(&mut self, start: u64, end: u64) {
+        if end <= start {
+            return;
+        }
+        let (mut start, mut end) = (start, end);
+        // Absorb the predecessor if it reaches into the new range.
+        if let Some((&prev_start, &prev_end)) = self.0.range(..=start).next_back()
+            && prev_end >= start
+        {
+            start = prev_start;
+            end = end.max(prev_end);
+            self.0.remove(&prev_start);
+        }
+        // Absorb every successor the (possibly extended) range reaches.
+        while let Some((&next_start, &next_end)) = self.0.range(start..).next()
+            && next_start <= end
+        {
+            end = end.max(next_end);
+            self.0.remove(&next_start);
+        }
+        self.0.insert(start, end);
+    }
+
+    /// Total bytes covered.
+    fn total(&self) -> u64 {
+        self.0.iter().map(|(s, e)| e - s).sum()
+    }
 }
 
 impl ReadSubstitutions {
-    /// Bytes past the end of the source that were served as zeros.
+    /// Distinct bytes past the end of the source that were served as zeros.
     #[must_use]
     pub fn missing_bytes(&self) -> u64 {
-        self.missing_bytes.load(Ordering::Relaxed)
+        self.missing.lock().map_or(0, |ranges| ranges.total())
     }
 
-    /// Bytes served as zeros because the source failed to read them.
+    /// Distinct bytes served as zeros because the source failed to read them.
     #[must_use]
     pub fn errored_bytes(&self) -> u64 {
-        self.errored_bytes.load(Ordering::Relaxed)
+        self.errored.lock().map_or(0, |ranges| ranges.total())
     }
 
     /// I/O errors that were absorbed.
@@ -58,6 +104,16 @@ impl ReadSubstitutions {
     #[must_use]
     pub fn any(&self) -> bool {
         self.missing_bytes() > 0 || self.errored_bytes() > 0
+    }
+
+    fn record(&self, why: Substituted, start: u64, end: u64) {
+        let ranges = match why {
+            Substituted::Missing => &self.missing,
+            Substituted::Errored => &self.errored,
+        };
+        if let Ok(mut ranges) = ranges.lock() {
+            ranges.add(start, end);
+        }
     }
 }
 
@@ -146,12 +202,9 @@ impl<R: Read + Seek> TolerantReader<R> {
 
     fn zero_fill(&mut self, buf: &mut [u8], count: usize, why: Substituted) -> usize {
         buf[..count].fill(0);
-        let counter = match why {
-            Substituted::Missing => &self.stats.missing_bytes,
-            Substituted::Errored => &self.stats.errored_bytes,
-        };
-        counter.fetch_add(count as u64, Ordering::Relaxed);
-        self.position += count as u64;
+        let end = self.position + count as u64;
+        self.stats.record(why, self.position, end);
+        self.position = end;
         count
     }
 }
@@ -299,5 +352,32 @@ mod tests {
         assert_eq!(stats.errored_bytes(), 1024);
         assert_eq!(stats.read_errors(), 2, "two 512-byte sectors failed");
         assert!(stats.any());
+
+        // Reading the bad range again does not double-count the bytes, but
+        // does count the errors — one bad sector hit twice is one bad
+        // sector that failed twice.
+        reader.seek(SeekFrom::Start(1024)).unwrap();
+        let mut again = vec![0u8; 1024];
+        reader.read_exact(&mut again).unwrap();
+        assert_eq!(stats.errored_bytes(), 1024);
+        assert_eq!(stats.read_errors(), 4);
+    }
+
+    #[test]
+    fn ranges_coalesce_overlaps_and_neighbours() {
+        let mut ranges = Ranges::default();
+        ranges.add(10, 20);
+        ranges.add(30, 40);
+        assert_eq!(ranges.total(), 20);
+        ranges.add(20, 30); // bridges the two
+        assert_eq!(ranges.0.len(), 1);
+        assert_eq!(ranges.total(), 30);
+        ranges.add(5, 15); // overlaps the front
+        assert_eq!(ranges.total(), 35);
+        ranges.add(50, 50); // empty
+        assert_eq!(ranges.total(), 35);
+        ranges.add(0, 100); // swallows everything
+        assert_eq!(ranges.0.len(), 1);
+        assert_eq!(ranges.total(), 100);
     }
 }

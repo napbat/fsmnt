@@ -82,18 +82,19 @@ pub(crate) fn block_on_mount(
     Ok(())
 }
 
-/// Say how many bytes best-effort reads substituted with zeros, or that
-/// none were needed.
+/// Say how much of the media that was read turned out not to be there
+/// (distinct bytes, each counted once however often it was re-read), or
+/// that none of it was missing.
 fn report_substitutions(stats: &fsmnt::device::ReadSubstitutions) {
     use size::format_size_precise;
 
     if !stats.any() {
-        eprintln!("best-effort reads: every byte read was present in the source");
+        eprintln!("best-effort reads: every byte that was read was present in the source");
         return;
     }
     eprintln!(
-        "best-effort reads: {} served as zeros — {} past the end of the source, {} from {} read \
-         error(s)",
+        "best-effort reads: {} of the media that was read was not there and came back as zeros \
+         — {} past the end of the source, {} in sectors that failed to read ({} read error(s))",
         format_size_precise(stats.missing_bytes() + stats.errored_bytes()),
         format_size_precise(stats.missing_bytes()),
         format_size_precise(stats.errored_bytes()),
