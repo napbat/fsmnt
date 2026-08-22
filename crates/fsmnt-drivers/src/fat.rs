@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use fs_fat::{Fat, FatAttributes, FatFileValue, FatTime};
 use fsmnt_core::{
-    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
@@ -213,6 +214,48 @@ impl<T: Read + Seek> FatFilesystem<T> {
 }
 
 impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let metadata = self.metadata(path)?;
+        if metadata.is_dir {
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("FAT path cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::directory(path, metadata, cached))
+        } else {
+            self.cache_file(path)?;
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("FAT file cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::file(path, metadata, cached))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let cached = file
+            .context_mut::<CachedFatTarget>()
+            .ok_or_else(|| FsError::Filesystem("FAT received a foreign file handle".to_string()))?;
+        let stream = cached
+            .data
+            .as_mut()
+            .ok_or_else(|| FsError::Filesystem("FAT open file has no data stream".to_string()))?;
+        read_at_through(stream, &mut self.reader, offset, buffer, |error| {
+            map_fat_error(error, &path)
+        })
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let _cached = directory.context_mut::<CachedFatTarget>().ok_or_else(|| {
+            FsError::Filesystem("FAT received a foreign directory handle".to_string())
+        })?;
+        self.read_dir(directory.path())
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_file(path)?;
         let file = self
@@ -472,6 +515,31 @@ mod tests {
         assert_eq!(cached.read_calls(), 2, "only two data clusters are read");
         assert_eq!(cached.seek_calls(), 2, "only two data seeks remain");
         assert_eq!(cached.bytes_read(), 40, "the FAT sector stays cached");
+    }
+
+    #[test]
+    fn open_handles_keep_their_own_positioned_streams() {
+        let (image, payload) = three_cluster_fat16_image();
+        let mut fs = FatFilesystem::new(Cursor::new(image)).expect("synthetic FAT16 volume");
+        let mut first = fs
+            .open(THREE_CLUSTER_FILE_PATH)
+            .expect("first open")
+            .into_file()
+            .expect("regular file");
+        let mut second = fs
+            .open(THREE_CLUSTER_FILE_PATH)
+            .expect("second open")
+            .into_file()
+            .expect("regular file");
+
+        let mut later = [0_u8; 24];
+        let mut earlier = [0_u8; 16];
+        fs.read_open_file(&mut second, 1_000, &mut later)
+            .expect("second handle read");
+        fs.read_open_file(&mut first, 500, &mut earlier)
+            .expect("first handle read");
+        assert_eq!(&later, &payload[1_000..1_024]);
+        assert_eq!(&earlier, &payload[500..516]);
     }
 
     #[test]

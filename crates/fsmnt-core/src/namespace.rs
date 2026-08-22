@@ -4,8 +4,22 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::{
-    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem, normalize_path,
 };
+
+struct NamespaceFile {
+    mount_point: Option<String>,
+    file: OpenedFile,
+}
+
+enum NamespaceDirectory {
+    Backing {
+        mount_point: Option<String>,
+        directory: OpenedDirectory,
+    },
+    Synthetic,
+}
 
 /// A filesystem namespace assembled from a root filesystem and child mounts.
 ///
@@ -174,9 +188,105 @@ impl MountNamespace {
             metadata,
         })
     }
+
+    fn merge_directory_entries(
+        &mut self,
+        path: &str,
+        entries: Vec<FsEntry>,
+    ) -> FsResult<Vec<FsEntry>> {
+        let mut by_name: BTreeMap<String, FsEntry> = entries
+            .into_iter()
+            .map(|mut entry| {
+                entry.path = if path.is_empty() {
+                    PathBuf::from("/").join(&entry.name)
+                } else {
+                    PathBuf::from(path).join(&entry.name)
+                };
+                (entry.name.clone(), entry)
+            })
+            .collect();
+        for (name, exact_mount) in self.direct_mount_children(path) {
+            let entry = self.mounted_child_entry(path, name.clone(), exact_mount)?;
+            by_name.insert(name, entry);
+        }
+        Ok(by_name.into_values().collect())
+    }
 }
 
 impl TargetFilesystem for MountNamespace {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let path = canonical_path(path)?;
+        let route = self.route(&path);
+        let has_synthetic_fallback = self.has_mounted_descendant(&path)
+            && route.mount_point.as_deref() != Some(path.as_str());
+        let mount_point = route.mount_point;
+        let opened = match self
+            .filesystem_mut(mount_point.as_deref())
+            .open(&route.relative)
+        {
+            Ok(opened) => opened,
+            Err(FsError::NotFound(_)) if has_synthetic_fallback => {
+                return Ok(OpenedTarget::directory(
+                    path,
+                    directory_metadata(),
+                    NamespaceDirectory::Synthetic,
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = opened.metadata().clone();
+        match opened {
+            OpenedTarget::File(file) => Ok(OpenedTarget::file(
+                path,
+                metadata,
+                NamespaceFile { mount_point, file },
+            )),
+            OpenedTarget::Directory(directory) => Ok(OpenedTarget::directory(
+                path,
+                metadata,
+                NamespaceDirectory::Backing {
+                    mount_point,
+                    directory,
+                },
+            )),
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let context = file.context_mut::<NamespaceFile>().ok_or_else(|| {
+            FsError::Filesystem("mount namespace received a foreign file handle".to_string())
+        })?;
+        self.filesystem_mut(context.mount_point.as_deref())
+            .read_open_file(&mut context.file, offset, buffer)
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let context = directory
+            .context_mut::<NamespaceDirectory>()
+            .ok_or_else(|| {
+                FsError::Filesystem(
+                    "mount namespace received a foreign directory handle".to_string(),
+                )
+            })?;
+        let entries = match context {
+            NamespaceDirectory::Backing {
+                mount_point,
+                directory,
+            } => self
+                .filesystem_mut(mount_point.as_deref())
+                .opened_directory_entries(directory)?
+                .to_vec(),
+            NamespaceDirectory::Synthetic => Vec::new(),
+        };
+        self.merge_directory_entries(&path, entries)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         let path = canonical_path(path)?;
         let route = self.route(&path);
@@ -252,22 +362,7 @@ impl TargetFilesystem for MountNamespace {
             Err(FsError::NotFound(_)) if !children.is_empty() => Vec::new(),
             Err(error) => return Err(error),
         };
-        let mut by_name: BTreeMap<String, FsEntry> = entries
-            .into_iter()
-            .map(|mut entry| {
-                entry.path = if path.is_empty() {
-                    PathBuf::from("/").join(&entry.name)
-                } else {
-                    PathBuf::from(&path).join(&entry.name)
-                };
-                (entry.name.clone(), entry)
-            })
-            .collect();
-        for (name, exact_mount) in children {
-            let entry = self.mounted_child_entry(&path, name.clone(), exact_mount)?;
-            by_name.insert(name, entry);
-        }
-        Ok(by_name.into_values().collect())
+        self.merge_directory_entries(&path, entries)
     }
 
     fn total_size(&self) -> Option<u64> {
@@ -435,6 +530,23 @@ mod tests {
         let home_entries = namespace.read_dir("/home").expect("home listing");
         assert_eq!(home_entries.len(), 1);
         assert_eq!(home_entries[0].path, PathBuf::from("home/alice.txt"));
+
+        let mut opened_root = namespace
+            .open("/")
+            .expect("open namespace root")
+            .into_directory()
+            .expect("root directory");
+        let opened_entries = namespace
+            .opened_directory_entries(&mut opened_root)
+            .expect("opened root listing");
+        assert!(
+            opened_entries.iter().any(|entry| entry.name == "boot"),
+            "backing root entries remain visible"
+        );
+        assert!(
+            opened_entries.iter().any(|entry| entry.name == "home"),
+            "mounted root entries are overlaid"
+        );
     }
 
     #[test]

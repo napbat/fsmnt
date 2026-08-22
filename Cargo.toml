@@ -156,7 +156,7 @@ libc = "0.2"
 linux-raw-sys = { version = "0.12", default-features = false }
 
 # Windows mount backend (Dokan)
-dokan = { git = "https://github.com/coconutbird/dokan-rust.git", rev = "a01841c855aefd3cbaaf042f90d16d5b4bc34692" }
+dokan = { git = "https://github.com/coconutbird/dokan-rust.git", rev = "dd0f899be1f4a72b5c031b842d2ac23051244ec1" }
 widestring = "1.2"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

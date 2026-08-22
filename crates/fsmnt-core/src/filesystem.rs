@@ -6,8 +6,9 @@
 //! ([`crate::DirFilesystem`]), a raw partition image parsed in userspace, a
 //! remote system, and so on.
 
+use std::any::Any;
 use std::borrow::Cow;
-use std::io::{self, Cursor, Read};
+use std::io;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -132,6 +133,170 @@ pub struct FsEntry {
     pub metadata: FsMetadata,
 }
 
+/// State owned by one open regular-file handle.
+///
+/// The filesystem implementation chooses the concrete context stored in the
+/// handle. Format adapters use it for detached parser streams and
+/// decompression workspaces, so unrelated opens cannot evict each other's
+/// state.
+pub struct OpenedFile {
+    path: Box<str>,
+    metadata: FsMetadata,
+    context: Box<dyn Any + Send>,
+}
+
+impl OpenedFile {
+    /// Creates an open file with backend-specific `context`.
+    #[must_use]
+    pub fn new(path: impl Into<Box<str>>, metadata: FsMetadata, context: impl Any + Send) -> Self {
+        Self {
+            path: path.into(),
+            metadata,
+            context: Box::new(context),
+        }
+    }
+
+    /// Path used to open this file.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Metadata resolved when the file was opened.
+    #[must_use]
+    pub const fn metadata(&self) -> &FsMetadata {
+        &self.metadata
+    }
+
+    /// Returns the backend context when it has type `T`.
+    ///
+    /// Filesystem implementations use this to recover the concrete parser
+    /// handle they placed in [`OpenedFile::new`]. A missing value indicates
+    /// that a handle was passed to a different filesystem implementation.
+    pub fn context_mut<T: Any + Send>(&mut self) -> Option<&mut T> {
+        self.context.downcast_mut()
+    }
+}
+
+/// State owned by one open directory handle.
+///
+/// A successful listing is retained on the handle. Repeated enumeration of
+/// the same OS handle therefore reuses both path-resolution state and the
+/// resulting entries.
+pub struct OpenedDirectory {
+    path: Box<str>,
+    metadata: FsMetadata,
+    context: Box<dyn Any + Send>,
+    entries: Option<Box<[FsEntry]>>,
+}
+
+impl OpenedDirectory {
+    /// Creates an open directory with backend-specific `context`.
+    #[must_use]
+    pub fn new(path: impl Into<Box<str>>, metadata: FsMetadata, context: impl Any + Send) -> Self {
+        Self {
+            path: path.into(),
+            metadata,
+            context: Box::new(context),
+            entries: None,
+        }
+    }
+
+    /// Path used to open this directory.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Metadata resolved when the directory was opened.
+    #[must_use]
+    pub const fn metadata(&self) -> &FsMetadata {
+        &self.metadata
+    }
+
+    /// Returns the backend context when it has type `T`.
+    ///
+    /// Filesystem implementations use this to recover the concrete parser
+    /// state they placed in [`OpenedDirectory::new`].
+    pub fn context_mut<T: Any + Send>(&mut self) -> Option<&mut T> {
+        self.context.downcast_mut()
+    }
+}
+
+/// A file or directory resolved for one open OS handle.
+pub enum OpenedTarget {
+    /// An open regular file.
+    File(OpenedFile),
+    /// An open directory.
+    Directory(OpenedDirectory),
+}
+
+impl OpenedTarget {
+    /// Creates a regular-file target with backend-specific context.
+    #[must_use]
+    pub fn file(path: impl Into<Box<str>>, metadata: FsMetadata, context: impl Any + Send) -> Self {
+        Self::File(OpenedFile::new(path, metadata, context))
+    }
+
+    /// Creates a directory target with backend-specific context.
+    #[must_use]
+    pub fn directory(
+        path: impl Into<Box<str>>,
+        metadata: FsMetadata,
+        context: impl Any + Send,
+    ) -> Self {
+        Self::Directory(OpenedDirectory::new(path, metadata, context))
+    }
+
+    /// Path used to open this target.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        match self {
+            Self::File(file) => file.path(),
+            Self::Directory(directory) => directory.path(),
+        }
+    }
+
+    /// Metadata resolved when this target was opened.
+    #[must_use]
+    pub const fn metadata(&self) -> &FsMetadata {
+        match self {
+            Self::File(file) => file.metadata(),
+            Self::Directory(directory) => directory.metadata(),
+        }
+    }
+
+    /// Returns whether this target is a directory.
+    #[must_use]
+    pub const fn is_directory(&self) -> bool {
+        matches!(self, Self::Directory(_))
+    }
+
+    /// Converts this target into an open file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FsError::NotAFile`] when the target is a directory.
+    pub fn into_file(self) -> FsResult<OpenedFile> {
+        match self {
+            Self::File(file) => Ok(file),
+            Self::Directory(directory) => Err(FsError::NotAFile(directory.path.into())),
+        }
+    }
+
+    /// Converts this target into an open directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FsError::NotADirectory`] when the target is a regular file.
+    pub fn into_directory(self) -> FsResult<OpenedDirectory> {
+        match self {
+            Self::File(file) => Err(FsError::NotADirectory(file.path.into())),
+            Self::Directory(directory) => Ok(directory),
+        }
+    }
+}
+
 /// Unified read-only filesystem interface.
 ///
 /// This trait abstracts over different filesystem sources: live directories
@@ -144,6 +309,76 @@ pub struct FsEntry {
 /// Methods take `&mut self` because some backends require mutable access to
 /// an underlying reader.
 pub trait TargetFilesystem: Send {
+    /// Resolve a path and create state owned by one open handle.
+    ///
+    /// The default retains only the path and metadata. Parser-backed
+    /// filesystems should override this to detach their native file or
+    /// directory state into the returned target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path does not exist or cannot be opened.
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let metadata = self.metadata(path)?;
+        if metadata.is_dir {
+            Ok(OpenedTarget::directory(path, metadata, ()))
+        } else {
+            Ok(OpenedTarget::file(path, metadata, ()))
+        }
+    }
+
+    /// Read bytes through state retained by an open file handle.
+    ///
+    /// The default delegates to [`read_at`](Self::read_at) using the retained
+    /// path. Parser-backed filesystems should override this to use the
+    /// handle's native stream directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handle is invalid or the requested bytes cannot
+    /// be read.
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        self.read_at(file.path(), offset, buffer)
+    }
+
+    /// Load entries through state retained by an open directory handle.
+    ///
+    /// The default delegates to [`read_dir`](Self::read_dir) using the
+    /// retained path. Successful results are cached by
+    /// [`opened_directory_entries`](Self::opened_directory_entries).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handle is invalid or the directory cannot be
+    /// listed.
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        self.read_dir(directory.path())
+    }
+
+    /// Return the listing cached on an open directory, loading it once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the first listing attempt fails.
+    fn opened_directory_entries<'a>(
+        &mut self,
+        directory: &'a mut OpenedDirectory,
+    ) -> FsResult<&'a [FsEntry]> {
+        if directory.entries.is_none() {
+            let entries = self.load_open_directory(directory)?;
+            directory.entries = Some(entries.into_boxed_slice());
+        }
+        Ok(directory
+            .entries
+            .as_deref()
+            .expect("a successful directory load populates the handle"))
+    }
+
     /// Read the entire contents of a file.
     ///
     /// # Errors
@@ -172,21 +407,6 @@ pub trait TargetFilesystem: Send {
         let count = buffer.len().min(data.len() - start);
         buffer[..count].copy_from_slice(&data[start..start + count]);
         Ok(count)
-    }
-
-    /// Open a file and return a reader.
-    ///
-    /// The default implementation reads the entire file into memory via
-    /// [`read()`](Self::read) and wraps it in a [`Cursor`].  Backends that
-    /// support true streaming should override this.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the path does not exist, is not a file, or
-    /// cannot be opened.
-    fn open(&mut self, path: &str) -> FsResult<Box<dyn Read + Send + '_>> {
-        let data = self.read(path)?;
-        Ok(Box::new(Cursor::new(data)))
     }
 
     /// Check if a path exists (fallible version).

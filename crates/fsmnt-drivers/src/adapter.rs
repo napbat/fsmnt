@@ -37,6 +37,18 @@ impl<T> PathCache<T> {
         }
     }
 
+    /// Removes and returns the cached value when `path` is active.
+    ///
+    /// Open-handle adapters use this to transfer parser state from the
+    /// bounded lookup cache into the lifetime of an OS file handle.
+    pub(crate) fn take(&mut self, path: &str) -> Option<T> {
+        if self.path == path {
+            self.value.take()
+        } else {
+            None
+        }
+    }
+
     /// Replaces the cached entry while retaining reusable path capacity.
     pub(crate) fn insert(&mut self, path: &str, value: T) {
         self.path.clear();
@@ -203,6 +215,9 @@ mod tests {
         *cache.get_mut("/short").expect("cached value") = 11;
         assert_eq!(cache.get("/short"), Some(&11));
         assert_eq!(cache.path.as_ptr(), allocation);
+        assert_eq!(cache.take("/other"), None);
+        assert_eq!(cache.take("/short"), Some(11));
+        assert_eq!(cache.get("/short"), None);
     }
 
     #[test]

@@ -18,6 +18,8 @@ mod cache;
 mod dir;
 mod fscrypt;
 mod salvage;
+#[cfg(test)]
+mod tests;
 
 use std::io;
 
@@ -27,7 +29,10 @@ use fs_ext::{
     Ext, ExtError, ExtFileKind, ExtPositionedFile, ExtTimestamp, JournalReplay, OrphanReplay,
     OverlayReader,
 };
-use fsmnt_core::{FsEntry, FsError, FsMetadata, FsResult, TargetFilesystem};
+use fsmnt_core::{
+    FsEntry, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile, OpenedTarget,
+    TargetFilesystem,
+};
 use fsmnt_device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
     FscryptKeySpec,
@@ -657,6 +662,50 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         f(ext, &mut reader, file)
     }
 
+    /// Runs `f` with a positioned file detached into an open OS handle.
+    fn with_open_file<T>(
+        &mut self,
+        file: &mut ExtPositionedFile,
+        f: impl FnOnce(&Ext, &mut Reader<'_, R>, &mut ExtPositionedFile) -> FsResult<T>,
+    ) -> FsResult<T> {
+        let mut reader = match &self.overlay {
+            Overlay::Clean | Overlay::Unreplayed => Reader::Direct(&mut self.reader),
+            Overlay::Journal(journal) => {
+                Reader::Journal(OverlayReader::new(&mut self.reader, journal))
+            }
+            Overlay::Orphan(orphan) => Reader::Orphan(OverlayReader::new(&mut self.reader, orphan)),
+        };
+        f(&self.ext, &mut reader, file)
+    }
+
+    fn read_target_directory(&mut self, path: &str, target: Target) -> FsResult<Vec<FsEntry>> {
+        let inum = match target {
+            Target::SalvageRoot => {
+                let found = salvage::listing(self.salvaged(), path);
+                return Ok(found);
+            }
+            Target::Root => {
+                let listed =
+                    self.with_reader(|ext, reader| dir::list(ext, reader, EXT4_ROOT_INO, path));
+                if !self.salvage {
+                    return listed;
+                }
+                // Salvage mode is entered precisely because the tree may be
+                // unusable, so an unlistable root is expected rather than
+                // an error — and the salvage directory is what the caller
+                // came for. A real entry of the same name would be shadowed
+                // by path resolution anyway, so it is dropped rather than
+                // listed twice.
+                let mut entries = listed.unwrap_or_default();
+                entries.retain(|entry| entry.name != salvage::SALVAGE_DIR);
+                entries.push(salvage::directory_entry(path));
+                return Ok(entries);
+            }
+            Target::Inode(inum) => inum,
+        };
+        self.with_reader(|ext, reader| dir::list(ext, reader, inum, path))
+    }
+
     /// Which recovery overlay is serving reads: `"clean"`, `"journal"` or
     /// `"orphan"`.
     ///
@@ -674,6 +723,54 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
 }
 
 impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let metadata = self.metadata(path)?;
+        if metadata.is_dir {
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("ext path cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::directory(path, metadata, cached))
+        } else {
+            self.cache_file(path)?;
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("ext file cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::file(path, metadata, cached))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let cached = file
+            .context_mut::<CachedExtTarget>()
+            .ok_or_else(|| FsError::Filesystem("ext received a foreign file handle".to_string()))?;
+        let stream = cached
+            .file
+            .as_mut()
+            .ok_or_else(|| FsError::Filesystem("ext open file has no data stream".to_string()))?;
+        self.with_open_file(stream, |ext, reader, stream| {
+            stream
+                .read_at(ext, reader, offset, buffer)
+                .map_err(|error| map_ext_error(error, &path))
+        })
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let target = directory
+            .context_mut::<CachedExtTarget>()
+            .ok_or_else(|| {
+                FsError::Filesystem("ext received a foreign directory handle".to_string())
+            })?
+            .target;
+        self.read_target_directory(&path, target)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_file(path)?;
         self.with_cached_file(path, |ext, reader, file| {
@@ -766,31 +863,7 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
         let target = self.resolve(path)?;
-        let inum = match target {
-            Target::SalvageRoot => {
-                let found = salvage::listing(self.salvaged(), path);
-                return Ok(found);
-            }
-            Target::Root => {
-                let listed =
-                    self.with_reader(|ext, reader| dir::list(ext, reader, EXT4_ROOT_INO, path));
-                if !self.salvage {
-                    return listed;
-                }
-                // Salvage mode is entered precisely because the tree may be
-                // unusable, so an unlistable root is expected rather than
-                // an error — and the salvage directory is what the caller
-                // came for. A real entry of the same name would be shadowed
-                // by path resolution anyway, so it is dropped rather than
-                // listed twice.
-                let mut entries = listed.unwrap_or_default();
-                entries.retain(|entry| entry.name != salvage::SALVAGE_DIR);
-                entries.push(salvage::directory_entry(path));
-                return Ok(entries);
-            }
-            Target::Inode(inum) => inum,
-        };
-        self.with_reader(|ext, reader| dir::list(ext, reader, inum, path))
+        self.read_target_directory(path, target)
     }
 
     fn total_size(&self) -> Option<u64> {
@@ -869,107 +942,5 @@ impl FilesystemDriver for ExtDriver {
                 reader, replay, salvage, keys,
             )?)),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    #[test]
-    fn driver_supports_only_ext() {
-        crate::test_support::assert_supports_exactly(&ExtDriver, &[DetectedBootSector::Ext]);
-    }
-
-    #[test]
-    fn driver_name_is_stable() {
-        assert_eq!(ExtDriver.name(), "ext");
-    }
-
-    #[test]
-    fn opening_a_non_ext_image_fails() {
-        let reader = Box::new(Cursor::new(vec![0u8; 8192]));
-        assert!(
-            ExtDriver.open(reader, DetectedBootSector::Ext).is_err(),
-            "an all-zero image must not parse as ext"
-        );
-    }
-
-    #[test]
-    fn canonicalise_handles_root_and_empty_paths() {
-        assert!(canonicalise_ext_path("").is_empty());
-        assert!(canonicalise_ext_path("/").is_empty());
-    }
-
-    #[test]
-    fn canonicalise_collapses_separators() {
-        assert_eq!(canonicalise_ext_path("/foo/bar"), ["foo", "bar"]);
-        assert_eq!(canonicalise_ext_path("foo/bar"), ["foo", "bar"]);
-        assert_eq!(canonicalise_ext_path("//foo///bar//"), ["foo", "bar"]);
-    }
-
-    #[test]
-    fn canonicalise_preserves_backslash_and_colon() {
-        // Both are legal filename bytes on ext; the Windows-oriented
-        // normalisation must not be applied here.
-        assert_eq!(canonicalise_ext_path("/a\\b"), ["a\\b"]);
-        assert_eq!(canonicalise_ext_path("/C:literal"), ["C:literal"]);
-        assert_eq!(canonicalise_ext_path("/foo/a:b:c"), ["foo", "a:b:c"]);
-    }
-
-    #[test]
-    fn canonicalise_resolves_dot_and_dotdot() {
-        assert_eq!(canonicalise_ext_path("/./foo"), ["foo"]);
-        assert_eq!(canonicalise_ext_path("/foo/./bar"), ["foo", "bar"]);
-        assert_eq!(canonicalise_ext_path("/foo/../bar"), ["bar"]);
-        assert_eq!(canonicalise_ext_path("/foo/bar/.."), ["foo"]);
-        // `..` beyond the root is clamped rather than escaping it.
-        assert_eq!(canonicalise_ext_path("/../../foo"), ["foo"]);
-    }
-
-    #[test]
-    fn timestamp_zero_is_the_unix_epoch_not_unset() {
-        let dt = ts_to_utc(ExtTimestamp {
-            seconds: 0,
-            nanoseconds: 0,
-        })
-        .expect("epoch is a valid ext timestamp");
-        assert_eq!(dt.timestamp(), 0);
-    }
-
-    #[test]
-    fn timestamp_out_of_range_maps_to_none() {
-        assert!(
-            ts_to_utc(ExtTimestamp {
-                seconds: 0,
-                nanoseconds: 2_000_000_000,
-            })
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn error_mapping_preserves_semantic_variants() {
-        assert!(matches!(
-            map_ext_error(ExtError::NotFound, "/foo"),
-            FsError::NotFound(p) if p == "/foo"
-        ));
-        assert!(matches!(
-            map_ext_error(ExtError::NotADirectory { inode: 42 }, "/foo"),
-            FsError::NotADirectory(_)
-        ));
-        assert!(matches!(
-            map_ext_error(ExtError::IsADirectory { inode: 7 }, "/foo"),
-            FsError::NotAFile(_)
-        ));
-        assert!(matches!(
-            map_ext_error(ExtError::EncryptedInode { inode: 123 }, "/foo"),
-            FsError::Filesystem(msg) if msg.contains("123") && msg.contains("encrypted")
-        ));
-        assert!(matches!(
-            map_ext_error(ExtError::JournalExpectedButAbsent, "<open>"),
-            FsError::Filesystem(msg) if msg.contains("no journal is available")
-        ));
     }
 }

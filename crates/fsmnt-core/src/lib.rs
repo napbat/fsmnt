@@ -13,7 +13,8 @@ mod namespace;
 
 pub use dir_fs::DirFilesystem;
 pub use filesystem::{
-    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem, normalize_path,
 };
 pub use filter::filter_entries;
 pub use fstab::{Fstab, FstabEntry, FstabParseError, FstabSource};

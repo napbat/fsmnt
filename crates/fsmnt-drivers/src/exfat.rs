@@ -16,7 +16,8 @@ use fs_exfat::{
     ExFat, ExFatDirItem, ExFatEntrySet, ExFatError, ExFatFile, ExFatFileAttributes, ExFatTimestamp,
 };
 use fsmnt_core::{
-    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
@@ -230,9 +231,86 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
             .metadata = Some(metadata.clone());
         Ok(metadata)
     }
+
+    fn read_cluster_directory(&mut self, path: &str, cluster: u32) -> FsResult<Vec<FsEntry>> {
+        let parent = PathBuf::from(path);
+
+        let mut entries = Vec::new();
+        let mut iter = self.exfat.dir_entries(cluster);
+        while let Some(item) = iter.next(&mut self.reader) {
+            // Volume labels, benign and deleted entries are filtered by the
+            // iterator's default options; only file entry sets arrive here.
+            let ExFatDirItem::FileEntry(entry) = item.map_err(|e| map_exfat_error(e, path))? else {
+                continue;
+            };
+            let name = entry.name_string();
+            let first_cluster = entry.first_cluster();
+            entries.push(FsEntry {
+                path: parent.join(&name),
+                name,
+                flags: FsEntryFlags::empty(),
+                // Cluster 0 means "no allocation yet" (an empty file), so
+                // it identifies nothing.
+                file_id: (first_cluster != 0).then(|| u64::from(first_cluster)),
+                metadata: metadata_of(&entry),
+            });
+        }
+        Ok(entries)
+    }
 }
 
 impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let metadata = self.metadata_at(path)?;
+        if metadata.is_dir {
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("exFAT path cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::directory(path, metadata, cached))
+        } else {
+            self.cache_file(path)?;
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("exFAT file cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::file(path, metadata, cached))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let cached = file.context_mut::<CachedExFatTarget>().ok_or_else(|| {
+            FsError::Filesystem("exFAT received a foreign file handle".to_string())
+        })?;
+        let stream = cached
+            .file
+            .as_mut()
+            .ok_or_else(|| FsError::Filesystem("exFAT open file has no data stream".to_string()))?;
+        read_at_through(stream, &mut self.reader, offset, buffer, |error| {
+            map_exfat_error(error, &path)
+        })
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let cluster = match directory
+            .context_mut::<CachedExFatTarget>()
+            .ok_or_else(|| {
+                FsError::Filesystem("exFAT received a foreign directory handle".to_string())
+            })?
+            .entry
+            .as_ref()
+        {
+            None => self.exfat.root_directory_cluster(),
+            Some(entry) => entry.first_cluster(),
+        };
+        self.read_cluster_directory(&path, cluster)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_file(path)?;
         let file = self
@@ -296,29 +374,7 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
         let cluster = self.directory_cluster(path)?;
-        let parent = PathBuf::from(path);
-
-        let mut entries = Vec::new();
-        let mut iter = self.exfat.dir_entries(cluster);
-        while let Some(item) = iter.next(&mut self.reader) {
-            // Volume labels, benign and deleted entries are filtered by the
-            // iterator's default options; only file entry sets arrive here.
-            let ExFatDirItem::FileEntry(entry) = item.map_err(|e| map_exfat_error(e, path))? else {
-                continue;
-            };
-            let name = entry.name_string();
-            let first_cluster = entry.first_cluster();
-            entries.push(FsEntry {
-                path: parent.join(&name),
-                name,
-                flags: FsEntryFlags::empty(),
-                // Cluster 0 means "no allocation yet" (an empty file), so
-                // it identifies nothing.
-                file_id: (first_cluster != 0).then(|| u64::from(first_cluster)),
-                metadata: metadata_of(&entry),
-            });
-        }
-        Ok(entries)
+        self.read_cluster_directory(path, cluster)
     }
 
     fn total_size(&self) -> Option<u64> {
@@ -521,6 +577,31 @@ mod tests {
         assert!(opening.read_calls() > cached.read_calls());
         assert_eq!(cached.read_calls(), 1, "only the requested data is read");
         assert_eq!(cached.seek_calls(), 1, "only the data seek remains");
+    }
+
+    #[test]
+    fn open_handles_keep_their_own_positioned_streams() {
+        let mut fs = ExFatFilesystem::new(Cursor::new(image::build()))
+            .expect("synthetic exFAT volume must open");
+        let mut first = fs
+            .open("/hello.txt")
+            .expect("first open")
+            .into_file()
+            .expect("regular file");
+        let mut second = fs
+            .open("/hello.txt")
+            .expect("second open")
+            .into_file()
+            .expect("regular file");
+
+        let mut tail = [0_u8; 5];
+        let mut head = [0_u8; 5];
+        fs.read_open_file(&mut second, 5, &mut tail)
+            .expect("second handle read");
+        fs.read_open_file(&mut first, 0, &mut head)
+            .expect("first handle read");
+        assert_eq!(&tail, b", exF");
+        assert_eq!(&head, b"Hello");
     }
 
     #[test]

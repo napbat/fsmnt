@@ -478,16 +478,14 @@ impl Filesystem for FuseFs {
             return;
         };
 
-        let visible = filter_entries(&entries);
-
-        let mut all: Vec<(String, u64, FileType)> = Vec::with_capacity(visible.len() + 2);
+        let mut all: Vec<(String, u64, FileType)> = Vec::with_capacity(entries.len() + 2);
         all.push((".".into(), i.0, FileType::Directory));
         all.push((
             "..".into(),
             if i.0 == ROOT_INO { ROOT_INO } else { i.0 },
             FileType::Directory,
         ));
-        for e in &visible {
+        for e in filter_entries(&entries) {
             let ci = g.inodes.lookup_or_insert(i.0, &e.name);
             let kind = if e.metadata.is_dir {
                 FileType::Directory

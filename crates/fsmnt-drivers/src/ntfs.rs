@@ -13,7 +13,8 @@ use fs_ntfs::indexes::NtfsFileNameIndex;
 use fs_ntfs::structured_values::NtfsFileAttributeFlags;
 use fs_ntfs::{Ntfs, NtfsTime};
 use fsmnt_core::{
-    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use tracing::debug;
@@ -223,9 +224,117 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
         cached.data = Some(data);
         Ok(())
     }
+
+    fn read_record_directory(&mut self, path: &str, record: u64) -> FsResult<Vec<FsEntry>> {
+        let dir = self
+            .ntfs
+            .file(&mut self.reader, record)
+            .map_err(|e| FsError::Filesystem(format!("failed to get directory: {e}")))?;
+
+        if !dir.is_directory() {
+            return Err(FsError::NotADirectory(path.to_string()));
+        }
+
+        let index = dir
+            .directory_index(&mut self.reader)
+            .map_err(|e| FsError::Filesystem(format!("failed to get directory index: {e}")))?;
+
+        let mut entries = Vec::new();
+        let mut iter = index.entries();
+
+        while let Some(entry) = iter
+            .try_next(&mut self.reader)
+            .map_err(|e| FsError::Filesystem(format!("failed to read entry: {e}")))?
+        {
+            let Some(Ok(file_name)) = entry.key() else {
+                continue;
+            };
+            let name = file_name.name().to_string_lossy();
+
+            // NTFS indexes normally hold neither, but a carved or damaged
+            // index can, and they must never escape into a listing.
+            if name == "." || name == ".." {
+                continue;
+            }
+
+            let file_ref = entry.file_reference();
+            let mut flags = FsEntryFlags::empty();
+            if file_name.namespace() == fs_ntfs::NtfsFileNamespace::Dos {
+                flags |= FsEntryFlags::SHORT_NAME;
+            }
+            if file_ref.is_system_metafile() {
+                flags |= FsEntryFlags::SYSTEM_FILE;
+            }
+
+            let file_attrs = file_name.file_attributes();
+
+            entries.push(FsEntry {
+                path: PathBuf::from(path).join(&name),
+                name,
+                flags,
+                file_id: Some(file_ref.file_record_number()),
+                metadata: FsMetadata {
+                    size: file_name.data_size(),
+                    is_dir: file_name.is_directory(),
+                    created: ntfs_time_to_datetime(file_name.creation_time()),
+                    modified: ntfs_time_to_datetime(file_name.modification_time()),
+                    accessed: ntfs_time_to_datetime(file_name.access_time()),
+                    readonly: file_attrs.contains(NtfsFileAttributeFlags::READ_ONLY),
+                    hidden: file_attrs.contains(NtfsFileAttributeFlags::HIDDEN),
+                    system: file_attrs.contains(NtfsFileAttributeFlags::SYSTEM),
+                },
+            });
+        }
+
+        Ok(entries)
+    }
 }
 
 impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let metadata = self.metadata(path)?;
+        if metadata.is_dir {
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("NTFS path cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::directory(path, metadata, cached))
+        } else {
+            self.cache_data(path)?;
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("NTFS data cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::file(path, metadata, cached))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let cached = file.context_mut::<CachedNtfsRecord>().ok_or_else(|| {
+            FsError::Filesystem("NTFS received a foreign file handle".to_string())
+        })?;
+        let data = cached
+            .data
+            .as_mut()
+            .ok_or_else(|| FsError::Filesystem("NTFS open file has no data stream".to_string()))?;
+        data.read_at(&mut self.reader, offset, buffer)
+            .map_err(|error| FsError::Io(io::Error::other(error.to_string())))
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let record = directory
+            .context_mut::<CachedNtfsRecord>()
+            .ok_or_else(|| {
+                FsError::Filesystem("NTFS received a foreign directory handle".to_string())
+            })?
+            .record_number;
+        self.read_record_directory(&path, record)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_data(path)?;
         let Self {
@@ -348,68 +457,7 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
         let record = self.navigate_to_record(path)?;
-
-        let dir = self
-            .ntfs
-            .file(&mut self.reader, record)
-            .map_err(|e| FsError::Filesystem(format!("failed to get directory: {e}")))?;
-
-        if !dir.is_directory() {
-            return Err(FsError::NotADirectory(path.to_string()));
-        }
-
-        let index = dir
-            .directory_index(&mut self.reader)
-            .map_err(|e| FsError::Filesystem(format!("failed to get directory index: {e}")))?;
-
-        let mut entries = Vec::new();
-        let mut iter = index.entries();
-
-        while let Some(entry) = iter
-            .try_next(&mut self.reader)
-            .map_err(|e| FsError::Filesystem(format!("failed to read entry: {e}")))?
-        {
-            let Some(Ok(file_name)) = entry.key() else {
-                continue;
-            };
-            let name = file_name.name().to_string_lossy();
-
-            // NTFS indexes normally hold neither, but a carved or damaged
-            // index can, and they must never escape into a listing.
-            if name == "." || name == ".." {
-                continue;
-            }
-
-            let file_ref = entry.file_reference();
-            let mut flags = FsEntryFlags::empty();
-            if file_name.namespace() == fs_ntfs::NtfsFileNamespace::Dos {
-                flags |= FsEntryFlags::SHORT_NAME;
-            }
-            if file_ref.is_system_metafile() {
-                flags |= FsEntryFlags::SYSTEM_FILE;
-            }
-
-            let file_attrs = file_name.file_attributes();
-
-            entries.push(FsEntry {
-                path: PathBuf::from(path).join(&name),
-                name,
-                flags,
-                file_id: Some(file_ref.file_record_number()),
-                metadata: FsMetadata {
-                    size: file_name.data_size(),
-                    is_dir: file_name.is_directory(),
-                    created: ntfs_time_to_datetime(file_name.creation_time()),
-                    modified: ntfs_time_to_datetime(file_name.modification_time()),
-                    accessed: ntfs_time_to_datetime(file_name.access_time()),
-                    readonly: file_attrs.contains(NtfsFileAttributeFlags::READ_ONLY),
-                    hidden: file_attrs.contains(NtfsFileAttributeFlags::HIDDEN),
-                    system: file_attrs.contains(NtfsFileAttributeFlags::SYSTEM),
-                },
-            });
-        }
-
-        Ok(entries)
+        self.read_record_directory(path, record)
     }
 
     fn total_size(&self) -> Option<u64> {

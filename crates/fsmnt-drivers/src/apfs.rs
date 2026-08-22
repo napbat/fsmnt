@@ -17,7 +17,10 @@ use fs_apfs::{
     Apfs, ApfsError, ApfsSuperblock, ApfsTimestamp, DataStream, DirEntry, DirEntryType,
     ExtendedFields, File, FileType, Inode, Volume, VolumeRole, Xattr,
 };
-use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
+use fsmnt_core::{
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem,
+};
 use fsmnt_device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
     reject_unsupported_recovery,
@@ -403,9 +406,69 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
             metadata,
         }
     }
+
+    fn read_object_directory(&mut self, path: &str, obj_id: u64) -> FsResult<Vec<FsEntry>> {
+        let raw = self
+            .volume
+            .read_dir(&mut self.reader, obj_id)
+            .map_err(|e| map_apfs_error(e, path))?;
+        let parent = PathBuf::from(path);
+
+        let mut entries = Vec::with_capacity(raw.len());
+        for entry in raw {
+            entries.push(self.entry_to_fs_entry(&parent, entry));
+        }
+        Ok(entries)
+    }
 }
 
 impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let metadata = self.metadata_at(path)?;
+        if metadata.is_dir {
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("APFS path cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::directory(path, metadata, cached))
+        } else {
+            self.cache_regular_file(path)?;
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("APFS file cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::file(path, metadata, cached))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let cached = file.context_mut::<CachedApfsTarget>().ok_or_else(|| {
+            FsError::Filesystem("APFS received a foreign file handle".to_string())
+        })?;
+        let stream = cached
+            .file
+            .as_ref()
+            .ok_or_else(|| FsError::Filesystem("APFS open file has no data stream".to_string()))?;
+        stream
+            .read_at(&mut self.reader, self.block_size, offset, buffer)
+            .map_err(|error| map_apfs_error(error, &path))
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let obj_id = directory
+            .context_mut::<CachedApfsTarget>()
+            .ok_or_else(|| {
+                FsError::Filesystem("APFS received a foreign directory handle".to_string())
+            })?
+            .obj_id;
+        self.read_object_directory(&path, obj_id)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_regular_file(path)?;
         self.resolved
@@ -468,17 +531,7 @@ impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
             return Err(FsError::NotADirectory(path.to_string()));
         }
         let obj_id = cached.obj_id;
-        let raw = self
-            .volume
-            .read_dir(&mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?;
-        let parent = PathBuf::from(path);
-
-        let mut entries = Vec::with_capacity(raw.len());
-        for entry in raw {
-            entries.push(self.entry_to_fs_entry(&parent, entry));
-        }
-        Ok(entries)
+        self.read_object_directory(path, obj_id)
     }
 
     fn total_size(&self) -> Option<u64> {

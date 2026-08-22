@@ -9,7 +9,10 @@ use fs_btrfs::{
     BtrfsInode, BtrfsTimestamp, BtrfsZone, BtrfsZoneCondition, BtrfsZoneType, BtrfsZonedDevice,
     ZONED_SUPERBLOCK_LOG_OFFSETS, probe_zoned_superblock,
 };
-use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
+use fsmnt_core::{
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem,
+};
 use fsmnt_device::{
     BlockZone, BlockZoneCondition, BlockZoneType, DetectedBootSector, DeviceMember, DeviceReader,
     DeviceSet, FilesystemDriver, FilesystemMemberDiscovery, FilesystemMemberId,
@@ -425,9 +428,77 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
             metadata: metadata_of(&inode),
         })
     }
+
+    fn read_directory_entry(
+        &mut self,
+        path: &str,
+        directory: BtrfsEntry,
+    ) -> FsResult<Vec<FsEntry>> {
+        let raw_entries = self
+            .volume
+            .read_dir(directory)
+            .map_err(|error| map_btrfs_error(error, path))?;
+        let normalized = canonicalise_btrfs_path(path).join("/");
+        let parent = if normalized.is_empty() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(normalized)
+        };
+        raw_entries
+            .into_iter()
+            .map(|entry| self.directory_entry(&parent, entry, path))
+            .collect()
+    }
 }
 
 impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek + Send> TargetFilesystem for BtrfsFilesystem<R> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let inode = self.inode_at(path)?;
+        let metadata = metadata_of(&inode);
+        if metadata.is_dir {
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("Btrfs path cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::directory(path, metadata, cached))
+        } else {
+            self.cache_file(path)?;
+            let cached = self.resolved.take(path).ok_or_else(|| {
+                FsError::Filesystem("Btrfs file cache was not populated".to_string())
+            })?;
+            Ok(OpenedTarget::file(path, metadata, cached))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let cached = file.context_mut::<CachedBtrfsTarget>().ok_or_else(|| {
+            FsError::Filesystem("Btrfs received a foreign file handle".to_string())
+        })?;
+        let stream = cached
+            .file
+            .as_mut()
+            .ok_or_else(|| FsError::Filesystem("Btrfs open file has no data stream".to_string()))?;
+        stream
+            .read_at(&mut self.volume, offset, buffer)
+            .map_err(|error| map_btrfs_error(error, &path))
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let entry = directory
+            .context_mut::<CachedBtrfsTarget>()
+            .ok_or_else(|| {
+                FsError::Filesystem("Btrfs received a foreign directory handle".to_string())
+            })?
+            .entry;
+        self.read_directory_entry(&path, entry)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_file(path)?;
         let file = self
@@ -481,20 +552,7 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek + Send> TargetFilesystem for Btr
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
         let directory = self.resolve(path)?;
-        let raw_entries = self
-            .volume
-            .read_dir(directory)
-            .map_err(|error| map_btrfs_error(error, path))?;
-        let normalized = canonicalise_btrfs_path(path).join("/");
-        let parent = if normalized.is_empty() {
-            PathBuf::from("/")
-        } else {
-            PathBuf::from(normalized)
-        };
-        raw_entries
-            .into_iter()
-            .map(|entry| self.directory_entry(&parent, entry, path))
-            .collect()
+        self.read_directory_entry(path, directory)
     }
 
     fn total_size(&self) -> Option<u64> {
@@ -741,6 +799,39 @@ mod tests {
         assert!(opening.read_calls() > cached.read_calls());
         assert_eq!(cached.read_calls(), 0, "the inline extent stays detached");
         assert_eq!(cached.seek_calls(), 0, "the tree is not walked again");
+    }
+
+    #[test]
+    fn open_handles_keep_independent_extent_state() {
+        let Some(image) = read_optional_fixture(
+            env!("CARGO_MANIFEST_DIR"),
+            "../formats/fs-btrfs/testdata/btrfs-basic.img",
+        ) else {
+            return;
+        };
+        let mut filesystem =
+            BtrfsFilesystem::new(Cursor::new(image)).expect("tracked Btrfs fixture must open");
+        let mut first = filesystem
+            .open("hello.txt")
+            .expect("first open")
+            .into_file()
+            .expect("regular file");
+        let mut second = filesystem
+            .open("hello.txt")
+            .expect("second open")
+            .into_file()
+            .expect("regular file");
+
+        let mut later = [0_u8; 5];
+        let mut earlier = [0_u8; 5];
+        filesystem
+            .read_open_file(&mut second, 5, &mut later)
+            .expect("second handle read");
+        filesystem
+            .read_open_file(&mut first, 0, &mut earlier)
+            .expect("first handle read");
+        assert_eq!(&later, b" from");
+        assert_eq!(&earlier, b"hello");
     }
 
     #[test]

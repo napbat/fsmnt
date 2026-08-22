@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use fs_qnx6::{Qnx6, Qnx6Error, Qnx6Inode};
 use fsmnt_core::{
-    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem, normalize_path,
 };
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::{Read, Seek};
@@ -122,9 +123,86 @@ impl<R: Read + Seek> Qnx6Filesystem<R> {
         self.resolved.insert(path, inode.clone());
         Ok(inode)
     }
+
+    fn read_inode_directory(
+        &mut self,
+        path: &str,
+        directory: &Qnx6Inode,
+    ) -> FsResult<Vec<FsEntry>> {
+        let raw_entries = self
+            .volume
+            .read_directory(directory)
+            .map_err(|error| map_qnx6_error(error, path))?;
+        let normalized = normalize_path(path);
+        let parent = if normalized.is_empty() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from("/").join(normalized.as_ref())
+        };
+
+        let mut entries = Vec::new();
+        entries
+            .try_reserve(raw_entries.len())
+            .map_err(|_| FsError::Filesystem("could not allocate QNX6 directory listing".into()))?;
+        for raw in raw_entries {
+            if matches!(raw.name(), b"." | b"..") {
+                continue;
+            }
+            let inode_number = raw.inode();
+            let inode = self
+                .volume
+                .inode(inode_number)
+                .map_err(|error| map_qnx6_error(error, path))?;
+            let name = string_from_bytes(raw.into_name());
+            entries.push(FsEntry {
+                path: parent.join(&name),
+                name,
+                flags: entry_flags(&inode),
+                file_id: Some(u64::from(inode.number())),
+                metadata: metadata_of(&inode),
+            });
+        }
+        Ok(entries)
+    }
 }
 
 impl<R: Read + Seek + Send> TargetFilesystem for Qnx6Filesystem<R> {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let inode = self.resolve(path)?;
+        let metadata = metadata_of(&inode);
+        if metadata.is_dir {
+            Ok(OpenedTarget::directory(path, metadata, inode))
+        } else {
+            Ok(OpenedTarget::file(path, metadata, inode))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let inode = file.context_mut::<Qnx6Inode>().ok_or_else(|| {
+            FsError::Filesystem("QNX6 received a foreign file handle".to_string())
+        })?;
+        self.volume
+            .read_file_range(inode, offset, buffer)
+            .map_err(|error| map_qnx6_error(error, &path))
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let inode = directory
+            .context_mut::<Qnx6Inode>()
+            .ok_or_else(|| {
+                FsError::Filesystem("QNX6 received a foreign directory handle".to_string())
+            })?
+            .clone();
+        self.read_inode_directory(&path, &inode)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         let inode = self.resolve(path)?;
         self.volume
@@ -159,40 +237,7 @@ impl<R: Read + Seek + Send> TargetFilesystem for Qnx6Filesystem<R> {
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
         let directory = self.resolve(path)?;
-        let raw_entries = self
-            .volume
-            .read_directory(&directory)
-            .map_err(|error| map_qnx6_error(error, path))?;
-        let normalized = normalize_path(path);
-        let parent = if normalized.is_empty() {
-            PathBuf::from("/")
-        } else {
-            PathBuf::from("/").join(normalized.as_ref())
-        };
-
-        let mut entries = Vec::new();
-        entries
-            .try_reserve(raw_entries.len())
-            .map_err(|_| FsError::Filesystem("could not allocate QNX6 directory listing".into()))?;
-        for raw in raw_entries {
-            if matches!(raw.name(), b"." | b"..") {
-                continue;
-            }
-            let inode_number = raw.inode();
-            let inode = self
-                .volume
-                .inode(inode_number)
-                .map_err(|error| map_qnx6_error(error, path))?;
-            let name = string_from_bytes(raw.into_name());
-            entries.push(FsEntry {
-                path: parent.join(&name),
-                name,
-                flags: entry_flags(&inode),
-                file_id: Some(u64::from(inode.number())),
-                metadata: metadata_of(&inode),
-            });
-        }
-        Ok(entries)
+        self.read_inode_directory(path, &directory)
     }
 
     fn total_size(&self) -> Option<u64> {

@@ -12,7 +12,10 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
-use crate::filesystem::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
+use crate::filesystem::{
+    FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedDirectory, OpenedFile,
+    OpenedTarget, TargetFilesystem,
+};
 
 /// Convert [`SystemTime`] to `DateTime<Utc>`.
 fn system_time_to_datetime(st: SystemTime) -> DateTime<Utc> {
@@ -88,6 +91,46 @@ impl DirFilesystem {
 }
 
 impl TargetFilesystem for DirFilesystem {
+    fn open(&mut self, path: &str) -> FsResult<OpenedTarget> {
+        let resolved = self.resolve(path)?;
+        let metadata = std::fs::metadata(&resolved).map_err(|e| io_error(path, e))?;
+        let target_metadata = metadata_from_std(&metadata);
+        if metadata.is_dir() {
+            Ok(OpenedTarget::directory(path, target_metadata, resolved))
+        } else if metadata.is_file() {
+            let file = std::fs::File::open(&resolved).map_err(|e| io_error(path, e))?;
+            Ok(OpenedTarget::file(path, target_metadata, file))
+        } else {
+            Err(FsError::NotAFile(path.to_string()))
+        }
+    }
+
+    fn read_open_file(
+        &mut self,
+        file: &mut OpenedFile,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> FsResult<usize> {
+        let path = file.path().to_string();
+        let native = file.context_mut::<std::fs::File>().ok_or_else(|| {
+            FsError::Filesystem("directory filesystem received a foreign file handle".to_string())
+        })?;
+        native
+            .seek(SeekFrom::Start(offset))
+            .map_err(|e| io_error(&path, e))?;
+        native.read(buffer).map_err(|e| io_error(&path, e))
+    }
+
+    fn load_open_directory(&mut self, directory: &mut OpenedDirectory) -> FsResult<Vec<FsEntry>> {
+        let path = directory.path().to_string();
+        let resolved = directory.context_mut::<PathBuf>().ok_or_else(|| {
+            FsError::Filesystem(
+                "directory filesystem received a foreign directory handle".to_string(),
+            )
+        })?;
+        read_host_directory(resolved, &path)
+    }
+
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         let resolved = self.resolve(path)?;
         std::fs::read(&resolved).map_err(|e| io_error(path, e))
@@ -99,12 +142,6 @@ impl TargetFilesystem for DirFilesystem {
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| io_error(path, e))?;
         file.read(buffer).map_err(|e| io_error(path, e))
-    }
-
-    fn open(&mut self, path: &str) -> FsResult<Box<dyn Read + Send + '_>> {
-        let resolved = self.resolve(path)?;
-        let file = std::fs::File::open(&resolved).map_err(|e| io_error(path, e))?;
-        Ok(Box::new(file))
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
@@ -138,22 +175,26 @@ impl TargetFilesystem for DirFilesystem {
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
         let resolved = self.resolve(path)?;
-        let entries = std::fs::read_dir(&resolved).map_err(|e| io_error(path, e))?;
-
-        let mut result = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(FsError::Io)?;
-            let meta = entry.metadata().map_err(FsError::Io)?;
-            result.push(FsEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
-                path: entry.path(),
-                flags: FsEntryFlags::empty(),
-                file_id: None,
-                metadata: metadata_from_std(&meta),
-            });
-        }
-        Ok(result)
+        read_host_directory(&resolved, path)
     }
+}
+
+fn read_host_directory(resolved: &Path, path: &str) -> FsResult<Vec<FsEntry>> {
+    let entries = std::fs::read_dir(resolved).map_err(|e| io_error(path, e))?;
+
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(FsError::Io)?;
+        let meta = entry.metadata().map_err(FsError::Io)?;
+        result.push(FsEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path: entry.path(),
+            flags: FsEntryFlags::empty(),
+            file_id: None,
+            metadata: metadata_from_std(&meta),
+        });
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -189,6 +230,55 @@ mod tests {
                 .expect("read past end"),
             0
         );
+    }
+
+    #[test]
+    fn open_files_keep_independent_native_handles() {
+        let (_dir, mut fs) = fixture();
+        let mut first = fs
+            .open("hello.txt")
+            .expect("open first")
+            .into_file()
+            .expect("regular file");
+        let mut second = fs
+            .open("sub/nested.txt")
+            .expect("open second")
+            .into_file()
+            .expect("regular file");
+
+        let mut first_buffer = [0_u8; 5];
+        let mut second_buffer = [0_u8; 4];
+        assert_eq!(
+            fs.read_open_file(&mut second, 2, &mut second_buffer)
+                .expect("read second"),
+            4
+        );
+        assert_eq!(
+            fs.read_open_file(&mut first, 0, &mut first_buffer)
+                .expect("read first"),
+            5
+        );
+        assert_eq!(&second_buffer, b"sted");
+        assert_eq!(&first_buffer, b"hello");
+    }
+
+    #[test]
+    fn open_directories_cache_successful_listings() {
+        let (_dir, mut fs) = fixture();
+        let mut directory = fs
+            .open("")
+            .expect("open root")
+            .into_directory()
+            .expect("directory");
+        let first = fs
+            .opened_directory_entries(&mut directory)
+            .expect("first listing")
+            .as_ptr();
+        let second = fs
+            .opened_directory_entries(&mut directory)
+            .expect("cached listing")
+            .as_ptr();
+        assert_eq!(first, second);
     }
 
     #[test]
