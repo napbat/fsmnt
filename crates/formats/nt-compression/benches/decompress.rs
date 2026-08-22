@@ -5,6 +5,9 @@ mod bench_data;
 use bench_data::{mixed, random_ish, zeros};
 use divan::counter::BytesCount;
 
+#[global_allocator]
+static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
+
 fn main() {
     divan::main();
 }

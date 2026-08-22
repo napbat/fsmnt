@@ -5,7 +5,9 @@
 
 use alloc::vec::Vec;
 
-use crate::huffman::{assign_canonical_codes, build_code_lengths, count_per_length};
+use crate::huffman::{
+    HuffmanWorkspace, assign_canonical_codes_into, build_code_lengths_into, count_per_length,
+};
 use crate::lz77::{MatchFinder, Token};
 use crate::{Error, Result};
 
@@ -25,8 +27,28 @@ pub fn compress_bound(input_len: usize) -> usize {
 /// allocated once and reused across multiple `compress()` calls.
 pub struct Compressor {
     finder: MatchFinder,
+    block: BlockWorkspace,
+}
+
+/// Buffers whose contents are rebuilt for each 64 KiB block.
+struct BlockWorkspace {
     symbols: Vec<SymbolEntry>,
     stream: Vec<u8>,
+    lengths: Vec<u8>,
+    codes: Vec<(u32, u8)>,
+    huffman: HuffmanWorkspace,
+}
+
+impl BlockWorkspace {
+    fn new() -> Self {
+        Self {
+            symbols: Vec::with_capacity(65536),
+            stream: Vec::with_capacity(65536),
+            lengths: Vec::with_capacity(NUM_SYMBOLS),
+            codes: Vec::with_capacity(NUM_SYMBOLS),
+            huffman: HuffmanWorkspace::new(),
+        }
+    }
 }
 
 impl Compressor {
@@ -35,8 +57,7 @@ impl Compressor {
     pub fn new() -> Self {
         Self {
             finder: MatchFinder::standard(65535, 65535, 32),
-            symbols: Vec::with_capacity(65536),
-            stream: Vec::with_capacity(65536),
+            block: BlockWorkspace::new(),
         }
     }
 
@@ -63,8 +84,7 @@ impl Compressor {
                 block_data,
                 &mut output[out_pos..],
                 &mut self.finder,
-                &mut self.symbols,
-                &mut self.stream,
+                &mut self.block,
             )?;
             out_pos += written;
             in_pos = block_end;
@@ -189,19 +209,20 @@ fn compress_block(
     block: &[u8],
     output: &mut [u8],
     finder: &mut MatchFinder,
-    symbols: &mut Vec<SymbolEntry>,
-    stream: &mut Vec<u8>,
+    workspace: &mut BlockWorkspace,
 ) -> Result<usize> {
-    let freqs = tokenize_block(block, finder, symbols);
+    let freqs = tokenize_block(block, finder, &mut workspace.symbols);
 
     // Step 3: Build Huffman code lengths.
-    let lengths = build_code_lengths(
+    build_code_lengths_into(
         &freqs,
         u8::try_from(MAX_CODE_BITS).expect("XPRESS Huffman codes are capped at 15 bits"),
+        &mut workspace.lengths,
+        &mut workspace.huffman,
     );
 
     // Ensure at least one symbol has a non-zero length for valid table.
-    if lengths.iter().all(|l| *l == 0) {
+    if workspace.lengths.iter().all(|l| *l == 0) {
         // Edge case: no symbols (shouldn't happen with non-empty block).
         return Err(Error::InvalidData {
             offset: 0,
@@ -216,7 +237,7 @@ fn compress_block(
             actual: output.len(),
         });
     }
-    build_header(&lengths, &mut output[..HEADER_SIZE]);
+    build_header(&workspace.lengths, &mut output[..HEADER_SIZE]);
 
     // Step 5: Encode symbols using a deficit-based 3-pointer scheme
     // that matches RTL's XpressDoHuffmanPass output format.
@@ -229,24 +250,24 @@ fn compress_block(
     // Bitstream words are written to ptr0 (a past position), while
     // interleaved bytes go at write_cursor. This produces the exact
     // byte ordering the deficit-based decompressor expects.
-    let counts = count_per_length(&lengths);
-    let codes = assign_canonical_codes(&lengths, &counts);
+    let counts = count_per_length(&workspace.lengths);
+    assign_canonical_codes_into(&workspace.lengths, &counts, &mut workspace.codes);
 
     // Reuse the caller-provided stream buffer for the bitstream.
-    stream.clear();
+    workspace.stream.clear();
     // Reserve initial 4 bytes (2 words) for the first two fills.
-    stream.extend_from_slice(&[0, 0, 0, 0]);
+    workspace.stream.extend_from_slice(&[0, 0, 0, 0]);
     let mut ptr0: usize = 0; // oldest word slot
     let mut ptr1: usize = 2; // middle word slot
     let mut accum: u16 = 0;
     let mut extra_bits: i32 = 16;
 
-    for sym_entry in symbols.iter() {
-        let (code, len) = codes[sym_entry.symbol as usize];
+    for sym_entry in &workspace.symbols {
+        let (code, len) = workspace.codes[sym_entry.symbol as usize];
 
         // MS-XCA order: Huffman code → length extensions → distance extra bits.
         encode_bits(
-            stream,
+            &mut workspace.stream,
             &mut ptr0,
             &mut ptr1,
             &mut accum,
@@ -259,23 +280,23 @@ fn compress_block(
         match sym_entry.length_ext {
             LengthExt::None => {}
             LengthExt::Byte(val) => {
-                stream.push(val);
+                workspace.stream.push(val);
             }
             LengthExt::ByteAndU16(byte_val, u16_val) => {
-                stream.push(byte_val);
-                stream.extend_from_slice(&u16_val.to_le_bytes());
+                workspace.stream.push(byte_val);
+                workspace.stream.extend_from_slice(&u16_val.to_le_bytes());
             }
             LengthExt::ByteU16AndU32(byte_val, u16_val, large) => {
-                stream.push(byte_val);
-                stream.extend_from_slice(&u16_val.to_le_bytes());
-                stream.extend_from_slice(&large.to_le_bytes());
+                workspace.stream.push(byte_val);
+                workspace.stream.extend_from_slice(&u16_val.to_le_bytes());
+                workspace.stream.extend_from_slice(&large.to_le_bytes());
             }
         }
 
         // Distance extra bits through the accumulator.
         if sym_entry.distance_extra_count > 0 {
             encode_bits(
-                stream,
+                &mut workspace.stream,
                 &mut ptr0,
                 &mut ptr1,
                 &mut accum,
@@ -290,19 +311,19 @@ fn compress_block(
     let final_word =
         accum << u32::try_from(extra_bits).expect("the final bit budget is nonnegative");
     let le = final_word.to_le_bytes();
-    stream[ptr0] = le[0];
-    stream[ptr0 + 1] = le[1];
-    stream[ptr1] = 0;
-    stream[ptr1 + 1] = 0;
+    workspace.stream[ptr0] = le[0];
+    workspace.stream[ptr0 + 1] = le[1];
+    workspace.stream[ptr1] = 0;
+    workspace.stream[ptr1 + 1] = 0;
 
-    let total = HEADER_SIZE + stream.len();
+    let total = HEADER_SIZE + workspace.stream.len();
     if total > output.len() {
         return Err(Error::OutputTooSmall {
             expected: total,
             actual: output.len(),
         });
     }
-    output[HEADER_SIZE..HEADER_SIZE + stream.len()].copy_from_slice(stream);
+    output[HEADER_SIZE..total].copy_from_slice(&workspace.stream);
 
     Ok(total)
 }
@@ -524,5 +545,26 @@ mod tests {
         let d_len = decompress(&compressed[..c_len], &mut decompressed).expect("decompress");
         assert_eq!(d_len, input.len());
         assert_eq!(decompressed, input);
+    }
+
+    #[test]
+    fn reusable_compressor_resets_block_workspaces() {
+        let first = vec![0x5a_u8; BLOCK_SIZE + 257];
+        let second: Vec<u8> = (0_u8..=250).cycle().take(4_097).collect();
+        let mut compressor = Compressor::new();
+        let mut compressed = vec![0_u8; compress_bound(first.len())];
+
+        compressor
+            .compress(&first, &mut compressed)
+            .expect("first compression");
+        let second_len = compressor
+            .compress(&second, &mut compressed)
+            .expect("second compression");
+
+        let mut decoded = vec![0_u8; second.len()];
+        let decoded_len =
+            decompress(&compressed[..second_len], &mut decoded).expect("second decompression");
+        assert_eq!(decoded_len, second.len());
+        assert_eq!(decoded, second);
     }
 }

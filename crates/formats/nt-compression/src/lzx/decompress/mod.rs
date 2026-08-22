@@ -11,7 +11,7 @@
 use crate::bitstream::BitReader;
 use crate::e8::undo_e8_preprocessing;
 use crate::huffman::{
-    HuffmanTable, assign_canonical_codes, count_per_length, validate_code_space, validate_lengths,
+    SmallHuffmanTable, canonical_codes, count_per_length, validate_code_space, validate_lengths,
 };
 use crate::{Error, LenientResult, Result};
 
@@ -38,12 +38,6 @@ use table::{
 const MAIN_TABLE_BITS: u32 = 11;
 const LENGTH_TABLE_BITS: u32 = 9;
 const ALIGNED_TABLE_BITS: u32 = 7;
-#[allow(
-    dead_code,
-    reason = "used by pretree via HuffmanTable::from_code_lengths"
-)]
-const PRECODE_TABLE_BITS: u32 = 6;
-
 /// Maximum code length in LZX.
 #[allow(dead_code, reason = "documents the spec constraint")]
 const MAX_CODE_BITS: u32 = 16;
@@ -163,6 +157,8 @@ struct DecompressCtx<'a> {
     main_lens: [u8; MAIN_TREE_SIZE],
     /// Previous block's length tree code lengths (for delta encoding).
     length_lens: [u8; LENGTH_TREE_SIZE],
+    /// Pre-tree lookup buffers retained across the three tree headers.
+    pre_table: SmallHuffmanTable<PRE_TREE_SIZE>,
 }
 
 impl<'a> DecompressCtx<'a> {
@@ -185,6 +181,7 @@ impl<'a> DecompressCtx<'a> {
             r2: 1,
             main_lens: [0; MAIN_TREE_SIZE],
             length_lens: [0; LENGTH_TREE_SIZE],
+            pre_table: SmallHuffmanTable::new(),
         }
     }
 
@@ -272,8 +269,8 @@ impl DecompressCtx<'_> {
             *pl = u8::try_from(self.reader.read_bits(PRE_TREE_CODE_BITS)?)
                 .expect("pre-tree code lengths are encoded in four bits");
         }
-        let pre_table = HuffmanTable::from_code_lengths(&pre_lens, 6)?;
-        decode_code_lengths(&mut self.reader, &pre_table, lens)
+        self.pre_table.rebuild(&pre_lens)?;
+        decode_code_lengths(&mut self.reader, &self.pre_table, lens)
     }
 }
 
@@ -292,7 +289,7 @@ impl DecompressCtx<'_> {
 ///   delta, then fill `run` positions with that length
 fn decode_code_lengths(
     reader: &mut BitReader<'_>,
-    pre_table: &HuffmanTable,
+    pre_table: &SmallHuffmanTable<PRE_TREE_SIZE>,
     lens: &mut [u8],
 ) -> Result<()> {
     let total = lens.len();

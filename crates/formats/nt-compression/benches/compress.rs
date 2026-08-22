@@ -105,28 +105,37 @@ mod xpress_huffman {
     #[divan::bench(args = SIZES)]
     fn compress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = zeros(len);
+        let mut compressor = nt_compression::xpress_huffman::Compressor::new();
+        let mut warmup = vec![0u8; nt_compression::xpress_huffman::compress_bound(len)];
+        compressor.compress(&input, &mut warmup).unwrap();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::xpress_huffman::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::xpress_huffman::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 
     #[divan::bench(args = SIZES)]
     fn compress_mixed(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = mixed(len);
+        let mut compressor = nt_compression::xpress_huffman::Compressor::new();
+        let mut warmup = vec![0u8; nt_compression::xpress_huffman::compress_bound(len)];
+        compressor.compress(&input, &mut warmup).unwrap();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::xpress_huffman::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::xpress_huffman::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 
     #[divan::bench(args = SIZES)]
     fn compress_random_ish(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = random_ish(len);
+        let mut compressor = nt_compression::xpress_huffman::Compressor::new();
+        let mut warmup = vec![0u8; nt_compression::xpress_huffman::compress_bound(len)];
+        compressor.compress(&input, &mut warmup).unwrap();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::xpress_huffman::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::xpress_huffman::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 }
 
@@ -141,27 +150,36 @@ mod lzx {
     #[divan::bench(args = LZX_SIZES)]
     fn compress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = zeros(len);
+        let mut compressor = nt_compression::lzx::Compressor::new();
+        let mut warmup = vec![0u8; nt_compression::lzx::compress_bound(len)];
+        compressor.compress(&input, &mut warmup).unwrap();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::lzx::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::lzx::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 
     #[divan::bench(args = LZX_SIZES)]
     fn compress_mixed(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = mixed(len);
+        let mut compressor = nt_compression::lzx::Compressor::new();
+        let mut warmup = vec![0u8; nt_compression::lzx::compress_bound(len)];
+        compressor.compress(&input, &mut warmup).unwrap();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::lzx::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::lzx::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 
     #[divan::bench(args = LZX_SIZES)]
     fn compress_random_ish(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = random_ish(len);
+        let mut compressor = nt_compression::lzx::Compressor::new();
+        let mut warmup = vec![0u8; nt_compression::lzx::compress_bound(len)];
+        compressor.compress(&input, &mut warmup).unwrap();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::lzx::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::lzx::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 }

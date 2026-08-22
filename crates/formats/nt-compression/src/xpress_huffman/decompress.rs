@@ -11,9 +11,7 @@
 
 use alloc::format;
 
-use crate::huffman::{
-    assign_canonical_codes, count_per_length, validate_code_space, validate_lengths,
-};
+use crate::huffman::{canonical_codes, count_per_length, validate_code_space, validate_lengths};
 use crate::{Error, LenientResult, Result};
 
 use super::{BLOCK_SIZE, HEADER_SIZE, MAX_CODE_BITS, NUM_SYMBOLS};
@@ -53,8 +51,6 @@ impl PackedDecodeTable {
         validate_lengths(lengths)?;
         let counts = count_per_length(lengths);
         validate_code_space(&counts)?;
-        let codes = assign_canonical_codes(lengths, &counts);
-
         let mut tbl = Self {
             direct: [0u16; TABLE_SIZE],
             overflow: [0u16; TABLE_SIZE],
@@ -64,10 +60,7 @@ impl PackedDecodeTable {
         // Track which direct entries are filled.
         let mut direct_filled = [false; TABLE_SIZE];
 
-        for (sym, &(code, len)) in codes.iter().enumerate() {
-            if len == 0 {
-                continue;
-            }
+        for (sym, code, len) in canonical_codes(lengths, &counts) {
             let sym = u16::try_from(sym).expect("the XPRESS Huffman alphabet contains 512 symbols");
             let len_u32 = u32::from(len);
 

@@ -25,6 +25,7 @@ pub(crate) unsafe fn read_u16_le(data: &[u8], pos: usize) -> u16 {
 ///
 /// # Safety
 /// Caller must ensure `pos + 4 <= data.len()`.
+#[cfg(any(feature = "xpress", feature = "xpress-huffman"))]
 #[inline]
 pub(crate) unsafe fn read_u32_le(data: &[u8], pos: usize) -> u32 {
     debug_assert!(pos + 4 <= data.len());

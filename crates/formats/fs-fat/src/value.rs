@@ -1,7 +1,7 @@
 use fsmnt_parser_core::io::{BlockCache, FsReadSeek};
 
 use crate::error::{FatError, Result};
-use crate::fat::Fat;
+use crate::fat::{Fat, FatFileGeometry};
 use crate::io::{Read, Seek, SeekFrom};
 
 /// A value representing the data content of a FAT file.
@@ -9,8 +9,8 @@ use crate::io::{Read, Seek, SeekFrom};
 /// This struct allows reading file data by following the cluster chain.
 /// It implements [`FsReadSeek`] to read/seek with a temporarily passed filesystem reader.
 #[derive(Clone, Debug)]
-pub struct FatFileValue<'n> {
-    fat: &'n Fat,
+pub struct FatFileValue {
+    geometry: FatFileGeometry,
     /// First cluster of the file data (None for empty files)
     first_cluster: Option<u32>,
     /// Current cluster we are reading from (None if at end, empty file, or before first read)
@@ -27,20 +27,21 @@ pub struct FatFileValue<'n> {
     fat_cache: BlockCache,
 }
 
-impl<'n> FatFileValue<'n> {
+impl FatFileValue {
     /// Creates a new `FatFileValue` for reading file data.
     ///
     /// If `first_cluster` is `None`, the file is empty and has no data to read.
-    pub(crate) fn new(fat: &'n Fat, first_cluster: Option<u32>, data_size: u64) -> Self {
+    pub(crate) fn new(fat: &Fat, first_cluster: Option<u32>, data_size: u64) -> Self {
+        let geometry = fat.file_geometry();
         Self {
-            fat,
+            geometry,
             first_cluster,
             current_cluster: first_cluster,
             position_in_cluster: 0,
             stream_position: 0,
             data_size,
             clusters_traversed: 0,
-            fat_cache: BlockCache::new(usize::from(fat.sector_size())),
+            fat_cache: BlockCache::new(usize::from(geometry.sector_size())),
         }
     }
 
@@ -85,14 +86,14 @@ impl<'n> FatFileValue<'n> {
     {
         if let Some(current) = self.current_cluster {
             // Check for cluster chain loop
-            let max_clusters = self.fat.total_clusters();
+            let max_clusters = self.geometry.cluster_count();
             if self.clusters_traversed >= max_clusters {
                 return Err(FatError::ClusterChainLoop { max_clusters });
             }
 
-            if let Some(next) = self
-                .fat
-                .next_cluster_cached(fs, current, &mut self.fat_cache)?
+            if let Some(next) =
+                self.geometry
+                    .next_cluster_cached(fs, current, &mut self.fat_cache)?
             {
                 self.current_cluster = Some(next);
                 self.position_in_cluster = 0;
@@ -138,7 +139,7 @@ impl<'n> FatFileValue<'n> {
     // least `cluster_size` per iteration).
     #[cfg_attr(test, mutants::skip)]
     fn cluster_step_for_advance(&self) -> u64 {
-        u64::from(self.fat.cluster_size()) - u64::from(self.position_in_cluster)
+        u64::from(self.geometry.cluster_size()) - u64::from(self.position_in_cluster)
     }
 
     /// Seeks to a position, possibly traversing the cluster chain from the start.
@@ -146,7 +147,7 @@ impl<'n> FatFileValue<'n> {
     where
         T: Read + Seek,
     {
-        let cluster_size = u64::from(self.fat.cluster_size());
+        let cluster_size = u64::from(self.geometry.cluster_size());
 
         // Clamp to data size
         let target_pos = target_pos.min(self.data_size);
@@ -181,7 +182,7 @@ impl<'n> FatFileValue<'n> {
     }
 }
 
-impl<R: Read + Seek> FsReadSeek<R> for FatFileValue<'_> {
+impl<R: Read + Seek> FsReadSeek<R> for FatFileValue {
     type Error = FatError;
 
     fn read(&mut self, fs: &mut R, buf: &mut [u8]) -> Result<usize> {
@@ -198,7 +199,7 @@ impl<R: Read + Seek> FsReadSeek<R> for FatFileValue<'_> {
             return Ok(0);
         }
 
-        let cluster_size = self.fat.cluster_size();
+        let cluster_size = self.geometry.cluster_size();
 
         // Loop to handle cluster boundary crossings without recursion
         loop {
@@ -223,7 +224,7 @@ impl<R: Read + Seek> FsReadSeek<R> for FatFileValue<'_> {
 
             // Seek to the correct position in the underlying stream
             let disk_offset =
-                self.fat.cluster_offset(cluster)? + u64::from(self.position_in_cluster);
+                self.geometry.cluster_offset(cluster)? + u64::from(self.position_in_cluster);
             fs.seek(SeekFrom::Start(disk_offset))?;
 
             // Read the data
@@ -284,82 +285,8 @@ mod tests {
     use alloc::vec::Vec;
     use fsmnt_testkit::{CountingReader, Cursor};
 
-    /// Build a FAT16 image with a single file spanning 3 clusters
-    /// (clusters 2 → 3 → 4) so multi-cluster traversal is exercised.
-    /// Returns the image plus the expected file payload.
     fn build_fat16_image_with_three_cluster_file() -> (Vec<u8>, Vec<u8>) {
-        // Layout (sector_size = 512, sectors_per_cluster = 1):
-        //   sector 0   : boot
-        //   sector 1   : FAT table (1 sector, FAT16: 256 u16 entries)
-        //   sector 2   : root directory (16 entries × 32 bytes)
-        //   sector 3   : cluster 2  → "ABCDEF..." pattern (512 B)
-        //   sector 4   : cluster 3  → "abcdef..." pattern (512 B)
-        //   sector 5   : cluster 4  → first 256 B of data, rest padding
-        //
-        // total_sectors = 6, first_data_sector = 1+1+1 = 3 (reserved=1,
-        // num_fats=1, spf16=1, root_dir_sectors=1). data_sectors = 3.
-        // total_clusters = 3 / 1 = 3. → fits inside FAT12 range, so we
-        // pick a larger total_sectors to push above 4085 (FAT16 threshold).
-        //
-        // Easier: build the same shape as `build_fat16_image` above but
-        // chain clusters 2 → 3 → 4 in the FAT, and place file payload
-        // in those sectors.
-        let mut img = vec![0u8; 4104 * 512];
-        img[0..3].copy_from_slice(&[0xEB, 0x3C, 0x90]);
-        img[3..11].copy_from_slice(b"MSDOS5.0");
-        img[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
-        img[0x0D] = 1;
-        img[0x0E..0x10].copy_from_slice(&1u16.to_le_bytes());
-        img[0x10] = 1;
-        img[0x11..0x13].copy_from_slice(&16u16.to_le_bytes());
-        img[0x13..0x15].copy_from_slice(&4104u16.to_le_bytes());
-        img[0x15] = 0xF8;
-        img[0x16..0x18].copy_from_slice(&17u16.to_le_bytes());
-        img[0x24] = 0x80;
-        img[0x26] = 0x29;
-        img[0x36..0x3E].copy_from_slice(b"FAT16   ");
-        img[0x1FE] = 0x55;
-        img[0x1FF] = 0xAA;
-
-        // FAT[0..1] reserved; chain 2→3→4 with EOC at 4.
-        let f = 0x200;
-        img[f..f + 2].copy_from_slice(&0xFFF8u16.to_le_bytes());
-        img[f + 2..f + 4].copy_from_slice(&0xFFFFu16.to_le_bytes());
-        img[f + 4..f + 6].copy_from_slice(&3u16.to_le_bytes()); // FAT[2] -> 3
-        img[f + 6..f + 8].copy_from_slice(&4u16.to_le_bytes()); // FAT[3] -> 4
-        img[f + 8..f + 10].copy_from_slice(&0xFFFFu16.to_le_bytes()); // FAT[4] EOC
-
-        // Root directory entry for the file. With reserved=1, FATs=1,
-        // spf16=17, root_dir_sectors=1, first_data_sector=19.
-        let r = 18 * 512;
-        img[r..r + 11].copy_from_slice(b"FILE    BIN");
-        img[r + 0x0B] = 0x20; // ARCHIVE
-        // first_cluster_low = 2
-        img[r + 0x1A..r + 0x1C].copy_from_slice(&2u16.to_le_bytes());
-        // File size: 1200 bytes (spans 3 clusters: 512+512+176).
-        img[r + 0x1C..r + 0x20].copy_from_slice(&1200u32.to_le_bytes());
-
-        // Write the payload across clusters 2, 3, 4.
-        // cluster_offset = first_data_sector * 512 + (cluster - 2) * cluster_size.
-        let cluster_size = 512usize;
-        let first_data_byte = 19 * 512;
-
-        // Build a deterministic 1200-byte payload: 0..255 repeated.
-        let mut payload: Vec<u8> = Vec::with_capacity(1200);
-        for i in 0..1200 {
-            payload.push(u8::try_from(i % 251).expect("the remainder is at most 250"));
-        }
-
-        // Cluster 2: bytes 0..512
-        img[first_data_byte..first_data_byte + 512].copy_from_slice(&payload[0..512]);
-        // Cluster 3: bytes 512..1024
-        img[first_data_byte + cluster_size..first_data_byte + 2 * cluster_size]
-            .copy_from_slice(&payload[512..1024]);
-        // Cluster 4: bytes 1024..1200 (176 bytes; rest of cluster is unused).
-        img[first_data_byte + 2 * cluster_size..first_data_byte + 2 * cluster_size + 176]
-            .copy_from_slice(&payload[1024..1200]);
-
-        (img, payload)
+        fsmnt_testkit::fat::three_cluster_fat16_image()
     }
 
     #[test]
@@ -527,18 +454,20 @@ mod tests {
         let mut data = file.data().expect("data");
 
         assert_eq!(
-            <FatFileValue<'_> as FsReadSeek<Cursor<Vec<u8>>>>::stream_position(&data),
+            <FatFileValue as FsReadSeek<Cursor<Vec<u8>>>>::stream_position(&data),
             0
         );
         assert_eq!(
-            <FatFileValue<'_> as FsReadSeek<Cursor<Vec<u8>>>>::len(&data),
+            <FatFileValue as FsReadSeek<Cursor<Vec<u8>>>>::len(&data),
             1200
         );
-        assert!(!<FatFileValue<'_> as FsReadSeek<Cursor<Vec<u8>>>>::is_empty(&data));
+        assert!(!<FatFileValue as FsReadSeek<Cursor<Vec<u8>>>>::is_empty(
+            &data
+        ));
 
         data.seek(&mut cur, SeekFrom::Start(700)).expect("seek");
         assert_eq!(
-            <FatFileValue<'_> as FsReadSeek<Cursor<Vec<u8>>>>::stream_position(&data),
+            <FatFileValue as FsReadSeek<Cursor<Vec<u8>>>>::stream_position(&data),
             700
         );
     }
@@ -553,11 +482,8 @@ mod tests {
         let file = FatFile::new(&fat, None, false, 0);
         let mut data = file.data().expect("data");
 
-        assert_eq!(
-            <FatFileValue<'_> as FsReadSeek<Cursor<Vec<u8>>>>::len(&data),
-            0
-        );
-        assert!(<FatFileValue<'_> as FsReadSeek<Cursor<Vec<u8>>>>::is_empty(
+        assert_eq!(<FatFileValue as FsReadSeek<Cursor<Vec<u8>>>>::len(&data), 0);
+        assert!(<FatFileValue as FsReadSeek<Cursor<Vec<u8>>>>::is_empty(
             &data
         ));
         let mut buf = [0u8; 8];

@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
+/// Synthetic FAT images shared by parser and driver tests.
+pub mod fat;
+
 /// Synthetic QNX6 Power-Safe images shared by parser and driver tests.
 pub mod qnx6;
 

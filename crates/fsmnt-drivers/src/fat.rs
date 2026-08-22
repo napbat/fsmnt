@@ -9,7 +9,7 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use fs_fat::{Fat, FatAttributes, FatTime};
+use fs_fat::{Fat, FatAttributes, FatFileValue, FatTime};
 use fsmnt_core::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
 };
@@ -18,7 +18,7 @@ use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::iter::FsTryIterator;
 use tracing::debug;
 
-use crate::adapter::{found, found_and, read_at_through, read_up_to};
+use crate::adapter::{PathCache, found, found_and, read_at_through, read_up_to};
 use crate::boot_backup;
 use crate::identity;
 
@@ -82,6 +82,8 @@ pub struct FatFilesystem<T: Read + Seek> {
     fat: Fat,
     /// How the volume was opened, when that departed from the normal path.
     notices: Vec<String>,
+    /// Most recently opened data stream, including cluster traversal state.
+    files: PathCache<FatFileValue>,
 }
 
 impl<T: Read + Seek> FatFilesystem<T> {
@@ -105,6 +107,7 @@ impl<T: Read + Seek> FatFilesystem<T> {
             reader,
             fat,
             notices: Vec::new(),
+            files: PathCache::new(),
         })
     }
 
@@ -155,41 +158,49 @@ impl<T: Read + Seek> FatFilesystem<T> {
 
         EntryAttrs::default()
     }
-}
 
-impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
-    fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
+    /// Opens `path` as the bounded active file handle.
+    fn cache_file(&mut self, path: &str) -> FsResult<()> {
+        if self.files.get(path).is_some() {
+            return Ok(());
+        }
         let normalized = normalize_path(path);
-
         let file = self
             .fat
             .open(&mut self.reader, &normalized)
             .map_err(|e| map_fat_error(e, path))?;
-
         if file.is_directory() {
             return Err(FsError::NotAFile(path.to_string()));
         }
+        let value = file.data().map_err(|e| map_fat_error(e, path))?;
+        self.files.insert(path, value);
+        Ok(())
+    }
+}
 
-        let mut data_value = file.data().map_err(|e| map_fat_error(e, path))?;
+impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
+    fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
+        self.cache_file(path)?;
+        let file = self
+            .files
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("FAT file cache was not populated".to_string()))?;
+        let length = <FatFileValue as FsReadSeek<T>>::len(file);
+        file.rewind();
 
-        read_up_to(u64::from(file.file_size()), |buffer| {
-            data_value
-                .read(&mut self.reader, buffer)
+        read_up_to(length, |buffer| {
+            file.read(&mut self.reader, buffer)
                 .map_err(|e| map_fat_error(e, path))
         })
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let normalized = normalize_path(path);
+        self.cache_file(path)?;
         let file = self
-            .fat
-            .open(&mut self.reader, &normalized)
-            .map_err(|e| map_fat_error(e, path))?;
-        if file.is_directory() {
-            return Err(FsError::NotAFile(path.to_string()));
-        }
-        let mut data_value = file.data().map_err(|e| map_fat_error(e, path))?;
-        read_at_through(&mut data_value, &mut self.reader, offset, buffer, |e| {
+            .files
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("FAT file cache was not populated".to_string()))?;
+        read_at_through(file, &mut self.reader, offset, buffer, |e| {
             map_fat_error(e, path)
         })
     }
@@ -374,6 +385,8 @@ impl FilesystemDriver for FatDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fsmnt_testkit::CountingReader;
+    use fsmnt_testkit::fat::{THREE_CLUSTER_FILE_PATH, three_cluster_fat16_image};
     use std::io::Cursor;
 
     #[test]
@@ -414,6 +427,47 @@ mod tests {
         // 1980-01-01 is a genuine date (packed 0x0021), unlike a zero date.
         let dt = fat_time_to_datetime(FatTime::new(0x0021, 0, 0)).expect("real date");
         assert_eq!(dt.format("%Y-%m-%d").to_string(), "1980-01-01");
+    }
+
+    #[test]
+    fn positioned_reads_reuse_the_open_file_and_fat_sector() {
+        let (image, payload) = three_cluster_fat16_image();
+        let reader = CountingReader::new(Cursor::new(image));
+        let mut fs = FatFilesystem::new(reader).expect("synthetic FAT16 volume must open");
+        fs.reader.reset_stats();
+
+        let mut warmup = [0_u8; 20];
+        fs.read_at(THREE_CLUSTER_FILE_PATH, 500, &mut warmup)
+            .expect("opening read");
+        let opening = fs.reader.stats();
+        assert_eq!(&warmup, &payload[500..520]);
+
+        fs.reader.reset_stats();
+        let mut later = [0_u8; 40];
+        fs.read_at(THREE_CLUSTER_FILE_PATH, 1_000, &mut later)
+            .expect("cached forward read");
+        let cached = fs.reader.stats();
+
+        assert_eq!(&later, &payload[1_000..1_040]);
+        assert!(opening.read_calls() > cached.read_calls());
+        assert_eq!(cached.read_calls(), 2, "only two data clusters are read");
+        assert_eq!(cached.seek_calls(), 2, "only two data seeks remain");
+        assert_eq!(cached.bytes_read(), 40, "the FAT sector stays cached");
+    }
+
+    #[test]
+    fn whole_read_rewinds_the_cached_positioned_stream() {
+        let (image, payload) = three_cluster_fat16_image();
+        let mut fs =
+            FatFilesystem::new(Cursor::new(image)).expect("synthetic FAT16 volume must open");
+        let mut tail = [0_u8; 32];
+        fs.read_at(THREE_CLUSTER_FILE_PATH, 900, &mut tail)
+            .expect("positioned read");
+
+        assert_eq!(
+            fs.read(THREE_CLUSTER_FILE_PATH).expect("whole read"),
+            payload
+        );
     }
 
     #[test]

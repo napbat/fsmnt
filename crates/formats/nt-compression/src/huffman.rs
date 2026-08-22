@@ -4,11 +4,18 @@
 //! lengths. Codes up to `TABLE_BITS` in length use a direct lookup
 //! table; longer codes fall back to a linked overflow table.
 
-use alloc::vec;
+use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
+use core::cmp::Reverse;
 
 use crate::bitstream::BitReader;
 use crate::{Error, Result};
+
+#[cfg(any(feature = "lzx", feature = "lzxd", feature = "lzx-cab"))]
+mod small;
+
+#[cfg(any(feature = "lzx", feature = "lzxd", feature = "lzx-cab"))]
+pub(crate) use small::SmallHuffmanTable;
 
 /// Maximum code length supported (LZX uses up to 16, XPRESS Huffman
 /// up to 15). 16 covers both.
@@ -47,7 +54,7 @@ struct OverflowNode {
     dead_code,
     reason = "used by xpress-huffman and lzx when those features are enabled"
 )]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct HuffmanTable {
     /// Direct lookup table of size `2^table_bits`.
     table: Vec<TableEntry>,
@@ -68,6 +75,13 @@ impl HuffmanTable {
     /// length of zero means the symbol does not appear. `max_bits`
     /// controls the direct-table width (e.g. 11 for XPRESS Huffman).
     pub fn from_code_lengths(lengths: &[u8], max_bits: u32) -> Result<Self> {
+        let mut table = Self::default();
+        table.rebuild(lengths, max_bits)?;
+        Ok(table)
+    }
+
+    /// Rebuild this table while retaining direct and overflow allocations.
+    pub fn rebuild(&mut self, lengths: &[u8], max_bits: u32) -> Result<()> {
         let table_bits = max_bits
             .min(u32::try_from(MAX_CODE_LEN).expect("the maximum Huffman code length is 16"));
 
@@ -75,14 +89,15 @@ impl HuffmanTable {
         let counts = count_per_length(lengths);
         validate_code_space(&counts)?;
 
-        let codes = assign_canonical_codes(lengths, &counts);
-        let (table, overflow) = build_tables(&codes, table_bits)?;
-
-        Ok(Self {
-            table,
-            overflow,
+        build_tables(
+            lengths,
+            &counts,
             table_bits,
-        })
+            &mut self.table,
+            &mut self.overflow,
+        )?;
+        self.table_bits = table_bits;
+        Ok(())
     }
 
     /// Decode one symbol from the bitstream.
@@ -231,30 +246,104 @@ pub(crate) fn validate_code_space(counts: &[u32; MAX_CODE_LEN + 1]) -> Result<()
     Ok(())
 }
 
-/// Assign canonical codes to each symbol based on code lengths.
-///
-/// Returns a vector of `(code, length)` per symbol index. Symbols
-/// with length 0 get code 0 (unused).
-pub(crate) fn assign_canonical_codes(
-    lengths: &[u8],
+/// Allocation-free iterator over canonical codes in symbol order.
+pub(crate) struct CanonicalCodes<'a> {
+    lengths: &'a [u8],
+    next_code: [u32; MAX_CODE_LEN + 1],
+    symbol: usize,
+}
+
+impl Iterator for CanonicalCodes<'_> {
+    type Item = (usize, u32, u8);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.symbol < self.lengths.len() {
+            let symbol = self.symbol;
+            self.symbol += 1;
+            let length = self.lengths[symbol];
+            let index = usize::from(length);
+            if index == 0 || index > MAX_CODE_LEN {
+                continue;
+            }
+            let code = self.next_code[index];
+            self.next_code[index] += 1;
+            return Some((symbol, code, length));
+        }
+        None
+    }
+}
+
+/// Iterate canonical `(symbol, code, length)` triples without allocating.
+pub(crate) fn canonical_codes<'a>(
+    lengths: &'a [u8],
     counts: &[u32; MAX_CODE_LEN + 1],
-) -> Vec<(u32, u8)> {
-    let mut next_code = [0u32; MAX_CODE_LEN + 1];
-    let mut code: u32 = 0;
+) -> CanonicalCodes<'a> {
+    let mut next_code = [0_u32; MAX_CODE_LEN + 1];
+    let mut code = 0_u32;
     for bits in 1..=MAX_CODE_LEN {
         code = (code + counts[bits - 1]) << 1;
         next_code[bits] = code;
     }
+    CanonicalCodes {
+        lengths,
+        next_code,
+        symbol: 0,
+    }
+}
 
-    let mut codes = vec![(0u32, 0u8); lengths.len()];
-    for (sym, &len) in lengths.iter().enumerate() {
-        let l = usize::from(len);
-        if l > 0 && l <= MAX_CODE_LEN {
-            codes[sym] = (next_code[l], len);
-            next_code[l] += 1;
+/// Assign canonical codes to each symbol based on code lengths.
+///
+/// Returns a vector of `(code, length)` per symbol index. Symbols
+/// with length 0 get code 0 (unused).
+#[cfg(test)]
+pub(crate) fn assign_canonical_codes(
+    lengths: &[u8],
+    counts: &[u32; MAX_CODE_LEN + 1],
+) -> Vec<(u32, u8)> {
+    let mut codes = Vec::with_capacity(lengths.len());
+    assign_canonical_codes_into(lengths, counts, &mut codes);
+    codes
+}
+
+/// Assign canonical codes into a reusable per-symbol buffer.
+#[allow(
+    dead_code,
+    reason = "used by compression features that may be disabled independently"
+)]
+pub(crate) fn assign_canonical_codes_into(
+    lengths: &[u8],
+    counts: &[u32; MAX_CODE_LEN + 1],
+    codes: &mut Vec<(u32, u8)>,
+) {
+    codes.clear();
+    codes.resize(lengths.len(), (0, 0));
+    for (symbol, code, length) in canonical_codes(lengths, counts) {
+        codes[symbol] = (code, length);
+    }
+}
+
+/// Reusable scratch storage for Huffman tree construction.
+#[allow(
+    dead_code,
+    reason = "used by compression features that may be disabled independently"
+)]
+pub(crate) struct HuffmanWorkspace {
+    parent: Vec<u32>,
+    heap: BinaryHeap<Reverse<(u64, u32)>>,
+}
+
+#[allow(
+    dead_code,
+    reason = "used by compression features that may be disabled independently"
+)]
+impl HuffmanWorkspace {
+    /// Create an empty workspace whose allocations grow with the first tree.
+    pub(crate) const fn new() -> Self {
+        Self {
+            parent: Vec::new(),
+            heap: BinaryHeap::new(),
         }
     }
-    codes
 }
 
 /// Build canonical Huffman code lengths from symbol frequency counts.
@@ -270,77 +359,92 @@ pub(crate) fn assign_canonical_codes(
     reason = "used by compress-xpress-huffman and compress-lzx when those features are enabled"
 )]
 pub(crate) fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
-    use alloc::collections::BinaryHeap;
-    use core::cmp::Reverse;
+    let mut lengths = Vec::with_capacity(freqs.len());
+    let mut workspace = HuffmanWorkspace::new();
+    build_code_lengths_into(freqs, max_bits, &mut lengths, &mut workspace);
+    lengths
+}
 
+/// Build code lengths into a reusable output and tree workspace.
+#[allow(
+    dead_code,
+    reason = "used by compression features that may be disabled independently"
+)]
+pub(crate) fn build_code_lengths_into(
+    freqs: &[u32],
+    max_bits: u8,
+    lengths: &mut Vec<u8>,
+    workspace: &mut HuffmanWorkspace,
+) {
     let num_symbols = freqs.len();
-    let non_zero: Vec<(usize, u32)> = freqs
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| **f > 0)
-        .map(|(i, f)| (i, *f))
-        .collect();
+    lengths.clear();
+    lengths.resize(num_symbols, 0);
+    workspace.heap.clear();
 
-    if non_zero.is_empty() {
-        return vec![0u8; num_symbols];
+    let mut non_zero_count = 0_usize;
+    let mut only_symbol = 0_usize;
+    for (symbol, &frequency) in freqs.iter().enumerate() {
+        if frequency == 0 {
+            continue;
+        }
+        non_zero_count += 1;
+        only_symbol = symbol;
+        workspace.heap.push(Reverse((
+            u64::from(frequency),
+            u32::try_from(symbol).expect("the symbol table is bounded by the input slice"),
+        )));
     }
 
-    if non_zero.len() == 1 {
-        let mut lengths = vec![0u8; num_symbols];
-        lengths[non_zero[0].0] = 1;
+    if non_zero_count == 0 {
+        return;
+    }
+
+    if non_zero_count == 1 {
+        lengths[only_symbol] = 1;
         // Add a dummy second symbol at codelen 1 to form a complete
         // Huffman tree (Kraft sum = 1.0). Without this, decoders
         // like wimlib reject the incomplete code.
-        let real_sym = non_zero[0].0;
-        let dummy = usize::from(real_sym == 0);
+        let dummy = usize::from(only_symbol == 0);
         lengths[dummy] = 1;
-        return lengths;
+        return;
     }
 
     // Build Huffman tree using a min-heap of (frequency, node_id).
     // Internal nodes are assigned IDs starting from num_symbols.
-    let mut parent = vec![u32::MAX; 2 * num_symbols];
-    let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::new();
-
-    for &(sym, freq) in &non_zero {
-        heap.push(Reverse((
-            u64::from(freq),
-            u32::try_from(sym).expect("the symbol table is bounded by the input slice"),
-        )));
-    }
+    workspace.parent.clear();
+    workspace
+        .parent
+        .resize(num_symbols.saturating_mul(2), u32::MAX);
 
     let mut next_internal =
         u32::try_from(num_symbols).expect("the symbol table has fewer than u32::MAX entries");
-    while heap.len() > 1 {
-        let Reverse((f1, n1)) = heap.pop().expect("heap underflow");
-        let Reverse((f2, n2)) = heap.pop().expect("heap underflow");
+    while workspace.heap.len() > 1 {
+        let Reverse((f1, n1)) = workspace.heap.pop().expect("heap underflow");
+        let Reverse((f2, n2)) = workspace.heap.pop().expect("heap underflow");
         let internal = next_internal;
         next_internal += 1;
-        parent[n1 as usize] = internal;
-        parent[n2 as usize] = internal;
-        if (next_internal as usize) > parent.len() {
-            parent.resize(next_internal as usize + 1, u32::MAX);
-        }
-        heap.push(Reverse((f1 + f2, internal)));
+        workspace.parent[n1 as usize] = internal;
+        workspace.parent[n2 as usize] = internal;
+        workspace.heap.push(Reverse((f1 + f2, internal)));
     }
 
     // Compute depths from the tree.
-    let mut lengths = vec![0u8; num_symbols];
-    for (sym, _) in &non_zero {
+    for (symbol, &frequency) in freqs.iter().enumerate() {
+        if frequency == 0 {
+            continue;
+        }
         let mut depth = 0u8;
         let mut node =
-            u32::try_from(*sym).expect("the symbol index came from the bounded frequency table");
-        while parent[node as usize] != u32::MAX {
+            u32::try_from(symbol).expect("the symbol index came from the bounded frequency table");
+        while workspace.parent[node as usize] != u32::MAX {
             depth += 1;
-            node = parent[node as usize];
+            node = workspace.parent[node as usize];
         }
-        lengths[*sym] = depth;
+        lengths[symbol] = depth;
     }
 
     // Limit code lengths to max_bits using Kraft-based redistribution.
-    limit_code_lengths(&mut lengths, max_bits);
-
-    lengths
+    limit_code_lengths(lengths, max_bits);
 }
 
 /// Limit code lengths to `max_bits` using package-merge-style
@@ -408,34 +512,35 @@ fn limit_code_lengths(lengths: &mut [u8], max_bits: u8) {
 
 /// Build the direct lookup table and overflow tree.
 fn build_tables(
-    codes: &[(u32, u8)],
+    lengths: &[u8],
+    counts: &[u32; MAX_CODE_LEN + 1],
     table_bits: u32,
-) -> Result<(Vec<TableEntry>, Vec<OverflowNode>)> {
+    table: &mut Vec<TableEntry>,
+    overflow: &mut Vec<OverflowNode>,
+) -> Result<()> {
     let table_size = 1usize << table_bits;
-    let mut table = vec![
+    table.clear();
+    table.resize(
+        table_size,
         TableEntry {
             symbol: NO_SYMBOL,
             code_len: 0,
-        };
-        table_size
-    ];
-    let mut overflow: Vec<OverflowNode> = Vec::new();
+        },
+    );
+    overflow.clear();
 
-    for (sym, &(code, len)) in codes.iter().enumerate() {
-        if len == 0 {
-            continue;
-        }
+    for (sym, code, len) in canonical_codes(lengths, counts) {
         let sym = u16::try_from(sym).expect("Huffman tables contain at most u16::MAX symbols");
         if u32::from(len) <= table_bits {
-            fill_short_code(&mut table, sym, code, len, table_bits);
+            fill_short_code(table, sym, code, len, table_bits);
         } else {
-            insert_long_code(&mut table, &mut overflow, sym, code, len, table_bits)?;
+            insert_long_code(table, overflow, sym, code, len, table_bits)?;
         }
     }
 
-    fill_undersubscribed_entries(&mut table, &overflow);
+    fill_undersubscribed_entries(table, overflow);
 
-    Ok((table, overflow))
+    Ok(())
 }
 
 /// Fill empty direct-table entries left by undersubscribed trees.

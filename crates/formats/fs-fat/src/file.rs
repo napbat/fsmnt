@@ -90,7 +90,7 @@ impl<'n> FatFile<'n> {
     /// # Errors
     ///
     /// Returns an error if this is a directory.
-    pub fn data(&self) -> Result<FatFileValue<'n>> {
+    pub fn data(&self) -> Result<FatFileValue> {
         if self.is_directory {
             return Err(FatError::IsADirectory);
         }

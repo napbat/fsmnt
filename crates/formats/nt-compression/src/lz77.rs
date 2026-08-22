@@ -172,6 +172,7 @@ impl MatchFinder {
     /// Uses lazy matching: before committing to a match at position P,
     /// checks if P+1 gives a longer match. If so, emits P as a literal
     /// and uses the longer match instead.
+    #[cfg(test)]
     pub fn tokenize(&mut self, data: &[u8]) -> Vec<Token> {
         let mut tokens = Vec::with_capacity(data.len());
         let mut pos = 0;

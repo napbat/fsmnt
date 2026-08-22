@@ -278,6 +278,13 @@ impl BitWriter {
         }
     }
 
+    /// Clear encoded bytes and accumulator state while retaining capacity.
+    pub fn reset(&mut self) {
+        self.data.clear();
+        self.accum = 0;
+        self.accum_bits = 0;
+    }
+
     /// Write `count` bits from the low bits of `value`, MSB-first.
     #[inline]
     pub fn write_bits(&mut self, value: u32, count: u32) {
@@ -414,6 +421,11 @@ impl BitWriter {
     pub fn finish(mut self) -> Vec<u8> {
         self.flush_bits();
         self.data
+    }
+
+    /// Borrow all complete bytes written so far.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.data
     }
 
     /// Current byte position in the output buffer (not counting

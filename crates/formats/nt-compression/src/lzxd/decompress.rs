@@ -7,7 +7,7 @@
 
 use crate::bitstream::BitReader;
 use crate::e8::undo_e8_preprocessing;
-use crate::huffman::HuffmanTable;
+use crate::huffman::{HuffmanTable, SmallHuffmanTable};
 use crate::{Error, LenientResult, Result};
 
 use super::{
@@ -102,6 +102,14 @@ fn err_truncated(offset: usize, expected: usize, actual: usize) -> Error {
 // Decompressor state
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
+struct DecodeTables {
+    pre: SmallHuffmanTable<PRE_TREE_SIZE>,
+    main: HuffmanTable,
+    length: HuffmanTable,
+    aligned: HuffmanTable,
+}
+
 struct DecompressCtx<'a> {
     /// Raw input bytes (full stream).
     input: &'a [u8],
@@ -134,6 +142,8 @@ struct DecompressCtx<'a> {
     /// Total uncompressed bytes emitted before the current chunk
     /// (for E8 `chunk_offset`).
     chunk_offset: i64,
+    /// Lookup buffers retained and rebuilt across chunks and blocks.
+    decode_tables: DecodeTables,
 }
 
 impl<'a> DecompressCtx<'a> {
@@ -161,6 +171,7 @@ impl<'a> DecompressCtx<'a> {
             e8_file_size: 0,
             header_parsed: false,
             chunk_offset: 0,
+            decode_tables: DecodeTables::default(),
         }
     }
 
@@ -254,78 +265,96 @@ impl<'a> DecompressCtx<'a> {
         let block_size = reader.read_bits(24)? as usize;
         let block_end = (self.out_pos + block_size).min(chunk_limit);
 
-        match block_type {
+        let mut tables = core::mem::take(&mut self.decode_tables);
+        let result = (|| match block_type {
             BLOCK_VERBATIM => {
-                let (main_tbl, len_tbl) = self.read_main_and_length_trees(reader)?;
-                self.decode_compressed(reader, output, block_end, &main_tbl, &len_tbl, None)
-            }
-            BLOCK_ALIGNED => {
-                let aligned_tbl = Self::read_aligned_tree(reader)?;
-                let (main_tbl, len_tbl) = self.read_main_and_length_trees(reader)?;
+                self.read_main_and_length_trees(reader, &mut tables)?;
                 self.decode_compressed(
                     reader,
                     output,
                     block_end,
-                    &main_tbl,
-                    &len_tbl,
-                    Some(&aligned_tbl),
+                    &tables.main,
+                    &tables.length,
+                    None,
+                )
+            }
+            BLOCK_ALIGNED => {
+                Self::read_aligned_tree(reader, &mut tables.aligned)?;
+                self.read_main_and_length_trees(reader, &mut tables)?;
+                self.decode_compressed(
+                    reader,
+                    output,
+                    block_end,
+                    &tables.main,
+                    &tables.length,
+                    Some(&tables.aligned),
                 )
             }
             BLOCK_UNCOMPRESSED => self.decode_uncompressed(reader, output, block_end),
             _ => Err(err_invalid(reader.position(), "LZXD invalid block type")),
-        }
+        })();
+        self.decode_tables = tables;
+        result
     }
 }
 
 // -- Tree reading ----------------------------------------------------------
 
 impl DecompressCtx<'_> {
-    fn read_aligned_tree(reader: &mut BitReader<'_>) -> Result<HuffmanTable> {
+    fn read_aligned_tree(reader: &mut BitReader<'_>, table: &mut HuffmanTable) -> Result<()> {
         let mut lens = [0u8; ALIGNED_TREE_SIZE];
         for len in &mut lens {
             *len = u8::try_from(reader.read_bits(ALIGNED_CODE_BITS)?)
                 .expect("aligned-tree code lengths are encoded in three bits");
         }
-        HuffmanTable::from_code_lengths(&lens, 7)
+        table.rebuild(&lens, 7)
     }
 
     fn read_main_and_length_trees(
         &mut self,
         reader: &mut BitReader<'_>,
-    ) -> Result<(HuffmanTable, HuffmanTable)> {
+        tables: &mut DecodeTables,
+    ) -> Result<()> {
         let main_size = self.main_tree_size;
 
         let mut main_lens = self.main_lens;
-        decode_pretree_delta(reader, &mut main_lens[..256])?;
-        decode_pretree_delta(reader, &mut main_lens[256..main_size])?;
+        decode_pretree_delta(reader, &mut main_lens[..256], &mut tables.pre)?;
+        decode_pretree_delta(reader, &mut main_lens[256..main_size], &mut tables.pre)?;
         self.main_lens = main_lens;
 
         let mut length_lens = self.length_lens;
-        decode_pretree_delta(reader, &mut length_lens[..LENGTH_TREE_SIZE])?;
+        decode_pretree_delta(
+            reader,
+            &mut length_lens[..LENGTH_TREE_SIZE],
+            &mut tables.pre,
+        )?;
         self.length_lens = length_lens;
 
-        let main_tbl = HuffmanTable::from_code_lengths(&self.main_lens[..main_size], 11)?;
-        let len_tbl = HuffmanTable::from_code_lengths(&self.length_lens, 9)?;
-        Ok((main_tbl, len_tbl))
+        tables.main.rebuild(&self.main_lens[..main_size], 11)?;
+        tables.length.rebuild(&self.length_lens, 9)
     }
 }
 
 /// Read a 20-symbol pre-tree and decode delta-encoded code lengths.
-fn decode_pretree_delta(reader: &mut BitReader<'_>, lens: &mut [u8]) -> Result<()> {
+fn decode_pretree_delta(
+    reader: &mut BitReader<'_>,
+    lens: &mut [u8],
+    pre_table: &mut SmallHuffmanTable<PRE_TREE_SIZE>,
+) -> Result<()> {
     let mut pre_lens = [0u8; PRE_TREE_SIZE];
     for pl in &mut pre_lens {
         *pl = u8::try_from(reader.read_bits(PRE_TREE_CODE_BITS)?)
             .expect("pre-tree code lengths are encoded in four bits");
     }
-    let pre_table = HuffmanTable::from_code_lengths(&pre_lens, 6)?;
-    decode_code_lengths(reader, &pre_table, lens)
+    pre_table.rebuild(&pre_lens)?;
+    decode_code_lengths(reader, pre_table, lens)
 }
 
 /// Decode code lengths using a pre-tree, applying delta encoding
 /// against the previous values already in `lens`.
 fn decode_code_lengths(
     reader: &mut BitReader<'_>,
-    pre_table: &HuffmanTable,
+    pre_table: &SmallHuffmanTable<PRE_TREE_SIZE>,
     lens: &mut [u8],
 ) -> Result<()> {
     let total = lens.len();

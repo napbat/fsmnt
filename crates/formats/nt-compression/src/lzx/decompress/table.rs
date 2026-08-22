@@ -1,8 +1,8 @@
 use alloc::format;
 
 use super::{
-    Error, MAX_OVERFLOW, MAX_ROOT_SIZE, NUM_POSITION_SLOTS, PackedEntry, Result,
-    assign_canonical_codes, count_per_length, validate_code_space, validate_lengths,
+    Error, MAX_OVERFLOW, MAX_ROOT_SIZE, NUM_POSITION_SLOTS, PackedEntry, Result, canonical_codes,
+    count_per_length, validate_code_space, validate_lengths,
 };
 
 /// Decode table with flat subtables for overflow codes.
@@ -32,8 +32,6 @@ impl LzxDecodeTable {
         validate_lengths(lengths)?;
         let counts = count_per_length(lengths);
         validate_code_space(&counts)?;
-        let codes = assign_canonical_codes(lengths, &counts);
-
         let root_size = 1usize << table_bits;
 
         let mut tbl = Self {
@@ -47,10 +45,7 @@ impl LzxDecodeTable {
         // First pass: determine which root prefixes need subtables
         // and how many extra bits each needs.
         let mut max_extra_per_prefix = [0u8; MAX_ROOT_SIZE];
-        for &(code, len) in &codes {
-            if len == 0 {
-                continue;
-            }
+        for (_, code, len) in canonical_codes(lengths, &counts) {
             let len_u32 = u32::from(len);
             if len_u32 > table_bits {
                 let prefix = (code >> (len_u32 - table_bits)) as usize;
@@ -89,10 +84,7 @@ impl LzxDecodeTable {
         // Track first valid direct entry for filling unused slots.
         let mut first_direct_entry: Option<PackedEntry> = None;
 
-        for (sym, &(code, len)) in codes.iter().enumerate() {
-            if len == 0 {
-                continue;
-            }
+        for (sym, code, len) in canonical_codes(lengths, &counts) {
             let sym =
                 u16::try_from(sym).expect("an LZX decode table has fewer than u16::MAX symbols");
             let len_u32 = u32::from(len);

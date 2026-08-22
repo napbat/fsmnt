@@ -9,7 +9,9 @@ use alloc::vec::Vec;
 
 use crate::bitstream::BitWriter;
 use crate::e8::apply_e8_preprocessing;
-use crate::huffman::{assign_canonical_codes, build_code_lengths, count_per_length};
+use crate::huffman::{
+    HuffmanWorkspace, assign_canonical_codes_into, build_code_lengths_into, count_per_length,
+};
 use crate::lz77::{MatchFinder, Token};
 use crate::{Error, Result};
 
@@ -25,6 +27,31 @@ use super::{
 const MAX_MATCH_LEN: usize = 7 + LENGTH_TREE_SIZE - 1 + MIN_MATCH_LEN;
 const WINDOW_SIZE_U32: u32 = 32_768;
 const MAX_MATCH_LEN_U32: u32 = 257;
+
+/// Buffers rebuilt while encoding one LZX block.
+struct EncodeWorkspace {
+    main_codes: Vec<(u32, u8)>,
+    len_codes: Vec<(u32, u8)>,
+    delta_symbols: Vec<u8>,
+    pre_lens: Vec<u8>,
+    pre_codes: Vec<(u32, u8)>,
+    huffman: HuffmanWorkspace,
+    writer: BitWriter,
+}
+
+impl EncodeWorkspace {
+    fn new() -> Self {
+        Self {
+            main_codes: Vec::with_capacity(MAIN_TREE_SIZE),
+            len_codes: Vec::with_capacity(LENGTH_TREE_SIZE),
+            delta_symbols: Vec::with_capacity(MAIN_TREE_SIZE),
+            pre_lens: Vec::with_capacity(PRE_TREE_SIZE),
+            pre_codes: Vec::with_capacity(PRE_TREE_SIZE),
+            huffman: HuffmanWorkspace::new(),
+            writer: BitWriter::with_capacity(compress_bound(WINDOW_SIZE)),
+        }
+    }
+}
 
 /// Worst-case compressed size for LZX WIM.
 #[must_use]
@@ -42,6 +69,10 @@ pub struct Compressor {
     preprocessed: Vec<u8>,
     main_freqs: Vec<u32>,
     len_freqs: Vec<u32>,
+    symbols: Vec<SymbolEntry>,
+    main_lens: Vec<u8>,
+    len_lens: Vec<u8>,
+    encoder: EncodeWorkspace,
 }
 
 impl Compressor {
@@ -53,6 +84,10 @@ impl Compressor {
             preprocessed: Vec::with_capacity(WINDOW_SIZE),
             main_freqs: vec![0u32; MAIN_TREE_SIZE],
             len_freqs: vec![0u32; LENGTH_TREE_SIZE],
+            symbols: Vec::new(),
+            main_lens: Vec::with_capacity(MAIN_TREE_SIZE),
+            len_lens: Vec::with_capacity(LENGTH_TREE_SIZE),
+            encoder: EncodeWorkspace::new(),
         }
     }
 
@@ -88,15 +123,24 @@ impl Compressor {
         // LZ77 tokenize. Reset the match finder so stale hash
         // chains from the previous call are not followed.
         self.finder.reset();
-        let tokens = self.finder.tokenize(&self.preprocessed);
-
         // Reuse freq buffers.
         self.main_freqs.fill(0);
         self.len_freqs.fill(0);
-        let symbols = tokens_to_symbols(&tokens, &mut self.main_freqs, &mut self.len_freqs);
+        tokenize_to_symbols(
+            &mut self.finder,
+            &self.preprocessed,
+            &mut self.main_freqs,
+            &mut self.len_freqs,
+            &mut self.symbols,
+        );
 
         // Build Huffman code lengths.
-        let main_lens = build_code_lengths(&self.main_freqs, 16);
+        build_code_lengths_into(
+            &self.main_freqs,
+            16,
+            &mut self.main_lens,
+            &mut self.encoder.huffman,
+        );
 
         // Ensure the length tree has at least one valid symbol,
         // even when no matches use the length extension. The
@@ -105,10 +149,15 @@ impl Compressor {
         if self.len_freqs.iter().all(|f| *f == 0) {
             self.len_freqs[0] = 1;
         }
-        let len_lens = build_code_lengths(&self.len_freqs, 16);
+        build_code_lengths_into(
+            &self.len_freqs,
+            16,
+            &mut self.len_lens,
+            &mut self.encoder.huffman,
+        );
 
         // Ensure at least one symbol in each tree used by the block.
-        if main_lens.iter().all(|l| *l == 0) {
+        if self.main_lens.iter().all(|l| *l == 0) {
             return Err(Error::InvalidData {
                 offset: 0,
                 reason: "LZX block produced no main tree symbols".into(),
@@ -116,11 +165,11 @@ impl Compressor {
         }
 
         encode_block(
-            input.len(),
             &self.preprocessed,
-            &symbols,
-            &main_lens,
-            &len_lens,
+            &self.symbols,
+            &self.main_lens,
+            &self.len_lens,
+            &mut self.encoder,
             output,
         )
     }
@@ -150,40 +199,69 @@ pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
 
 /// Encode a single verbatim block into `output`.
 fn encode_block(
-    input_len: usize,
     preprocessed: &[u8],
     symbols: &[SymbolEntry],
     main_lens: &[u8],
     len_lens: &[u8],
+    encoder: &mut EncodeWorkspace,
     output: &mut [u8],
 ) -> Result<usize> {
-    let mut writer = BitWriter::with_capacity(input_len);
+    let EncodeWorkspace {
+        main_codes,
+        len_codes,
+        delta_symbols,
+        pre_lens,
+        pre_codes,
+        huffman,
+        writer,
+    } = encoder;
+    writer.reset();
 
     // Block header: type (3 bits) + size.
     writer.write_bits(BLOCK_VERBATIM, 3);
     write_block_size(
-        &mut writer,
+        writer,
         u32::try_from(preprocessed.len()).expect("an LZX WIM block is at most 32 KiB"),
     );
 
     // Write main tree via pre-tree (two halves).
     let prev_main = [0u8; MAIN_TREE_SIZE];
-    write_pretree_encoded(&mut writer, &main_lens[..256], &prev_main[..256]);
     write_pretree_encoded(
-        &mut writer,
+        writer,
+        &main_lens[..256],
+        &prev_main[..256],
+        delta_symbols,
+        pre_lens,
+        pre_codes,
+        huffman,
+    );
+    write_pretree_encoded(
+        writer,
         &main_lens[256..MAIN_TREE_SIZE],
         &prev_main[256..MAIN_TREE_SIZE],
+        delta_symbols,
+        pre_lens,
+        pre_codes,
+        huffman,
     );
 
     // Write length tree via pre-tree.
     let prev_len = [0u8; LENGTH_TREE_SIZE];
-    write_pretree_encoded(&mut writer, len_lens, &prev_len);
+    write_pretree_encoded(
+        writer,
+        len_lens,
+        &prev_len,
+        delta_symbols,
+        pre_lens,
+        pre_codes,
+        huffman,
+    );
 
     // Assign canonical codes.
     let main_counts = count_per_length(main_lens);
-    let main_codes = assign_canonical_codes(main_lens, &main_counts);
+    assign_canonical_codes_into(main_lens, &main_counts, main_codes);
     let len_counts = count_per_length(len_lens);
-    let len_codes = assign_canonical_codes(len_lens, &len_counts);
+    assign_canonical_codes_into(len_lens, &len_counts, len_codes);
 
     // Encode symbols.
     for sym_entry in symbols {
@@ -202,17 +280,18 @@ fn encode_block(
         }
     }
 
-    let mut bitstream = writer.finish();
+    writer.flush_bits();
     // Trailing padding so the BitReader can always refill for the
     // last symbol's ensure_bits call.
-    bitstream.extend_from_slice(&[0, 0, 0, 0]);
+    writer.write_u32_le(0);
+    let bitstream = writer.as_slice();
     if bitstream.len() > output.len() {
         return Err(Error::OutputTooSmall {
             expected: bitstream.len(),
             actual: output.len(),
         });
     }
-    output[..bitstream.len()].copy_from_slice(&bitstream);
+    output[..bitstream.len()].copy_from_slice(bitstream);
     Ok(bitstream.len())
 }
 
@@ -250,21 +329,23 @@ struct SymbolEntry {
     footer_bits_count: u32,
 }
 
-/// Convert LZ77 tokens to LZX symbols.
-fn tokens_to_symbols(
-    tokens: &[Token],
+/// Tokenize one block directly into reusable LZX symbol storage.
+fn tokenize_to_symbols(
+    finder: &mut MatchFinder,
+    data: &[u8],
     main_freqs: &mut [u32],
     len_freqs: &mut [u32],
-) -> Vec<SymbolEntry> {
-    let mut entries = Vec::with_capacity(tokens.len());
+    entries: &mut Vec<SymbolEntry>,
+) {
+    entries.clear();
     let mut r0: u32 = 1;
     let mut r1: u32 = 1;
     let mut r2: u32 = 1;
 
-    for token in tokens {
+    finder.tokenize_streaming(data, |token| {
         match token {
             Token::Literal(b) => {
-                let sym = u16::from(*b);
+                let sym = u16::from(b);
                 main_freqs[sym as usize] += 1;
                 entries.push(SymbolEntry {
                     main_symbol: sym,
@@ -334,9 +415,7 @@ fn tokens_to_symbols(
                 });
             }
         }
-    }
-
-    entries
+    });
 }
 
 /// Maximum run encodable by short zero-run symbol (17).
@@ -346,9 +425,17 @@ const SHORT_RUN_MAX: usize = SHORT_RUN_BASE + (1 << SHORT_RUN_BITS) - 1;
 const LONG_RUN_MAX: usize = LONG_RUN_BASE + (1 << LONG_RUN_BITS) - 1;
 
 /// Delta-encode code lengths and write via pre-tree.
-fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8]) {
+fn write_pretree_encoded(
+    writer: &mut BitWriter,
+    target: &[u8],
+    previous: &[u8],
+    delta_syms: &mut Vec<u8>,
+    pre_lens: &mut Vec<u8>,
+    pre_codes: &mut Vec<(u32, u8)>,
+    huffman: &mut HuffmanWorkspace,
+) {
     // Compute delta symbols.
-    let mut delta_syms: Vec<u8> = Vec::with_capacity(target.len());
+    delta_syms.clear();
     let mut i = 0;
     while i < target.len() {
         let old = if i < previous.len() { previous[i] } else { 0 };
@@ -417,7 +504,7 @@ fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8])
     }
 
     // Build pre-tree code lengths.
-    let pre_lens = build_code_lengths(&pre_freqs, 6);
+    build_code_lengths_into(&pre_freqs, 6, pre_lens, huffman);
 
     // Write 20 x 4-bit pre-tree code lengths.
     for &pl in pre_lens.iter().take(PRE_TREE_SIZE) {
@@ -425,8 +512,8 @@ fn write_pretree_encoded(writer: &mut BitWriter, target: &[u8], previous: &[u8])
     }
 
     // Assign canonical codes for pre-tree.
-    let pre_counts = count_per_length(&pre_lens);
-    let pre_codes = assign_canonical_codes(&pre_lens, &pre_counts);
+    let pre_counts = count_per_length(pre_lens);
+    assign_canonical_codes_into(pre_lens, &pre_counts, pre_codes);
 
     // Encode delta symbols using pre-tree codes.
     let mut j = 0;
@@ -578,5 +665,26 @@ mod tests {
         assert_eq!(position_slot_for_offset(2), 4);
         // Large offset
         assert_eq!(position_slot_for_offset(32766), 29);
+    }
+
+    #[test]
+    fn reusable_compressor_resets_tree_and_bitstream_workspaces() {
+        let first = vec![0x5a_u8; WINDOW_SIZE];
+        let second: Vec<u8> = (0_u8..=250).cycle().take(4_097).collect();
+        let mut compressor = Compressor::new();
+        let mut compressed = vec![0_u8; compress_bound(first.len())];
+
+        compressor
+            .compress(&first, &mut compressed)
+            .expect("first compression");
+        let second_len = compressor
+            .compress(&second, &mut compressed)
+            .expect("second compression");
+
+        let mut decoded = vec![0_u8; second.len()];
+        let decoded_len =
+            decompress(&compressed[..second_len], &mut decoded).expect("second decompression");
+        assert_eq!(decoded_len, second.len());
+        assert_eq!(decoded, second);
     }
 }

@@ -98,6 +98,116 @@ pub struct Fat {
     serial_number: u32,
 }
 
+/// Compact filesystem geometry needed while reading one file's cluster chain.
+///
+/// Keeping this snapshot separate from [`Fat`] lets file-value handles own
+/// their traversal state without retaining a borrow or copying unrelated
+/// volume metadata.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FatFileGeometry {
+    kind: FatType,
+    cluster_size: u32,
+    sector_size: u16,
+    table_start_sector: u32,
+    data_start_sector: u32,
+    cluster_count: u32,
+}
+
+impl FatFileGeometry {
+    const fn new(fat: &Fat) -> Self {
+        Self {
+            kind: fat.fat_type,
+            cluster_size: fat.cluster_size,
+            sector_size: fat.sector_size,
+            table_start_sector: fat.fat_start_sector,
+            data_start_sector: fat.first_data_sector,
+            cluster_count: fat.total_clusters,
+        }
+    }
+
+    pub(crate) const fn cluster_size(&self) -> u32 {
+        self.cluster_size
+    }
+
+    pub(crate) const fn sector_size(&self) -> u16 {
+        self.sector_size
+    }
+
+    pub(crate) const fn cluster_count(&self) -> u32 {
+        self.cluster_count
+    }
+
+    pub(crate) fn cluster_offset(&self, cluster: u32) -> Result<u64> {
+        if cluster < 2 || cluster > self.cluster_count.saturating_add(1) {
+            return Err(FatError::InvalidCluster { cluster });
+        }
+        let relative = u64::from(cluster - 2) * u64::from(self.cluster_size);
+        Ok(u64::from(self.data_start_sector) * u64::from(self.sector_size) + relative)
+    }
+
+    pub(crate) fn next_cluster_cached<T>(
+        &self,
+        fs: &mut T,
+        cluster: u32,
+        cache: &mut BlockCache,
+    ) -> Result<Option<u32>>
+    where
+        T: Read + Seek,
+    {
+        if cluster < 2 || cluster > self.cluster_count.saturating_add(1) {
+            return Err(FatError::InvalidCluster { cluster });
+        }
+
+        let (fat_offset, entry_len) = match self.kind {
+            FatType::Fat12 => (u64::from(cluster + cluster / 2), 2),
+            FatType::Fat16 => (u64::from(cluster) * 2, 2),
+            FatType::Fat32 => (u64::from(cluster) * 4, 4),
+        };
+        let byte_offset =
+            u64::from(self.table_start_sector) * u64::from(self.sector_size) + fat_offset;
+        let mut bytes = [0_u8; 4];
+        cache.read_exact_at(fs, byte_offset, &mut bytes[..entry_len])?;
+
+        match self.kind {
+            FatType::Fat12 => {
+                let entry = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let value = if cluster & 1 == 1 {
+                    entry >> 4
+                } else {
+                    entry & 0x0fff
+                };
+                if value >= 0x0ff8 {
+                    Ok(None)
+                } else if value == 0x0ff7 {
+                    Err(FatError::BadCluster { cluster })
+                } else {
+                    Ok(Some(u32::from(value)))
+                }
+            }
+            FatType::Fat16 => {
+                let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if value >= 0xfff8 {
+                    Ok(None)
+                } else if value == 0xfff7 {
+                    Err(FatError::BadCluster { cluster })
+                } else {
+                    Ok(Some(u32::from(value)))
+                }
+            }
+            FatType::Fat32 => {
+                let value = u32::from_le_bytes(bytes) & 0x0fff_ffff;
+                if value >= 0x0fff_fff8 {
+                    Ok(None)
+                } else if value == 0x0fff_fff7 {
+                    Err(FatError::BadCluster { cluster })
+                } else {
+                    Ok(Some(value))
+                }
+            }
+        }
+    }
+}
+
 impl Fat {
     /// Creates a new [`Fat`] object from a reader and validates its boot sector information.
     ///
@@ -398,6 +508,10 @@ impl Fat {
         self.total_clusters
     }
 
+    pub(crate) const fn file_geometry(&self) -> FatFileGeometry {
+        FatFileGeometry::new(self)
+    }
+
     /// Returns the root directory cluster number (FAT32 only).
     ///
     /// For FAT12/16, this returns 0 as the root directory is at a fixed location.
@@ -421,18 +535,7 @@ impl Fat {
     /// Returns an error if `cluster` is less than 2 (reserved cluster numbers)
     /// or exceeds the total number of clusters in the filesystem.
     pub fn cluster_offset(&self, cluster: u32) -> Result<u64> {
-        if cluster < 2 {
-            return Err(FatError::InvalidCluster { cluster });
-        }
-        // Valid cluster numbers are 2 through (total_clusters + 1), since
-        // clusters 0 and 1 are reserved and total_clusters counts data clusters.
-        // Use saturating_add to avoid overflow on corrupted filesystems.
-        if cluster > self.total_clusters.saturating_add(1) {
-            return Err(FatError::InvalidCluster { cluster });
-        }
-        // Clusters are numbered starting from 2
-        let cluster_offset = u64::from(cluster - 2) * u64::from(self.cluster_size);
-        Ok(u64::from(self.first_data_sector) * u64::from(self.sector_size) + cluster_offset)
+        self.file_geometry().cluster_offset(cluster)
     }
 
     /// Returns the byte offset of the root directory for FAT12/16.
@@ -490,57 +593,7 @@ impl Fat {
     where
         T: Read + Seek,
     {
-        if cluster < 2 || cluster > self.total_clusters + 1 {
-            return Err(FatError::InvalidCluster { cluster });
-        }
-
-        let (fat_offset, entry_len) = match self.fat_type {
-            FatType::Fat12 => (u64::from(cluster + cluster / 2), 2),
-            FatType::Fat16 => (u64::from(cluster) * 2, 2),
-            FatType::Fat32 => (u64::from(cluster) * 4, 4),
-        };
-        let byte_offset =
-            u64::from(self.fat_start_sector) * u64::from(self.sector_size) + fat_offset;
-        let mut bytes = [0_u8; 4];
-        cache.read_exact_at(fs, byte_offset, &mut bytes[..entry_len])?;
-
-        match self.fat_type {
-            FatType::Fat12 => {
-                let entry = u16::from_le_bytes([bytes[0], bytes[1]]);
-                let value = if cluster & 1 == 1 {
-                    entry >> 4
-                } else {
-                    entry & 0x0fff
-                };
-                if value >= 0x0ff8 {
-                    Ok(None)
-                } else if value == 0x0ff7 {
-                    Err(FatError::BadCluster { cluster })
-                } else {
-                    Ok(Some(u32::from(value)))
-                }
-            }
-            FatType::Fat16 => {
-                let value = u16::from_le_bytes([bytes[0], bytes[1]]);
-                if value >= 0xfff8 {
-                    Ok(None)
-                } else if value == 0xfff7 {
-                    Err(FatError::BadCluster { cluster })
-                } else {
-                    Ok(Some(u32::from(value)))
-                }
-            }
-            FatType::Fat32 => {
-                let value = u32::from_le_bytes(bytes) & 0x0fff_ffff;
-                if value >= 0x0fff_fff8 {
-                    Ok(None)
-                } else if value == 0x0fff_fff7 {
-                    Err(FatError::BadCluster { cluster })
-                } else {
-                    Ok(Some(value))
-                }
-            }
-        }
+        self.file_geometry().next_cluster_cached(fs, cluster, cache)
     }
 
     /// Read next cluster for FAT12.
