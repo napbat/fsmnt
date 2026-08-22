@@ -37,9 +37,8 @@ pub fn fletcher64(data: &[u8]) -> u64 {
     let mut sum1: u64 = 0;
     let mut sum2: u64 = 0;
 
-    for word in data.chunks_exact(4) {
-        // `chunks_exact(4)` guarantees a 4-byte slice.
-        let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    for word in data.as_chunks::<4>().0 {
+        let value = u32::from_le_bytes(*word);
         sum1 = reduce(sum1 + u64::from(value));
         sum2 = reduce(sum2 + sum1);
     }

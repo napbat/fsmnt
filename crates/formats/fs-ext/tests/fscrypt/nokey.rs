@@ -23,8 +23,7 @@ fn base64url_digit(index: u32) -> u8 {
 /// disagreement.
 fn ref_base64url_encode(src: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(src.len().div_ceil(3) * 4);
-    let chunks = src.chunks_exact(3);
-    let tail = chunks.remainder();
+    let (chunks, tail) = src.as_chunks::<3>();
     for c in chunks {
         let n = (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2]);
         out.push(base64url_digit((n >> 18) & 0x3F));

@@ -114,7 +114,7 @@ fn map_item(
     let length =
         usize::try_from(remaining.min(requested)).map_err(|_| BtrfsError::IntegerOverflow)?;
     let mut locations = Vec::with_capacity(expected_strides);
-    for stride in item.data.chunks_exact(RAID_STRIDE_SIZE) {
+    for stride in item.data.as_chunks::<RAID_STRIDE_SIZE>().0 {
         let raw = RawRaidStride::ref_from_bytes(stride)
             .map_err(|_| BtrfsError::InvalidRaidStripeItem { logical })?;
         let device_id = raw.device_id.get();

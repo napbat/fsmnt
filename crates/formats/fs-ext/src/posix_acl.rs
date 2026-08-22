@@ -98,8 +98,8 @@ pub(crate) fn decode(inode: u32, bytes: &[u8]) -> Result<Vec<PosixAclEntry>> {
         });
     }
 
-    let chunks = rest.chunks_exact(POSIX_ACL_ENTRY_SIZE);
-    if !chunks.remainder().is_empty() {
+    let (chunks, remainder) = rest.as_chunks::<POSIX_ACL_ENTRY_SIZE>();
+    if !remainder.is_empty() {
         // Misaligned trailing bytes: report the offset where the truncated
         // entry begins, relative to the start of the buffer.
         let truncated_start =
@@ -112,12 +112,8 @@ pub(crate) fn decode(inode: u32, bytes: &[u8]) -> Result<Vec<PosixAclEntry>> {
     }
 
     let mut out = Vec::with_capacity(rest.len() / POSIX_ACL_ENTRY_SIZE);
-    for (index, chunk) in chunks.enumerate() {
+    for (index, raw) in chunks.iter().enumerate() {
         let entry_offset = POSIX_ACL_HEADER_SIZE + index * POSIX_ACL_ENTRY_SIZE;
-        // `chunks_exact(8)` guarantees `chunk.len() == 8`; reborrow as a fixed
-        // array so the field reads compile to direct loads with no bounds
-        // checks and no panic surface.
-        let raw: &[u8; POSIX_ACL_ENTRY_SIZE] = chunk.try_into().unwrap_or(&[0; 8]);
         let tag = u16::from_le_bytes([raw[0], raw[1]]);
         let perm = u16::from_le_bytes([raw[2], raw[3]]);
         let id = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);

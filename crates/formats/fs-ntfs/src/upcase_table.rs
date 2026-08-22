@@ -62,8 +62,10 @@ impl UpcaseTable {
         // Store it in an array of `u16` uppercase characters.
         // Any endianness conversion is done here once, which makes `u16_to_uppercase` fast.
         let uppercase_characters = data
-            .chunks_exact(2)
-            .map(|two_bytes| u16::from_le_bytes(two_bytes.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|two_bytes| u16::from_le_bytes(*two_bytes))
             .collect();
 
         Ok(Self {

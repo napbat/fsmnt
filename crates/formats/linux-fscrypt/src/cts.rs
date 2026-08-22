@@ -79,7 +79,12 @@ where
     C: BlockDecrypt + BlockSizeUser<BlockSize = U16>,
 {
     let mut prev = *iv;
-    for (ct_blk, pt_blk) in ct.chunks_exact(16).zip(pt.chunks_exact_mut(16)) {
+    for (ct_blk, pt_blk) in ct
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .zip(pt.as_chunks_mut::<16>().0)
+    {
         let mut block = [0u8; 16];
         block.copy_from_slice(ct_blk);
         cipher.decrypt_block(GenericArray::from_mut_slice(&mut block));

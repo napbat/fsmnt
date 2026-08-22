@@ -41,10 +41,8 @@ impl Aes128CbcEssivCipher {
         // Standard CBC decrypt: each ciphertext block ECB-decrypts then
         // XORs with the previous ciphertext (or essiv_iv for the first).
         let mut prev = essiv_iv;
-        for chunk in unit.chunks_exact_mut(16) {
-            let saved: [u8; 16] = chunk
-                .try_into()
-                .expect("chunks_exact(16) yields 16-byte slices");
+        for chunk in unit.as_chunks_mut::<16>().0 {
+            let saved = *chunk;
             self.cbc.decrypt_block(GenericArray::from_mut_slice(chunk));
             for i in 0..16 {
                 chunk[i] ^= prev[i];

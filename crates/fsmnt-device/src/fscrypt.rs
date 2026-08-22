@@ -284,7 +284,7 @@ fn parse_hex(text: &str) -> Result<Vec<u8>, FscryptKeySpecParseError> {
     }
     let digits: Vec<u8> = text.bytes().collect();
     let mut out = Vec::with_capacity(digits.len() / 2);
-    for (index, pair) in digits.chunks_exact(2).enumerate() {
+    for (index, pair) in digits.as_chunks::<2>().0.iter().enumerate() {
         let high = hex_digit(pair[0]).ok_or(FscryptKeySpecParseError::NotHex {
             position: index * 2,
         })?;

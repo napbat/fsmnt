@@ -241,7 +241,7 @@ impl ChunkMapping {
         let serialized_stripes = data
             .get(CHUNK_HEADER_SIZE..expected)
             .ok_or(BtrfsError::InvalidChunk { logical })?;
-        for bytes in serialized_stripes.chunks_exact(STRIPE_SIZE) {
+        for bytes in serialized_stripes.as_chunks::<STRIPE_SIZE>().0 {
             let raw_stripe = RawChunkStripe::ref_from_bytes(bytes)
                 .map_err(|_| BtrfsError::InvalidChunk { logical })?;
             stripes.push(ChunkStripe {

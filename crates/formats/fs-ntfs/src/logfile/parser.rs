@@ -338,8 +338,10 @@ pub(super) fn parse_single_restart_page(
         if name_end <= cr.len() {
             let name_bytes = &cr[name_start..name_end];
             let u16s: Vec<u16> = name_bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             String::from_utf16_lossy(&u16s)
         } else {

@@ -149,11 +149,13 @@ impl LfnEntryData {
         let mut count = 0;
         for chunk in self
             .name1
-            .chunks_exact(2)
-            .chain(self.name2.chunks_exact(2))
-            .chain(self.name3.chunks_exact(2))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .chain(self.name2.as_chunks::<2>().0)
+            .chain(self.name3.as_chunks::<2>().0)
         {
-            let c = u16::from_le_bytes([chunk[0], chunk[1]]);
+            let c = u16::from_le_bytes(*chunk);
             if c == 0x0000 || c == 0xFFFF {
                 return count;
             }

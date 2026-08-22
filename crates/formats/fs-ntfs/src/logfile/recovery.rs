@@ -96,8 +96,10 @@ pub(super) fn parse_attribute_names_dump(data: &[u8]) -> Vec<AttributeNameEntry>
 
         let name_bytes = &data[name_start..name_end];
         let u16s: Vec<u16> = name_bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         let name = String::from_utf16_lossy(&u16s);
 
@@ -327,8 +329,10 @@ pub(super) fn parse_utf16le_name(data: &[u8]) -> Option<String> {
         return None;
     }
     let u16s: Vec<u16> = data
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .take_while(|&c| c != 0)
         .collect();
     if u16s.is_empty() {

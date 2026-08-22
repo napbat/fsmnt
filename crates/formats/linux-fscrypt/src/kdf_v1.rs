@@ -42,7 +42,7 @@ pub fn derive(
     }
     let cipher = Aes128::new_from_slice(nonce).expect("16-byte nonce is a valid AES-128 key");
     let mut out = master_key.as_bytes()[..out_len].to_vec();
-    for chunk in out.chunks_exact_mut(16) {
+    for chunk in out.as_chunks_mut::<16>().0 {
         let block = GenericArray::from_mut_slice(chunk);
         cipher.encrypt_block(block);
     }

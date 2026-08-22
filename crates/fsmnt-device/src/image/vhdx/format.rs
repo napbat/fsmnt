@@ -547,8 +547,10 @@ fn decode_utf16_range(bytes: &[u8], offset: usize, length: usize) -> Result<Stri
     }
     char::decode_utf16(
         bytes[offset..end]
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair)),
     )
     .collect::<Result<String, _>>()
     .map_err(|_| VhdxError::Invalid("invalid UTF-16 VHDX metadata string"))
@@ -580,7 +582,7 @@ fn parse_guid(value: &str) -> Result<Guid, VhdxError> {
     guid[..4].copy_from_slice(&first.to_le_bytes());
     guid[4..6].copy_from_slice(&second.to_le_bytes());
     guid[6..8].copy_from_slice(&third.to_le_bytes());
-    for (index, pair) in tail.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in tail.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let pair = std::str::from_utf8(pair)
             .map_err(|_| VhdxError::Invalid("invalid VHDX parent-linkage GUID"))?;
         guid[8 + index] = u8::from_str_radix(pair, 16)

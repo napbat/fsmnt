@@ -205,8 +205,8 @@ impl VhdReader {
             let offset_in_block = virtual_offset % block_size;
             let block_remaining = block_size - offset_in_block;
             let output_remaining = buffer.len() - written;
-            let chunk_length = output_remaining
-                .min(usize::try_from(block_remaining).map_or(usize::MAX, std::convert::identity));
+            let chunk_length =
+                output_remaining.min(usize::try_from(block_remaining).unwrap_or(usize::MAX));
             self.read_dynamic_block(
                 block_index,
                 offset_in_block,
@@ -255,7 +255,7 @@ impl VhdReader {
             let offset_in_sector = block_offset % SECTOR_SIZE;
             let sector_remaining = SECTOR_SIZE - offset_in_sector;
             let chunk_length = (buffer.len() - written)
-                .min(usize::try_from(sector_remaining).map_or(usize::MAX, std::convert::identity));
+                .min(usize::try_from(sector_remaining).unwrap_or(usize::MAX));
             let bitmap_byte =
                 usize::try_from(sector_in_block / 8).map_err(|_| VhdError::OutOfBounds)?;
             let bitmap_bit =
@@ -525,8 +525,8 @@ fn load_dynamic_state(
     let mut bat_bytes = vec![0_u8; bat_length];
     read_exact_at(file, header.table_offset, &mut bat_bytes)?;
     let mut bat = Vec::with_capacity(entry_count);
-    for entry in bat_bytes.chunks_exact(4) {
-        let raw = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
+    for entry in bat_bytes.as_chunks::<4>().0 {
+        let raw = u32::from_be_bytes(*entry);
         let parsed = if raw == BAT_UNALLOCATED {
             VhdBatEntry::Unallocated
         } else {
@@ -710,8 +710,10 @@ fn decode_utf16(bytes: &[u8], decode: impl Fn([u8; 2]) -> u16) -> Result<String,
         ));
     }
     let units = bytes
-        .chunks_exact(2)
-        .map(|chunk| decode([chunk[0], chunk[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|chunk| decode(*chunk))
         .take_while(|unit| *unit != 0);
     char::decode_utf16(units)
         .collect::<Result<String, _>>()

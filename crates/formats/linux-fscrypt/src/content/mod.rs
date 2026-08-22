@@ -529,7 +529,7 @@ mod tests {
 
         let aes128 = Aes128::new_from_slice(&content_key).unwrap();
         let mut prev = essiv_iv;
-        for chunk in block.chunks_exact_mut(16) {
+        for chunk in block.as_chunks_mut::<16>().0 {
             for i in 0..16 {
                 chunk[i] ^= prev[i];
             }

@@ -212,8 +212,8 @@ where
 
     // The spec requires the entire sector to be filled with
     // the same u32 checksum value.
-    for chunk in checksum_sector.chunks_exact(4) {
-        let stored = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for chunk in checksum_sector.as_chunks::<4>().0 {
+        let stored = u32::from_le_bytes(*chunk);
         if stored != expected {
             return Ok(false);
         }

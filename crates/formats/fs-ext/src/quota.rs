@@ -426,8 +426,8 @@ fn walk_tree(
     }
     let slice = block_slice(buf, block, inum)?;
     let entries_point_to_leaves = depth + 1 == QTREE_DEPTH;
-    for chunk in slice.chunks_exact(4) {
-        let next = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for chunk in slice.as_chunks::<4>().0 {
+        let next = u32::from_le_bytes(*chunk);
         if next == 0 {
             continue;
         }

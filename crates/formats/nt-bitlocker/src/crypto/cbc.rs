@@ -183,7 +183,7 @@ fn xor_sector_key_in_place(tweak_cipher: &TweakCipher, sector_num: u64, data: &m
     let mut counter = [0u8; 16];
     counter[..8].copy_from_slice(&sector_num.to_le_bytes());
 
-    for chunk in data.chunks_exact_mut(16) {
+    for chunk in data.as_chunks_mut::<16>().0 {
         let mut b = aes::Block::from(counter);
         match tweak_cipher {
             TweakCipher::Aes128(c) => c.encrypt_block(&mut b),
@@ -317,7 +317,7 @@ mod tests {
     /// Hand-roll CBC encrypt (forward direction) to test our decrypt.
     fn cbc_encrypt_in_place(key: &CbcInner, iv: &[u8; 16], data: &mut [u8]) {
         let mut prev = *iv;
-        for chunk in data.chunks_exact_mut(16) {
+        for chunk in data.as_chunks_mut::<16>().0 {
             for (d, p) in chunk.iter_mut().zip(prev.iter()) {
                 *d ^= p;
             }
