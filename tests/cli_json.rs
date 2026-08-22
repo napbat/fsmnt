@@ -184,10 +184,10 @@ fn scan_prints_one_document_of_hits() {
         "the way in is a list of arguments, not a shell string to re-split"
     );
 
-    let stderr = events(&output);
     assert!(
-        stderr.iter().any(|event| event["level"] == "INFO"),
-        "the scan says what it is about to read, on stderr where it belongs"
+        output.stderr.is_empty(),
+        "an unflagged successful scan emits no routine log events: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

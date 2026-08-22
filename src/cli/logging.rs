@@ -45,14 +45,14 @@ const FILTER_ENV: &str = "FSMNT_LOG";
 /// rather than anything about the media.
 #[derive(Args, Clone, Debug, Default)]
 pub(crate) struct LogOptions {
-    /// Say more on stderr: once for the decisions inside the library
+    /// Say more on stderr: once for progress and decisions inside the library
     /// (`-v`, debug), twice for every operation a mounted volume serves
-    /// (`-vv`, trace). Without it, progress and outcomes only.
+    /// (`-vv`, trace). Without it, only warnings and failures are reported.
     #[arg(short, long, action = ArgAction::Count, global = true, display_order = 900)]
     pub(crate) verbose: u8,
 
-    /// Say less on stderr: warnings and errors only, so a scripted mount's
-    /// log keeps what went wrong and nothing else.
+    /// Say less on stderr: failures only, so a scripted mount's log keeps
+    /// what stopped the command and nothing else.
     #[arg(
         short,
         long,
@@ -210,13 +210,13 @@ fn filter(options: &LogOptions) -> Result<EnvFilter, Box<dyn Error>> {
 
 /// The level `-q` and `-v...` ask for.
 ///
-/// `info` by default: what was detected where, and where it was mounted.
+/// Warnings by default; routine progress and operation logs are opt-in.
 const fn console_level(verbose: u8, quiet: bool) -> Level {
     if quiet {
-        return Level::WARN;
+        return Level::ERROR;
     }
     match verbose {
-        0 => Level::INFO,
+        0 => Level::WARN,
         1 => Level::DEBUG,
         _ => Level::TRACE,
     }
@@ -409,15 +409,15 @@ mod tests {
     }
 
     #[test]
-    fn quiet_keeps_warnings_and_verbosity_adds_detail() {
-        assert_eq!(console_level(0, false), Level::INFO);
+    fn unflagged_logging_is_warning_only_and_verbosity_adds_detail() {
+        assert_eq!(console_level(0, false), Level::WARN);
         assert_eq!(console_level(1, false), Level::DEBUG);
         assert_eq!(console_level(2, false), Level::TRACE);
         assert_eq!(console_level(7, false), Level::TRACE);
         assert_eq!(
             console_level(0, true),
-            Level::WARN,
-            "-q still has to report what went wrong"
+            Level::ERROR,
+            "-q still has to report command failures"
         );
     }
 }

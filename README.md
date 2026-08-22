@@ -752,9 +752,10 @@ credentials.
 
 stdout carries the command's *product* only: the `drives`, `partitions` and
 `scan` tables, and the mount lifecycle lines a script may key on (`Volume
-mounted at Z:. …`, `Unmounted.`, `Unmounted Z:.`). Everything else — what was
-detected where, driver notices, warnings, the best-effort summary, the final
-error — goes to stderr as one line per event, `level: message key=value`:
+mounted at Z:. …`, `Unmounted.`, `Unmounted Z:.`). Warnings and failures go to
+stderr by default. `-v` also reports what was detected where, driver notices,
+and progress; `-vv` adds every operation served by a mount. Each enabled event
+is one line, `level: message key=value`:
 
 ```
 info: detected Ntfs at offset 316669952 in raw image disk.bin
@@ -764,10 +765,10 @@ info: mounting ntfs volume at Z:
 
 | flag | effect |
 |---|---|
-| *(none)* | progress and outcomes (`info`) |
-| `-v` | plus the decisions inside the library, each line prefixed with the module it came from (`debug`) |
+| *(none)* | warnings and errors only; no routine logging |
+| `-v` | progress and decisions inside the library, each line prefixed with the module it came from (`debug`) |
 | `-vv` | plus every operation a mounted volume serves (`trace`) |
-| `-q` | warnings and errors only |
+| `-q` | errors only |
 | `--log-file PATH` | append the same lines to `PATH` as well, without colour |
 | `--json` | speak to a program: JSON on stdout, one JSON object per event on stderr (below) |
 | `FSMNT_LOG` | `tracing` `EnvFilter` directives (`debug`, `fsmnt_device=trace,info`); overrides `-v`/`-q` |
