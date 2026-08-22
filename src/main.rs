@@ -16,6 +16,7 @@
 
 mod cli;
 
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -433,9 +434,23 @@ impl Commands {
 /// nothing about a failure ever reaches stdout — except when the subscriber
 /// is what failed, which nothing but stderr can report.
 fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
+    let arguments: Vec<OsString> = std::env::args_os().collect();
+    let json_requested = arguments
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
+        .any(|argument| argument == "--json");
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) if json_requested && error.use_stderr() => {
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(1);
+            cli::logging::report_startup_error(true, &error);
+            return std::process::ExitCode::from(exit_code);
+        }
+        Err(error) => error.exit(),
+    };
     if let Err(error) = cli::logging::init(&cli.log) {
-        eprintln!("error: {error}");
+        cli::logging::report_startup_error(cli.log.json, error.as_ref());
         return std::process::ExitCode::FAILURE;
     }
     match run(cli) {

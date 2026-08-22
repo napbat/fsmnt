@@ -233,8 +233,10 @@ fn mount_command(hit: &ScanHit) -> Option<Vec<String>> {
         // A start whose own descriptor table does not verify is only openable
         // through the backup that named it as a start, which is what the note
         // for that row says too.
-        if let ScanHitKind::ExtPrimaryCopies { .. } = hit.kind
-            && let Some(group) = hit.backup_superblock_group()
+        if matches!(
+            hit.kind,
+            ScanHitKind::ExtBackupSuperblock { .. } | ScanHitKind::ExtPrimaryCopies { .. }
+        ) && let Some(group) = hit.backup_superblock_group()
         {
             command.push("--backup-superblock".to_string());
             command.push(group.to_string());
@@ -634,7 +636,13 @@ mod tests {
         );
         assert_eq!(
             command_of(&orphan),
-            Some(vec!["--offset".to_string(), "1024".to_string()]),
+            Some(vec![
+                "--offset".to_string(),
+                "1024".to_string(),
+                "--backup-superblock".to_string(),
+                "3".to_string(),
+            ]),
+            "a backup-only hit must offer a command that can actually open it",
         );
     }
 

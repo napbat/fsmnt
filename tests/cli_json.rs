@@ -228,6 +228,54 @@ fn a_failure_leaves_stdout_empty_and_says_why_on_stderr() {
     );
 }
 
+#[test]
+fn a_parse_failure_is_still_one_json_stderr_event() {
+    let output = fsmnt(&["--json", "partitions"]);
+
+    assert!(!output.status.success(), "a required source is missing");
+    assert_eq!(output.status.code(), Some(2), "clap keeps its exit code");
+    assert!(output.stdout.is_empty(), "a parse failure has no product");
+
+    let events = events(&output);
+    assert_eq!(events.len(), 1, "one parse failure is one event");
+    assert_eq!(events[0]["level"], "ERROR");
+    assert!(
+        events[0]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("required arguments were not provided"),
+        "{}",
+        events[0]
+    );
+}
+
+#[test]
+fn a_logging_setup_failure_is_still_one_json_stderr_event() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let output = fsmnt(&[
+        "--json",
+        "--log-file",
+        &directory.path().display().to_string(),
+        "drives",
+    ]);
+
+    assert!(!output.status.success(), "a directory cannot be a log file");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "startup has no command product");
+
+    let events = events(&output);
+    assert_eq!(events.len(), 1, "one setup failure is one event");
+    assert_eq!(events[0]["level"], "ERROR");
+    assert!(
+        events[0]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("failed to open log file"),
+        "{}",
+        events[0]
+    );
+}
+
 /// The stdout of a successful run, as a person reads it.
 fn table(output: &Output) -> String {
     assert!(

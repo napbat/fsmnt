@@ -78,6 +78,27 @@ pub(crate) struct LogOptions {
     pub(crate) json: bool,
 }
 
+/// Report an error that occurs before the tracing subscriber is available.
+///
+/// Parsing and subscriber setup can both fail before an `error!` event can
+/// be emitted. This keeps those failures inside the same stderr contract as
+/// later events when `--json` was requested, while retaining clap-style text
+/// for a person.
+pub(crate) fn report_startup_error(json: bool, error: &dyn fmt::Display) {
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "schema": SCHEMA,
+                "level": "ERROR",
+                "message": error.to_string(),
+            })
+        );
+    } else {
+        eprintln!("error: {error}");
+    }
+}
+
 /// Install the subscriber these options describe.
 ///
 /// Two layers over one registry: stderr, coloured only for a terminal, and
