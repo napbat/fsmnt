@@ -101,6 +101,70 @@ fn ext_image_detects_and_reads_through_registry() {
     assert!(!entries.is_empty(), "root listing should not be empty");
 }
 
+#[test]
+fn ext_no_key_names_are_traversable_through_registry() {
+    let Some(image) = fixture("fs-ext", "ext4-fscrypt.img") else {
+        eprintln!("skipping: fs-ext/testdata/ext4-fscrypt.img not generated");
+        return;
+    };
+
+    let (detected, mut fs) = open(image);
+    assert_eq!(detected, DetectedBootSector::Ext);
+
+    let root = fs.read_dir("/").expect("root should list without keys");
+    let encrypted = root
+        .iter()
+        .find(|entry| entry.name == "v2_dir")
+        .expect("fixture should contain the v2 encrypted directory");
+    let encrypted_path = format!("/{}", encrypted.name);
+    let children = fs
+        .read_dir(&encrypted_path)
+        .expect("an encrypted directory should list in no-key form");
+    let subdirectory = children
+        .iter()
+        .find(|entry| entry.metadata.is_dir)
+        .expect("the encrypted directory should expose its child directory");
+    assert_ne!(
+        subdirectory.name, "subdir",
+        "without its key, the child name should be the kernel's no-key form"
+    );
+
+    let subdirectory_path = format!("{encrypted_path}/{}", subdirectory.name);
+    let grandchildren = fs
+        .read_dir(&subdirectory_path)
+        .expect("a no-key directory name returned by read_dir must be traversable");
+    assert!(
+        !grandchildren.is_empty(),
+        "the encrypted child directory contains a nested file and must not appear empty"
+    );
+
+    for entry in &grandchildren {
+        let path = format!("{subdirectory_path}/{}", entry.name);
+        assert!(
+            fs.try_exists(&path)
+                .expect("a listed no-key path should be resolvable"),
+            "a listed no-key path should exist: {path}"
+        );
+        let metadata = fs
+            .metadata(&path)
+            .unwrap_or_else(|error| panic!("metadata for listed no-key path {path}: {error}"));
+        assert_eq!(metadata.is_dir, entry.metadata.is_dir);
+    }
+
+    let nested_file = grandchildren
+        .iter()
+        .find(|entry| !entry.metadata.is_dir)
+        .expect("the encrypted child directory should contain a file");
+    let nested_path = format!("{subdirectory_path}/{}", nested_file.name);
+    let error = fs
+        .read(&nested_path)
+        .expect_err("no-key traversal exposes metadata, not encrypted file contents");
+    assert!(
+        error.to_string().contains("master key") && error.to_string().contains("--fscrypt-key"),
+        "the content read should identify the missing key and its remedy: {error}"
+    );
+}
+
 /// Byte offset of inode 2 (the root directory) in `ext4-fscrypt.img`:
 /// group 0's inode table starts at block 34 (4 KiB blocks), and inode
 /// numbers are 1-based with 256-byte inodes, so inode 2 is the second slot.

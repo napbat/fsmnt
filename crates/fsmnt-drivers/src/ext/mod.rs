@@ -532,9 +532,24 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             let mut current_inum = start;
             for (idx, component) in components.iter().enumerate() {
                 let mut dir = ext.directory_at(current_inum);
-                let entry = dir
-                    .lookup(reader, component.as_bytes())
-                    .map_err(|e| map_ext_error(e, path))?;
+                let entry = match dir.lookup(reader, component.as_bytes()) {
+                    Ok(entry) => entry,
+                    Err(missing_key_error @ ExtError::MissingFscryptKey { .. }) => {
+                        debug!(
+                            inode = current_inum,
+                            error = %missing_key_error,
+                            "resolving an fscrypt no-key path component"
+                        );
+                        match dir.lookup_nokey(reader, component.as_bytes()) {
+                            Ok(entry) => entry,
+                            Err(ExtError::NotFound) => {
+                                return Err(map_ext_error(missing_key_error, path));
+                            }
+                            Err(error) => return Err(map_ext_error(error, path)),
+                        }
+                    }
+                    Err(error) => return Err(map_ext_error(error, path)),
+                };
                 let is_last = idx == components.len() - 1;
                 if !is_last && !matches!(entry.kind, EntryKind::Directory) {
                     return Err(FsError::NotADirectory(path.to_string()));

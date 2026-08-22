@@ -161,6 +161,33 @@ fn nokey_encoded_passes_through_plaintext_entries() {
     assert!(checked > 0, "root must have at least one plaintext entry");
 }
 
+#[test]
+fn nokey_encoded_names_round_trip_through_lookup() {
+    let (mut cursor, ext) = open_without_keys();
+
+    let mut root = ext.root_directory();
+    let v2 = root.lookup(&mut cursor, b"v2_dir").expect("lookup v2_dir");
+    let mut dir = ext.directory_at(v2.inode_number);
+    let mut iter = dir.raw_entries(&mut cursor).expect("raw entries");
+    let mut presented_entries = Vec::new();
+    while let Some(entry) = iter.try_next(&mut cursor).expect("raw entry") {
+        presented_entries.push((entry.name_nokey_encoded(), entry.inode_number()));
+    }
+    drop(iter);
+
+    assert!(
+        !presented_entries.is_empty(),
+        "v2_dir must have encrypted entries"
+    );
+    for (presented_name, expected_inode) in presented_entries {
+        let found = dir
+            .lookup_nokey(&mut cursor, &presented_name)
+            .expect("a presented no-key name must resolve");
+        assert_eq!(found.inode_number, expected_inode);
+        assert_eq!(found.name, presented_name);
+    }
+}
+
 // Issue #179: encrypted+casefolded directories append an 8-byte
 // `ext4_extended_dir_entry_2` (hash, minor_hash) trailer to each
 // non-dot entry. The no-key presentation form must forward that

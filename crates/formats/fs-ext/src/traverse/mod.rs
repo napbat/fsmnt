@@ -34,7 +34,10 @@ pub struct ExtLookupEntry {
     pub inode_number: u32,
     /// File type (File, Directory, or Other).
     pub kind: EntryKind,
-    /// On-disk name bytes (byte-exact copy from the directory entry).
+    /// Name bytes exposed by the lookup view.
+    ///
+    /// This is plaintext for [`ExtDirectory::lookup`] and the kernel-compatible
+    /// no-key presentation for [`ExtDirectory::lookup_nokey`].
     pub name: Vec<u8>,
 }
 
@@ -336,6 +339,56 @@ impl<'e> ExtDirectory<'e> {
         let casefold = inode.flags().contains(InodeFlags::CASEFOLD_FL);
         let lookup_name = crate::casefold::prepare_lookup_name(name, casefold);
         self.sequential_lookup(r, &inode, &lookup_name, crypto)
+    }
+
+    /// Look up an entry by its kernel-compatible no-key presentation name.
+    ///
+    /// This is the inverse traversal operation for names returned by
+    /// [`ExtRawDirEntry::name_nokey_encoded`]. It scans structural directory
+    /// entries without consulting the fscrypt keyring, allowing callers to
+    /// traverse an encrypted directory using the stable names presented when
+    /// its key is unavailable. Comparison is byte-exact because the encoded
+    /// presentation identifies one ciphertext directory entry.
+    ///
+    /// For unencrypted directories, this behaves as an exact raw-name lookup.
+    /// Call [`Self::lookup`] for normal plaintext, case-folded, and keyed
+    /// encrypted lookup semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O, inode, directory-entry, or fscrypt error while scanning
+    /// the structural directory, including [`ExtError::NotFound`] when no
+    /// encoded presentation name matches.
+    pub fn lookup_nokey<R: Read + Seek>(
+        &mut self,
+        r: &mut R,
+        name: &[u8],
+    ) -> Result<ExtLookupEntry> {
+        let mut iter = self.raw_entries(r)?;
+        loop {
+            let Some((inode_number, file_type, presented_name)) = ({
+                let Some(entry) = iter.try_next(r)? else {
+                    return Err(ExtError::NotFound);
+                };
+                let presented_name = entry.name_nokey_encoded();
+                (presented_name == name)
+                    .then(|| (entry.inode_number(), entry.file_type(), presented_name))
+            }) else {
+                continue;
+            };
+            let kind = resolve_kind(
+                self.ext,
+                r,
+                file_type,
+                inode_number,
+                self.ext.has_filetype(),
+            )?;
+            return Ok(ExtLookupEntry {
+                inode_number,
+                kind,
+                name: presented_name,
+            });
+        }
     }
 
     /// Sequential scan lookup (always-correct baseline).
