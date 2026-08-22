@@ -10,14 +10,17 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
-use fsmnt_core::{FsMetadata, OpenedTarget, TargetFilesystem, filter_entries};
+use fsmnt_core::{FsError, FsMetadata, OpenedTarget, TargetFilesystem, filter_entries};
 
 use dokan::{
     CreateDisposition, CreateFileInfo, CreateFileRequest, CreateOptions, DirectoryFiller,
     DiskSpaceInfo, FileAttributes, FileInfo, FileSystemHandler, FileSystemMounter,
     FileTimeOperation, FindData, MountFlags, MountOptions, OperationInfo, OperationResult,
     SecurityInformation, VolumeFeatures, VolumeInfo,
-    status::{STATUS_ACCESS_DENIED, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL},
+    status::{
+        STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY, STATUS_NOT_A_DIRECTORY,
+        STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL,
+    },
 };
 use tracing::{debug, trace, warn};
 use widestring::{U16CStr, U16CString};
@@ -372,10 +375,8 @@ impl DokanFs {
     fn open_path(&self, path: Box<str>) -> OperationResult<CreateFileInfo<FileHandle>> {
         let target = {
             let mut fs = self.fs.lock().unwrap();
-            fs.open(&path).map_err(|error| {
-                warn!(path = %path, error = %error, "failed to open a filesystem target");
-                STATUS_OBJECT_NAME_NOT_FOUND
-            })?
+            fs.open(&path)
+                .map_err(|error| open_error_status(&path, error))?
         };
         let is_dir = target.is_directory();
         let file_info = meta_to_file_info(target.metadata());
@@ -432,6 +433,22 @@ impl DokanFs {
             }
         }
         Ok(())
+    }
+}
+
+/// Translate normal namespace lookup outcomes without logging them as
+/// backend failures.
+fn open_error_status(path: &str, error: FsError) -> dokan::NtStatus {
+    match error {
+        FsError::NotFound(_) => STATUS_OBJECT_NAME_NOT_FOUND,
+        FsError::NotADirectory(_) => STATUS_NOT_A_DIRECTORY,
+        FsError::NotAFile(_) => STATUS_FILE_IS_A_DIRECTORY,
+        FsError::PermissionDenied(_) => STATUS_ACCESS_DENIED,
+        FsError::InvalidPath(_) => STATUS_OBJECT_NAME_INVALID,
+        error => {
+            warn!(%path, %error, "failed to open a filesystem target");
+            STATUS_UNSUCCESSFUL
+        }
     }
 }
 
@@ -712,7 +729,12 @@ mod tests {
         FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedTarget, TargetFilesystem,
     };
 
-    use super::{DokanFs, U16CString, drive_letter_root, to_internal_path};
+    use dokan::status::{
+        STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY, STATUS_NOT_A_DIRECTORY,
+        STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
+    };
+
+    use super::{DokanFs, U16CString, drive_letter_root, open_error_status, to_internal_path};
 
     #[derive(Default)]
     struct CallCounts {
@@ -835,6 +857,34 @@ mod tests {
         let root = filesystem.open_path("".into()).expect("root opens");
         assert!(root.is_dir);
         assert_eq!(calls.metadata.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn expected_open_failures_map_to_specific_statuses() {
+        for (error, expected) in [
+            (
+                FsError::NotFound("missing".into()),
+                STATUS_OBJECT_NAME_NOT_FOUND,
+            ),
+            (
+                FsError::NotADirectory("file/child".into()),
+                STATUS_NOT_A_DIRECTORY,
+            ),
+            (
+                FsError::NotAFile("directory".into()),
+                STATUS_FILE_IS_A_DIRECTORY,
+            ),
+            (
+                FsError::PermissionDenied("private".into()),
+                STATUS_ACCESS_DENIED,
+            ),
+            (
+                FsError::InvalidPath("../escape".into()),
+                STATUS_OBJECT_NAME_INVALID,
+            ),
+        ] {
+            assert_eq!(open_error_status("probe", error), expected);
+        }
     }
 
     #[test]
