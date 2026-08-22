@@ -99,8 +99,8 @@ jobs:
       - run: >
           cargo check --locked --all-targets
           -p fsmnt-core -p fsmnt-parser-core
-          -p fs-ntfs -p fs-fat -p fs-exfat -p fs-ext -p fs-apfs -p fs-btrfs
-          -p nt-compression -p nt-bitlocker
+          -p fs-ntfs -p fs-fat -p fs-exfat -p fs-ext -p fs-apfs -p fs-btrfs -p fs-qnx6
+          -p linux-fscrypt -p nt-compression -p nt-bitlocker
 
   policy:
     name: workspace policy
@@ -114,6 +114,8 @@ jobs:
       # rather than a gate; it stays a local pre-commit hook only.
       - name: Format crates stay no_std
         run: python3 scripts/check_formats_no_std.py
+      - name: Crate dependency boundaries hold
+        run: python3 scripts/check_dependency_boundaries.py
 
   # Release archives. Runs alongside the checks on every `v*` tag push and on
   # manual runs; it is skipped for branch pushes and pull requests. Each

@@ -20,6 +20,7 @@
 //! | ext2/3/4        | [`ExtFilesystem`]      | [`ExtDriver`]         |
 //! | APFS            | [`ApfsFilesystem`]     | [`ApfsDriver`]        |
 //! | Btrfs           | [`BtrfsFilesystem`]    | [`BtrfsDriver`]       |
+//! | QNX6 Power-Safe | [`Qnx6Filesystem`]     | [`Qnx6Driver`]        |
 //! | `BitLocker`     | (unlocks to NTFS)      | [`BitLockerDriver`]   |
 //!
 //! # Quick start
@@ -69,6 +70,9 @@ mod fscrypt;
 mod identity;
 mod ntfs;
 mod patched;
+mod qnx6;
+#[cfg(test)]
+mod test_support;
 
 pub use apfs::{ApfsDriver, ApfsFilesystem, VolumeSelector};
 pub use bitlocker::BitLockerDriver;
@@ -78,12 +82,13 @@ pub use ext::{ExtDriver, ExtFilesystem};
 pub use fat::{FatDriver, FatFilesystem};
 pub use ntfs::{NtfsDriver, NtfsFilesystem};
 pub use patched::PatchedReader;
+pub use qnx6::{Qnx6Driver, Qnx6Filesystem};
 
 use fsmnt_device::DriverRegistry;
 
 /// A registry holding every driver that needs no configuration.
 ///
-/// Registration order is NTFS, FAT, `exFAT`, ext, APFS, Btrfs.
+/// Registration order is NTFS, FAT, `exFAT`, ext, APFS, Btrfs, QNX6.
 /// `BitLocker` partitions are *not* covered — that driver carries
 /// credentials, so use [`registry_with_bitlocker`] (a clear-key-only
 /// [`BitLockerDriver::new`] still unlocks suspended volumes).
@@ -96,6 +101,7 @@ pub fn default_registry() -> DriverRegistry {
     registry.register(Box::new(ExtDriver));
     registry.register(Box::new(ApfsDriver));
     registry.register(Box::new(BtrfsDriver));
+    registry.register(Box::new(Qnx6Driver));
     registry
 }
 
@@ -121,7 +127,7 @@ mod tests {
         assert!(!registry.is_empty());
         assert_eq!(
             registry.names(),
-            ["ntfs", "fat", "exfat", "ext", "apfs", "btrfs"],
+            ["ntfs", "fat", "exfat", "ext", "apfs", "btrfs", "qnx6"],
             "registration order is part of the dispatch contract"
         );
     }
@@ -138,6 +144,7 @@ mod tests {
             (D::Ext, "ext"),
             (D::Apfs, "apfs"),
             (D::Btrfs, "btrfs"),
+            (D::Qnx6, "qnx6"),
         ] {
             let driver = registry
                 .find(detected)
@@ -179,7 +186,16 @@ mod tests {
         let registry = registry_with_bitlocker(BitLockerDriver::new());
         assert_eq!(
             registry.names(),
-            ["ntfs", "fat", "exfat", "ext", "apfs", "btrfs", "bitlocker"]
+            [
+                "ntfs",
+                "fat",
+                "exfat",
+                "ext",
+                "apfs",
+                "btrfs",
+                "qnx6",
+                "bitlocker"
+            ]
         );
         let driver = registry.find(D::BitLocker).expect("bitlocker driver");
         assert_eq!(driver.name(), "bitlocker");

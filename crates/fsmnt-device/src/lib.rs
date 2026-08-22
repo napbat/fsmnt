@@ -49,7 +49,7 @@ pub use detection::{
     detect_backup_boot_sector_at, detect_boot_sector_at, detect_boot_sector_within,
     ext_backup_superblock_at, ext_backup_superblock_info_at,
 };
-pub use disk::{Disk, DiskLayout};
+pub use disk::{Disk, DiskLayout, ResolvedMbrPartition};
 pub use drive::{
     HostDriveBusType, HostDriveEnumerator, HostDriveError, HostDriveId, HostDriveInfo,
     HostDriveResult,

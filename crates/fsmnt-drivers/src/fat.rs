@@ -377,31 +377,15 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn driver_supports_every_fat_width() {
-        for detected in [
-            DetectedBootSector::Fat12,
-            DetectedBootSector::Fat16,
-            DetectedBootSector::Fat32,
-        ] {
-            assert!(FatDriver.supports(detected), "must claim {detected:?}");
-        }
-    }
-
-    #[test]
-    fn driver_rejects_non_fat_types() {
-        for detected in [
-            DetectedBootSector::Ntfs,
-            // exFAT shares FAT's name but not its on-disk layout.
-            DetectedBootSector::ExFat,
-            DetectedBootSector::Ext,
-            DetectedBootSector::Apfs,
-            DetectedBootSector::Btrfs,
-            DetectedBootSector::BitLocker,
-            DetectedBootSector::MbrPartitioned,
-            DetectedBootSector::Unknown,
-        ] {
-            assert!(!FatDriver.supports(detected), "must not claim {detected:?}");
-        }
+    fn driver_supports_every_fat_width_and_nothing_else() {
+        crate::test_support::assert_supports_exactly(
+            &FatDriver,
+            &[
+                DetectedBootSector::Fat12,
+                DetectedBootSector::Fat16,
+                DetectedBootSector::Fat32,
+            ],
+        );
     }
 
     #[test]

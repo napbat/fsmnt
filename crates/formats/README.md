@@ -1,6 +1,7 @@
 # formats
 
-Home of filesystem-format parser crates (NTFS, FAT32, ext, APFS, Btrfs, …).
+Home of filesystem-format parser crates (NTFS, FAT32, ext, APFS, Btrfs,
+QNX6, …).
 
 Each crate in this directory parses one on-disk format and exposes a portable
 parser API. The parsers depend on the first-party, `no_std`-capable
@@ -15,6 +16,9 @@ Ceph — `fs-ext` contributes only the ext4 glue).
 
 Mount integration lives in `fsmnt-drivers`, whose adapters implement
 `fsmnt_core::TargetFilesystem` and `fsmnt_device::FilesystemDriver`.
+
+Most parser crates are vendored from tracium. `fs-qnx6` is a first-party
+implementation of the same portable parser boundary.
 
 Crates here are workspace members (`crates/formats/*`) and follow the same
 rules as every other member: workspace-inherited lints and dependencies,

@@ -1,7 +1,9 @@
 //! Staged filesystem detection over a seekable byte source.
 
+mod dos;
+mod qnx6;
+
 use nostdio::{Read, Seek, SeekFrom};
-use tracing::debug;
 
 use crate::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
@@ -37,9 +39,7 @@ pub fn detect_boot_sector_at(
 /// Like [`detect_boot_sector_at`], for a volume known to span exactly
 /// `length` bytes from `offset` (a partition, a bounded image window).
 ///
-/// The bound enables one more fallback: NTFS keeps a copy of its boot
-/// sector in the volume's *last* sector, which can only be found when the
-/// end is known.
+/// The bound enables format-defined end-relative recovery metadata.
 ///
 /// # Errors
 ///
@@ -49,21 +49,22 @@ pub fn detect_boot_sector_within(
     offset: u64,
     length: u64,
 ) -> std::io::Result<DetectedBootSector> {
-    let detected = probe_at(reader, offset)?.detected;
+    let probe = probe_at(reader, offset)?;
+    let detected = probe.detected;
+    if let Some(recovered) =
+        qnx6::detect_backup_over_primary(reader, offset, length, detected, &probe.prefix)?
+    {
+        return Ok(recovered);
+    }
     if detected != DetectedBootSector::Unknown {
         return Ok(detected);
     }
-    Ok(detect_backup_boot_sector_at(reader, offset, Some(length))?
-        .unwrap_or(DetectedBootSector::Unknown))
+    Ok(dos::detect_backup(reader, offset, Some(length))?.unwrap_or(DetectedBootSector::Unknown))
 }
 
-/// Sector sizes at which backup boot regions are looked for.
-const BACKUP_SECTOR_SIZES: [u64; 2] = [512, 4096];
-
-/// Classify a volume whose sector 0 is unreadable by its backup boot
-/// region: FAT32 mirrors sectors 0–2 at sector 6, exFAT mirrors its 12-sector
-/// boot region at sector 12, and NTFS keeps its boot sector in the last
-/// sector of the volume (probed only when `length` is known).
+/// Classify a volume whose primary metadata is unreadable by consulting the
+/// redundant boot regions defined by supported formats. End-relative copies
+/// are probed only when `length` is known.
 ///
 /// A backup that reports a different sector size than the one it was found
 /// at is a coincidence and is ignored. Returns `Ok(None)` when no backup
@@ -79,55 +80,12 @@ pub fn detect_backup_boot_sector_at(
     offset: u64,
     length: Option<u64>,
 ) -> std::io::Result<Option<DetectedBootSector>> {
-    for sector_size in BACKUP_SECTOR_SIZES {
-        // FAT32: `BPB_BkBootSec` is 6 in every formatter's output.
-        let fat = read_at(reader, offset + 6 * sector_size, FS_DETECT_PROBE_SIZE)?;
-        if DetectedBootSector::from_bytes(&fat) == DetectedBootSector::Fat32
-            && bpb_bytes_per_sector(&fat) == sector_size
-        {
-            debug!(
-                offset,
-                sector_size, "classified the volume from the FAT32 backup boot sector at sector 6"
-            );
-            return Ok(Some(DetectedBootSector::Fat32));
-        }
-        // exFAT: backup boot region at sector 12; `BytesPerSectorShift` at 0x6C.
-        let exfat = read_at(reader, offset + 12 * sector_size, FS_DETECT_PROBE_SIZE)?;
-        if DetectedBootSector::from_bytes(&exfat) == DetectedBootSector::ExFat
-            && exfat.len() > 0x6C
-            && (1u64 << exfat[0x6C]) == sector_size
-        {
-            debug!(
-                offset,
-                sector_size, "classified the volume from the exFAT backup boot region at sector 12"
-            );
-            return Ok(Some(DetectedBootSector::ExFat));
-        }
-        // NTFS: last sector of the volume.
-        if let Some(last) = length.and_then(|length| length.checked_sub(sector_size)) {
-            let ntfs = read_at(reader, offset + last, FS_DETECT_PROBE_SIZE)?;
-            if DetectedBootSector::from_bytes(&ntfs) == DetectedBootSector::Ntfs
-                && bpb_bytes_per_sector(&ntfs) == sector_size
-            {
-                debug!(
-                    offset,
-                    sector_size,
-                    "classified the volume from the NTFS boot-sector copy in its last sector"
-                );
-                return Ok(Some(DetectedBootSector::Ntfs));
-            }
-        }
+    if let Some(length) = length
+        && let Some(detected) = qnx6::detect_backup(reader, offset, length)?
+    {
+        return Ok(Some(detected));
     }
-    Ok(None)
-}
-
-/// `BPB_BytsPerSec` of a FAT/NTFS boot sector (`u16` at 0x0B); 0 for a
-/// buffer too short to hold it.
-fn bpb_bytes_per_sector(sector: &[u8]) -> u64 {
-    if sector.len() < 0x0D {
-        return 0;
-    }
-    u64::from(u16::from_le_bytes([sector[0x0B], sector[0x0C]]))
+    dos::detect_backup(reader, offset, length)
 }
 
 /// If `offset` holds an ext **backup** superblock, return the block group

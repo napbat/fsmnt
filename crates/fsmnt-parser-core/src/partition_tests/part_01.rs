@@ -131,19 +131,24 @@ fn mbr_entry_size_bytes_multiplies_sector_count_by_sector_size() {
 }
 
 #[test]
-fn mbr_entry_type_name_distinct_for_each_known_type() {
-    // Each known type returns its own distinct label — catches both
-    // wholesale-replacement mutants (-> None / Some("xyzzy")) and
-    // per-arm `delete match arm 0xXX` deletions, which would fall
-    // through to None.
+fn mbr_entry_type_name_covers_each_known_type() {
+    // Every known type returns its intended label — catches both wholesale
+    // replacement and per-arm deletion mutants. QNX assigns three numeric
+    // codes to the same Power-Safe filesystem family.
     let pairs: &[(u8, &str)] = &[
+        (0x05, "Extended (CHS)"),
         (0x07, "NTFS/HPFS/exFAT"),
         (0x0B, "FAT32 (CHS)"),
         (0x0C, "FAT32 (LBA)"),
         (0x0E, "FAT16 (LBA)"),
         (0x0F, "Extended (LBA)"),
+        (0x4D, "QNX4.x"),
         (0x82, "Linux Swap"),
         (0x83, "Linux"),
+        (0x85, "Extended (Linux)"),
+        (0xB1, "QNX6 Power-Safe"),
+        (0xB2, "QNX6 Power-Safe"),
+        (0xB3, "QNX6 Power-Safe"),
         (0xEE, "GPT Protective"),
         (0xEF, "EFI System"),
     ];
@@ -157,6 +162,17 @@ fn mbr_entry_type_name_distinct_for_each_known_type() {
     let unknown_bytes = mbr_entry_bytes(0, 0xAB, 0, 0);
     let unknown = MbrPartitionEntry::ref_from_bytes(&unknown_bytes).unwrap();
     assert_eq!(unknown.type_name(), None);
+}
+
+#[test]
+fn mbr_extended_container_codes_are_identified() {
+    for partition_type in MBR_TYPES_EXTENDED {
+        let bytes = mbr_entry_bytes(0, partition_type, 1, 100);
+        let entry = MbrPartitionEntry::ref_from_bytes(&bytes).unwrap();
+        assert!(entry.is_extended(), "type 0x{partition_type:02X}");
+    }
+    let data = mbr_entry_bytes(0, 0xB1, 1, 100);
+    assert!(!MbrPartitionEntry::ref_from_bytes(&data).unwrap().is_extended());
 }
 
 // ------------------------------------------------------------------

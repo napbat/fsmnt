@@ -34,6 +34,9 @@ pub const GPT_ENTRY_SIZE: usize = 128;
 /// MBR partition type indicating GPT protective MBR
 pub const MBR_TYPE_GPT_PROTECTIVE: u8 = 0xEE;
 
+/// MBR partition types that contain an Extended Boot Record chain.
+pub const MBR_TYPES_EXTENDED: [u8; 3] = [0x05, 0x0F, 0x85];
+
 /// MBR Partition Entry (16 bytes)
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout, Unaligned)]
 #[repr(C, packed)]
@@ -67,6 +70,12 @@ impl MbrPartitionEntry {
     #[must_use]
     pub fn is_gpt_protective(&self) -> bool {
         self.partition_type == MBR_TYPE_GPT_PROTECTIVE
+    }
+
+    /// Check whether this entry is an extended-partition container.
+    #[must_use]
+    pub fn is_extended(&self) -> bool {
+        MBR_TYPES_EXTENDED.contains(&self.partition_type)
     }
 
     /// Get the starting byte offset of this partition
@@ -335,13 +344,17 @@ impl MbrPartitionEntry {
     #[must_use]
     pub fn type_name(&self) -> Option<&'static str> {
         match self.partition_type {
+            0x05 => Some("Extended (CHS)"),
             0x07 => Some("NTFS/HPFS/exFAT"),
             0x0B => Some("FAT32 (CHS)"),
             0x0C => Some("FAT32 (LBA)"),
             0x0E => Some("FAT16 (LBA)"),
             0x0F => Some("Extended (LBA)"),
+            0x4D => Some("QNX4.x"),
             0x83 => Some("Linux"),
             0x82 => Some("Linux Swap"),
+            0x85 => Some("Extended (Linux)"),
+            0xB1..=0xB3 => Some("QNX6 Power-Safe"),
             0xEE => Some("GPT Protective"),
             0xEF => Some("EFI System"),
             _ => None,

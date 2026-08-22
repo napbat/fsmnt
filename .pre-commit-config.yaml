@@ -37,3 +37,9 @@ repos:
         language: python
         files: ^(Cargo\.toml|Cargo\.lock|crates/(formats/.+|fsmnt-parser-core/.+)\.(rs|toml)|scripts/check_formats_no_std\.py)$
         pass_filenames: false
+      - id: dependency-boundaries
+        name: crate dependency boundaries hold
+        entry: python scripts/check_dependency_boundaries.py
+        language: python
+        files: ^(Cargo\.toml|Cargo\.lock|crates/.+/Cargo\.toml|scripts/check_dependency_boundaries\.py)$
+        pass_filenames: false

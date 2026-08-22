@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
-"""Verify that the parser foundation and formats stay free of std features."""
+"""Verify that the parser foundation and every format stay no_std by default."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
-import json
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NO_STD_CRATES = (
-    "fsmnt-parser-core",
-    "fs-ntfs",
-    "fs-fat",
-    "fs-ext",
-    "fs-apfs",
-    "fs-btrfs",
-    "fs-exfat",
-    "linux-fscrypt",
-    "nt-compression",
-)
+FORMATS = ROOT / "crates" / "formats"
+STD_ONLY_FORMATS = {"nt-bitlocker"}
 
 
 def run_cargo(*arguments: str) -> str:
@@ -107,14 +98,35 @@ def check_crate(
     print(f"{package}: default and maximal feature sets are no_std")
 
 
+def is_format_package(package: dict[str, object]) -> bool:
+    """Return whether a Cargo package's manifest lives below formats/."""
+    manifest = Path(str(package["manifest_path"])).resolve()
+    try:
+        manifest.relative_to(FORMATS)
+    except ValueError:
+        return False
+    return True
+
+
 def main() -> None:
-    """Check all parsers; nt-bitlocker is the documented std-only exception."""
-    metadata = json.loads(
-        run_cargo("metadata", "--no-deps", "--format-version", "1")
-    )
+    """Discover and check all no_std packages from Cargo metadata."""
+    metadata = json.loads(run_cargo("metadata", "--no-deps", "--format-version", "1"))
     packages = {package["name"]: package for package in metadata["packages"]}
-    for package in NO_STD_CRATES:
-        package_metadata = packages[package]
+    format_packages = {
+        package["name"]
+        for package in metadata["packages"]
+        if is_format_package(package)
+    }
+    missing_exceptions = STD_ONLY_FORMATS - format_packages
+    if missing_exceptions:
+        missing = ", ".join(sorted(missing_exceptions))
+        raise SystemExit(f"documented std-only format packages are missing: {missing}")
+
+    no_std_packages = (format_packages - STD_ONLY_FORMATS) | {"fsmnt-parser-core"}
+    for package in sorted(no_std_packages):
+        package_metadata = packages.get(package)
+        if package_metadata is None:
+            raise SystemExit(f"required no_std package is missing: {package}")
         check_crate(
             package,
             package_metadata["manifest_path"],

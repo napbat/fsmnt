@@ -31,6 +31,7 @@ fs-ext = { workspace = true, features = [
 fs-apfs = { workspace = true, features = ["std", "chrono"] }
 fs-btrfs = { workspace = true, features = ["std"] }
 fs-exfat = { workspace = true, features = ["std", "chrono"] }
+fs-qnx6 = { workspace = true, features = ["std"] }
 nt-bitlocker = { workspace = true }
 # Diagnostics for the decisions each adapter makes while opening a volume
 # (backup boot sectors, journal replay, salvage, protector used).

@@ -467,19 +467,7 @@ mod tests {
 
     #[test]
     fn driver_supports_only_apfs() {
-        assert!(ApfsDriver.supports(DetectedBootSector::Apfs));
-        for other in [
-            DetectedBootSector::Ntfs,
-            DetectedBootSector::Fat32,
-            DetectedBootSector::ExFat,
-            DetectedBootSector::Ext,
-            DetectedBootSector::Btrfs,
-            DetectedBootSector::BitLocker,
-            DetectedBootSector::GptPartitioned,
-            DetectedBootSector::Unknown,
-        ] {
-            assert!(!ApfsDriver.supports(other), "must not claim {other:?}");
-        }
+        crate::test_support::assert_supports_exactly(&ApfsDriver, &[DetectedBootSector::Apfs]);
     }
 
     #[test]

@@ -166,6 +166,7 @@ pub(crate) const fn json_fs_label(detected: DetectedBootSector) -> &'static str 
         D::Ext => "ext",
         D::Apfs => "apfs",
         D::Btrfs => "btrfs",
+        D::Qnx6 => "qnx6",
         D::MbrPartitioned => "mbr",
         D::GptPartitioned => "gpt",
         D::Unknown => "unknown",

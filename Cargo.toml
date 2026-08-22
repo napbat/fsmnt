@@ -45,6 +45,7 @@ fs-apfs = { path = "crates/formats/fs-apfs", default-features = false }
 fs-btrfs = { path = "crates/formats/fs-btrfs", default-features = false }
 fs-exfat = { path = "crates/formats/fs-exfat", default-features = false }
 fs-ext = { path = "crates/formats/fs-ext", default-features = false }
+fs-qnx6 = { path = "crates/formats/fs-qnx6", default-features = false }
 # Format-neutral Linux fscrypt (file-based encryption). Shared by every
 # filesystem the kernel wires it into — ext4 today, f2fs/ubifs/ceph next —
 # so it lives beside the parsers rather than inside one of them.
@@ -172,7 +173,7 @@ pedantic = { level = "deny", priority = -1 }
 
 [package]
 name = "fsmnt"
-description = "Read-only virtual mounting of raw/EWF/VHD/VHDX filesystem images and block devices (NTFS, FAT, exFAT, ext, APFS, Btrfs, BitLocker) via FUSE and Dokan"
+description = "Read-only virtual mounting of raw/EWF/VHD/VHDX filesystem images and block devices (NTFS, FAT, exFAT, ext, APFS, Btrfs, QNX6, BitLocker) via FUSE and Dokan"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

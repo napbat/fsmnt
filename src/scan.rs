@@ -48,9 +48,8 @@ use tracing::debug;
 use fsmnt_device::{
     BTRFS_PRIMARY_SUPERBLOCK_OFFSET, BTRFS_SUPERBLOCK_PROBE_SIZE, DetectedBootSector,
     ExtStartCheck, FS_DETECT_PROBE_SIZE, HostDriveEnumerator, HostDriveError, HostDriveId,
-    ImageOpenError, ImageReader, Mbr, ParsedBootSector, SectorReader, ext_root_inode_location,
+    ImageOpenError, ImageReader, Mbr, SectorReader, ext_root_inode_location,
     ext_root_inode_plausible, ext_start_check, ext_superblock_info, is_btrfs_primary_superblock,
-    parse_boot_sector,
 };
 
 pub use hit::{ExtBackupSuperblock, ScanHit, ScanHitKind, mountable_hits};
@@ -822,45 +821,7 @@ fn is_plausible_partition_table(window: &[u8]) -> bool {
 /// The size the structure at the start of `window` claims for its
 /// filesystem, where the format records one.
 fn declared_size(detected: DetectedBootSector, window: &[u8]) -> Option<u64> {
-    match detected {
-        DetectedBootSector::Ext => ext_superblock_info(window).map(|info| info.size_bytes()),
-        DetectedBootSector::Ntfs
-        | DetectedBootSector::BitLocker
-        | DetectedBootSector::Fat12
-        | DetectedBootSector::Fat16
-        | DetectedBootSector::Fat32
-        | DetectedBootSector::ExFat => boot_sector_size(window),
-        _ => None,
-    }
-}
-
-/// Volume size from a DOS-family boot sector.
-fn boot_sector_size(window: &[u8]) -> Option<u64> {
-    let volume = match parse_boot_sector(window).ok()? {
-        ParsedBootSector::Ntfs { bpb, ebpb, .. } => (
-            ebpb.total_sectors.get(),
-            u32::from(bpb.bytes_per_sector.get()),
-        ),
-        ParsedBootSector::BitLocker {
-            bpb, total_sectors, ..
-        } => (total_sectors, u32::from(bpb.bytes_per_sector.get())),
-        ParsedBootSector::Fat12 { bpb, .. }
-        | ParsedBootSector::Fat16 { bpb, .. }
-        | ParsedBootSector::Fat32 { bpb, .. } => (
-            u64::from(bpb.total_sectors()),
-            u32::from(bpb.bytes_per_sector.get()),
-        ),
-        ParsedBootSector::ExFat { boot_sector } => (
-            boot_sector.volume_length.get(),
-            boot_sector.bytes_per_sector(),
-        ),
-        ParsedBootSector::Hpfs { .. }
-        | ParsedBootSector::Mbr { .. }
-        | ParsedBootSector::Gpt { .. } => return None,
-    };
-    let (sectors, bytes_per_sector) = volume;
-    let size = sectors.checked_mul(u64::from(bytes_per_sector))?;
-    (size > 0).then_some(size)
+    detected.declared_volume_size(window)
 }
 
 #[cfg(test)]

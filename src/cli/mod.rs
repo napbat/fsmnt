@@ -248,6 +248,7 @@ pub(crate) fn fs_label(detected: fsmnt::device::DetectedBootSector) -> &'static 
         D::Ext => "extfs",
         D::Apfs => "apfs",
         D::Btrfs => "btrfs",
+        D::Qnx6 => "qnx6",
         D::MbrPartitioned | D::GptPartitioned | D::Unknown => "unknown",
     }
 }

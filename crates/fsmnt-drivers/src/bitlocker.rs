@@ -183,19 +183,7 @@ mod tests {
     #[test]
     fn driver_supports_only_bitlocker() {
         let driver = BitLockerDriver::new();
-        assert!(driver.supports(DetectedBootSector::BitLocker));
-        for other in [
-            DetectedBootSector::Ntfs,
-            DetectedBootSector::Fat32,
-            DetectedBootSector::ExFat,
-            DetectedBootSector::Ext,
-            DetectedBootSector::Apfs,
-            DetectedBootSector::Btrfs,
-            DetectedBootSector::GptPartitioned,
-            DetectedBootSector::Unknown,
-        ] {
-            assert!(!driver.supports(other), "must not claim {other:?}");
-        }
+        crate::test_support::assert_supports_exactly(&driver, &[DetectedBootSector::BitLocker]);
     }
 
     #[test]

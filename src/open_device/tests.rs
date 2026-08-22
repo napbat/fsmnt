@@ -166,7 +166,8 @@ fn bitlocker_disk() -> Vec<u8> {
 }
 
 fn ntfs_volume() -> Vec<u8> {
-    let mut volume = vec![0_u8; 2048];
+    let length = usize::try_from(partition_size()).expect("partition size fits usize");
+    let mut volume = vec![0_u8; length];
     synthesize_ntfs_style_boot_sector(&mut volume[..512], *b"NTFS    ");
     volume
 }

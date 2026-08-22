@@ -678,6 +678,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-qnx6"
+version = "0.3.0"
+dependencies = [
+ "fsmnt-parser-core",
+ "fsmnt-testkit",
+ "thiserror",
+]
+
+[[package]]
 name = "fsmnt"
 version = "0.3.0"
 dependencies = [
@@ -785,6 +794,7 @@ dependencies = [
  "fs-ext",
  "fs-fat",
  "fs-ntfs",
+ "fs-qnx6",
  "fsmnt-core",
  "fsmnt-device",
  "fsmnt-parser-core",

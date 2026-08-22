@@ -20,6 +20,7 @@ use fsmnt::{
     LayoutOrigin, OpenImageError, TargetFilesystem, image_layout, image_layout_with_options,
     image_layout_with_sector_size, open_image, open_image_with_options,
 };
+use fsmnt_testkit::write_mbr_partition_entry as write_mbr_entry;
 
 const SECTOR_SIZE: usize = 512;
 const MEDIA_SIZE: usize = 32_768;
@@ -127,13 +128,6 @@ fn write_ntfs_boot_sector(media: &mut [u8], offset: usize) {
     sector[510..512].copy_from_slice(&[0x55, 0xaa]);
 }
 
-/// Fill one 16-byte MBR partition-table slot.
-fn write_mbr_entry(entry: &mut [u8], partition_type: u8, start_lba: u32, sectors: u32) {
-    entry[4] = partition_type;
-    entry[8..12].copy_from_slice(&start_lba.to_le_bytes());
-    entry[12..16].copy_from_slice(&sectors.to_le_bytes());
-}
-
 /// Raw media with an MBR whose second partition holds an NTFS volume.
 fn mbr_partitioned_media() -> Vec<u8> {
     let mut media = vec![0_u8; MEDIA_SIZE];
@@ -141,6 +135,68 @@ fn mbr_partitioned_media() -> Vec<u8> {
     write_mbr_entry(&mut media[446..462], 0x83, DATA_START_LBA, DATA_SECTORS);
     write_mbr_entry(&mut media[462..478], 0x07, NTFS_START_LBA, NTFS_SECTORS);
     media[510..512].copy_from_slice(&[0x55, 0xaa]);
+    media
+}
+
+/// Raw MBR media with two QNX6 volumes reached through an EBR chain.
+fn extended_qnx6_media() -> Vec<u8> {
+    use fsmnt_testkit::qnx6::{self, FixtureByteOrder};
+
+    const EXTENDED_START_LBA: u32 = 32;
+    const SECOND_EBR_RELATIVE_LBA: u32 = 128;
+    const SECOND_EBR_LBA: u32 = EXTENDED_START_LBA + SECOND_EBR_RELATIVE_LBA;
+    const LOGICAL_START_RELATIVE_LBA: u32 = 1;
+    const LOGICAL_SECTORS: u32 = 96;
+
+    assert_eq!(
+        qnx6::VOLUME_SIZE,
+        usize::try_from(LOGICAL_SECTORS).expect("sector count fits usize") * SECTOR_SIZE
+    );
+
+    let mut media = vec![0_u8; 320 * SECTOR_SIZE];
+    write_mbr_entry(&mut media[446..462], 0x4D, 8, 8);
+    write_mbr_entry(&mut media[462..478], 0x85, EXTENDED_START_LBA, 256);
+    media[510..512].copy_from_slice(&[0x55, 0xAA]);
+
+    let first_ebr = EXTENDED_START_LBA as usize * SECTOR_SIZE;
+    write_mbr_entry(
+        &mut media[first_ebr + 446..first_ebr + 462],
+        0xB1,
+        LOGICAL_START_RELATIVE_LBA,
+        LOGICAL_SECTORS,
+    );
+    write_mbr_entry(
+        &mut media[first_ebr + 462..first_ebr + 478],
+        0x85,
+        SECOND_EBR_RELATIVE_LBA,
+        128,
+    );
+    media[first_ebr + 510..first_ebr + 512].copy_from_slice(&[0x55, 0xAA]);
+
+    let second_ebr = SECOND_EBR_LBA as usize * SECTOR_SIZE;
+    write_mbr_entry(
+        &mut media[second_ebr + 446..second_ebr + 462],
+        0xB2,
+        LOGICAL_START_RELATIVE_LBA,
+        LOGICAL_SECTORS,
+    );
+    media[second_ebr + 510..second_ebr + 512].copy_from_slice(&[0x55, 0xAA]);
+
+    let first_volume = (EXTENDED_START_LBA + LOGICAL_START_RELATIVE_LBA) as usize * SECTOR_SIZE;
+    media[first_volume..first_volume + qnx6::VOLUME_SIZE].copy_from_slice(&qnx6::image(
+        FixtureByteOrder::Little,
+        1,
+        2,
+    ));
+    media[first_volume + qnx6::PRIMARY_SUPERBLOCK_OFFSET
+        ..first_volume + qnx6::PRIMARY_SUPERBLOCK_OFFSET + 512]
+        .fill(0);
+    let second_volume = (SECOND_EBR_LBA + LOGICAL_START_RELATIVE_LBA) as usize * SECTOR_SIZE;
+    media[second_volume..second_volume + qnx6::VOLUME_SIZE].copy_from_slice(&qnx6::image(
+        FixtureByteOrder::Big,
+        3,
+        4,
+    ));
     media
 }
 
@@ -183,6 +239,54 @@ fn mbr_images_are_enumerated_with_types_sizes_and_detected_filesystems() {
     assert_eq!(ntfs.size_bytes, u64::from(NTFS_SECTORS) * 512);
     assert_eq!(ntfs.type_name.as_deref(), Some("NTFS/HPFS/exFAT"));
     assert_eq!(ntfs.detected, Some(DetectedBootSector::Ntfs));
+}
+
+#[test]
+fn logical_qnx6_partitions_are_listed_and_opened_by_ordinal() {
+    let (_directory, path) = image_file(&extended_qnx6_media());
+    let layout = image_layout(&path).expect("enumerate extended MBR image");
+
+    assert!(matches!(layout.kind, LayoutKind::Mbr));
+    assert_eq!(layout.partitions.len(), 3);
+    assert_eq!(layout.partitions[0].type_name.as_deref(), Some("QNX4.x"));
+    assert_eq!(layout.partitions[0].offset, 8 * 512);
+    assert_eq!(
+        layout.partitions[0].detected,
+        Some(DetectedBootSector::Unknown)
+    );
+
+    let expected_offsets = [33_u64 * 512, 161_u64 * 512];
+    for (ordinal, expected_offset) in (1..=2).zip(expected_offsets) {
+        let partition = &layout.partitions[ordinal];
+        assert_eq!(partition.ordinal, Some(ordinal));
+        assert_eq!(partition.offset, expected_offset);
+        assert_eq!(partition.size_bytes, 96 * 512);
+        assert_eq!(partition.type_name.as_deref(), Some("QNX6 Power-Safe"));
+        assert_eq!(partition.detected, Some(DetectedBootSector::Qnx6));
+
+        let registry = fsmnt::drivers::default_registry();
+        let mut opened = open_image_with_options(
+            &path,
+            &registry,
+            ImageOpenOptions::new().with_partition(ordinal),
+        )
+        .unwrap_or_else(|error| panic!("open logical partition {ordinal}: {error}"));
+        assert_eq!(opened.offset, expected_offset);
+        assert_eq!(opened.detected, DetectedBootSector::Qnx6);
+        if ordinal == 1 {
+            assert_eq!(opened.filesystem.notices().len(), 1);
+            assert!(opened.filesystem.notices()[0].contains("primary superblock"));
+        } else {
+            assert!(opened.filesystem.notices().is_empty());
+        }
+        assert_eq!(
+            opened
+                .filesystem
+                .read("/hello.txt")
+                .expect("read QNX6 file"),
+            fsmnt_testkit::qnx6::HELLO_DATA
+        );
+    }
 }
 
 #[test]

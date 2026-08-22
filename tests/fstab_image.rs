@@ -17,6 +17,7 @@ use fsmnt::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, ImageOpenOptions, LayoutOrigin,
     TargetFilesystem, open_image_with_fstab,
 };
+use fsmnt_testkit::write_mbr_partition_entry as write_mbr_entry;
 
 const SECTOR_SIZE: usize = 512;
 const MEDIA_SIZE: usize = 32_768;
@@ -76,13 +77,6 @@ fn write_ntfs_boot_sector(media: &mut [u8], offset: usize, marker: u8) {
     sector[0x0d] = 8;
     sector[MARKER_OFFSET] = marker;
     sector[510..512].copy_from_slice(&[0x55, 0xaa]);
-}
-
-/// Fill one 16-byte MBR partition-table slot.
-fn write_mbr_entry(entry: &mut [u8], partition_type: u8, start_lba: u32, sectors: u32) {
-    entry[4] = partition_type;
-    entry[8..12].copy_from_slice(&start_lba.to_le_bytes());
-    entry[12..16].copy_from_slice(&sectors.to_le_bytes());
 }
 
 /// Write `media` into a temporary directory and hand back both.

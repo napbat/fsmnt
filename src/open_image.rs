@@ -528,10 +528,10 @@ pub fn open_image_with_options(
         origin: layout_origin,
     } = locate_image_window(path, partition, offset, sector_size, scan_stride)?;
 
-    // Bounded to the window so a dead sector 0 can still be classified from
-    // the copies each format keeps (FAT32/exFAT backup regions, the NTFS
-    // boot sector mirrored in the volume's last sector).
-    let detected = fsmnt_device::detect_boot_sector_within(&mut image, offset, available_bytes)
+    // Bounded to the declared extent so a dead primary can still be
+    // classified from format-defined recovery metadata. A truncated
+    // acquisition cannot move an end-relative probe to its premature EOF.
+    let detected = fsmnt_device::detect_boot_sector_within(&mut image, offset, declared_bytes)
         .map_err(|source| OpenImageError::Detection {
             path: path.to_path_buf(),
             offset,

@@ -1,6 +1,6 @@
 use super::{
     BOOT_SECTOR_SIZE, BOOT_SIGNATURE, BootSectorHeader, DosBpb, ExFatBootSector, Fat16Ebpb,
-    Fat32Ebpb, NtfsEbpb, probe_apfs, probe_btrfs_volume, probe_ext,
+    Fat32Ebpb, NtfsEbpb, probe_apfs, probe_btrfs_volume, probe_ext, qnx6,
 };
 use zerocopy::byteorder::LittleEndian;
 use zerocopy::{FromBytes, Immutable, KnownLayout, U16, Unaligned};
@@ -52,6 +52,8 @@ pub enum DetectedBootSector {
     Apfs,
     /// Btrfs filesystem (primary superblock at 64 KiB)
     Btrfs,
+    /// QNX6 Power-Safe filesystem (paired copy-on-write superblocks)
+    Qnx6,
     /// BitLocker-encrypted volume (detected container/encrypted-volume type)
     BitLocker,
     /// MBR partitioned disk (need to enumerate partitions)
@@ -104,6 +106,26 @@ pub enum BootSectorUnknownReason {
 }
 
 impl DetectedBootSector {
+    /// Every detection outcome in stable declaration order.
+    ///
+    /// This is useful for exhaustive driver-contract and presentation tests.
+    /// Consumers should not infer detection precedence from the order.
+    pub const ALL: [Self; 13] = [
+        Self::Ntfs,
+        Self::Fat12,
+        Self::Fat16,
+        Self::Fat32,
+        Self::ExFat,
+        Self::Ext,
+        Self::Apfs,
+        Self::Btrfs,
+        Self::Qnx6,
+        Self::BitLocker,
+        Self::MbrPartitioned,
+        Self::GptPartitioned,
+        Self::Unknown,
+    ];
+
     /// Detect what's on a boot sector from raw bytes.
     ///
     /// This is a pure function that parses the boot sector and returns
@@ -129,6 +151,7 @@ impl DetectedBootSector {
                 | DetectedBootSector::Ext
                 | DetectedBootSector::Apfs
                 | DetectedBootSector::Btrfs
+                | DetectedBootSector::Qnx6
         )
     }
 
@@ -140,17 +163,57 @@ impl DetectedBootSector {
             DetectedBootSector::MbrPartitioned | DetectedBootSector::GptPartitioned
         )
     }
+
+    /// Return the byte length this filesystem declares in `probe`.
+    ///
+    /// The result is available only for formats whose identifying prefix
+    /// records complete single-volume geometry. `None` also means that
+    /// `probe` does not validate as this detected format.
+    #[must_use]
+    pub fn declared_volume_size(self, probe: &[u8]) -> Option<u64> {
+        match self {
+            Self::Ext => super::ext_superblock_info(probe).map(|info| info.size_bytes()),
+            Self::Qnx6 => qnx6::volume_size(probe),
+            Self::Ntfs
+            | Self::BitLocker
+            | Self::Fat12
+            | Self::Fat16
+            | Self::Fat32
+            | Self::ExFat => boot_sector_volume_size(self, probe),
+            Self::Apfs
+            | Self::Btrfs
+            | Self::MbrPartitioned
+            | Self::GptPartitioned
+            | Self::Unknown => None,
+        }
+    }
 }
 
 /// Diagnose a boot sector from raw bytes and retain distinct failure modes.
 ///
-/// Trusts the 512-byte boot signature path first — a disk whose first sector
-/// identifies as MBR/GPT/FAT/NTFS/exFAT/BitLocker wins over later filesystem
-/// probes. Only when the standard classification yields `Unknown` do we test
-/// APFS, Btrfs, and ext superblocks.
+/// QNX6 is tested after preserving any credible partition table because its
+/// boot-loader sector intentionally resembles an *implausible* MBR; its magic
+/// and geometry at byte `0x2000` distinguish that volume. Standard
+/// FAT/NTFS/exFAT/BitLocker classification otherwise remains authoritative.
+/// Only when the standard classification yields `Unknown` do we test APFS,
+/// Btrfs, and ext superblocks.
 #[must_use]
 pub fn diagnose_boot_sector(boot_sector: &[u8]) -> BootSectorDiagnosis {
     let standard = diagnose_boot_sector_standard(boot_sector);
+    let standard_is_authoritative = match standard {
+        BootSectorDiagnosis::Detected(DetectedBootSector::MbrPartitioned) => {
+            crate::partition::Mbr::from_bytes(boot_sector)
+                .is_some_and(crate::partition::Mbr::is_plausible_table)
+        }
+        BootSectorDiagnosis::Detected(_) => true,
+        BootSectorDiagnosis::Unknown(_) => false,
+    };
+    if standard_is_authoritative {
+        return standard;
+    }
+    if qnx6::probe_volume(boot_sector) {
+        return BootSectorDiagnosis::Detected(DetectedBootSector::Qnx6);
+    }
     if matches!(standard, BootSectorDiagnosis::Unknown(_)) {
         // These formats lack the 0xAA55 boot signature, so they are probed
         // only after standard detection reports Unknown.
@@ -165,6 +228,35 @@ pub fn diagnose_boot_sector(boot_sector: &[u8]) -> BootSectorDiagnosis {
         }
     }
     standard
+}
+
+fn boot_sector_volume_size(detected: DetectedBootSector, probe: &[u8]) -> Option<u64> {
+    let (sectors, bytes_per_sector) = match (detected, parse_boot_sector(probe).ok()?) {
+        (DetectedBootSector::Ntfs, ParsedBootSector::Ntfs { bpb, ebpb, .. }) => (
+            ebpb.total_sectors.get(),
+            u32::from(bpb.bytes_per_sector.get()),
+        ),
+        (
+            DetectedBootSector::BitLocker,
+            ParsedBootSector::BitLocker {
+                bpb, total_sectors, ..
+            },
+        ) => (total_sectors, u32::from(bpb.bytes_per_sector.get())),
+        (DetectedBootSector::Fat12, ParsedBootSector::Fat12 { bpb, .. })
+        | (DetectedBootSector::Fat16, ParsedBootSector::Fat16 { bpb, .. })
+        | (DetectedBootSector::Fat32, ParsedBootSector::Fat32 { bpb, .. }) => (
+            u64::from(bpb.total_sectors()),
+            u32::from(bpb.bytes_per_sector.get()),
+        ),
+        (DetectedBootSector::ExFat, ParsedBootSector::ExFat { boot_sector }) => (
+            boot_sector.volume_length.get(),
+            boot_sector.bytes_per_sector(),
+        ),
+        _ => return None,
+    };
+    sectors
+        .checked_mul(u64::from(bytes_per_sector))
+        .filter(|size| *size > 0)
 }
 
 fn diagnose_boot_sector_standard(boot_sector: &[u8]) -> BootSectorDiagnosis {

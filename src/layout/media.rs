@@ -32,7 +32,7 @@ pub(crate) struct MediaEntries {
 ///
 /// `size_bytes` is the length of the medium behind the disk, or `None` when
 /// that is unknown; it decides how much of each extent is reported missing
-/// and bounds filesystem detection to bytes that exist.
+/// and prevents detection probes for extents wholly beyond the medium.
 pub(crate) fn media_layout<R: Read + Seek>(
     disk: &mut Disk<R>,
     size_bytes: Option<u64>,
@@ -64,7 +64,7 @@ pub(crate) fn media_layout<R: Read + Seek>(
             missing_bytes: missing_bytes(entry.offset, entry.size_bytes, size_bytes),
             type_name: entry.type_name,
             name: entry.name,
-            detected: detect_at(disk, entry.offset, size_bytes),
+            detected: detect_at(disk, entry.offset, entry.size_bytes, size_bytes),
             // A partition table describes bytes the medium carries; a
             // volume that began before the medium has no entry in one.
             head_absent: None,
@@ -197,12 +197,17 @@ pub(crate) fn missing_bytes(offset: u64, size_bytes: u64, media_size: Option<u64
 fn detect_at<R: Read + Seek>(
     disk: &mut Disk<R>,
     offset: u64,
-    size_bytes: Option<u64>,
+    extent_bytes: u64,
+    media_bytes: Option<u64>,
 ) -> Option<DetectedBootSector> {
-    if size_bytes.is_some_and(|size| offset >= size) {
+    if media_bytes.is_some_and(|size| offset >= size) {
         return None;
     }
-    disk.detect_boot_sector_at(offset).ok()
+    if extent_bytes == 0 {
+        disk.detect_boot_sector_at(offset).ok()
+    } else {
+        disk.detect_boot_sector_within(offset, extent_bytes).ok()
+    }
 }
 
 /// A partition extent before filesystem detection has been attempted.
@@ -253,18 +258,17 @@ fn gpt_entries<R: Read + Seek>(disk: &mut Disk<R>) -> Vec<RawEntry> {
     entries
 }
 
-/// Collect the primary MBR entries in on-disk order.
+/// Collect mountable primary and logical MBR data extents in ordinal order.
 fn mbr_entries<R: Read + Seek>(disk: &Disk<R>) -> Vec<RawEntry> {
     let sector_size = disk.sector_size();
-    disk.mbr_partitions()
-        .map(|entry| RawEntry {
-            offset: entry.start_offset(sector_size),
-            size_bytes: entry.size_bytes(sector_size),
-            type_name: Some(
-                entry
-                    .type_name()
-                    .map_or_else(|| format!("0x{:02X}", entry.partition_type), str::to_string),
-            ),
+    disk.resolved_mbr_partitions()
+        .map(|partition| RawEntry {
+            offset: partition.start_offset(sector_size),
+            size_bytes: partition.size_bytes(sector_size),
+            type_name: Some(partition.entry().type_name().map_or_else(
+                || format!("0x{:02X}", partition.entry().partition_type),
+                str::to_string,
+            )),
             name: None,
         })
         .collect()

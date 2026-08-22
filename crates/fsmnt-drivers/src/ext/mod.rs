@@ -822,19 +822,7 @@ mod tests {
 
     #[test]
     fn driver_supports_only_ext() {
-        assert!(ExtDriver.supports(DetectedBootSector::Ext));
-        for other in [
-            DetectedBootSector::Ntfs,
-            DetectedBootSector::Fat32,
-            DetectedBootSector::ExFat,
-            DetectedBootSector::Apfs,
-            DetectedBootSector::Btrfs,
-            DetectedBootSector::BitLocker,
-            DetectedBootSector::GptPartitioned,
-            DetectedBootSector::Unknown,
-        ] {
-            assert!(!ExtDriver.supports(other), "must not claim {other:?}");
-        }
+        crate::test_support::assert_supports_exactly(&ExtDriver, &[DetectedBootSector::Ext]);
     }
 
     #[test]

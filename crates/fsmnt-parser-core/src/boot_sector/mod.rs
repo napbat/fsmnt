@@ -6,6 +6,7 @@
 //! - NTFS (Windows NT/2000/XP+)
 //! - exFAT (SDXC cards, large removable media)
 //! - HPFS (OS/2, shares DOS 4.0 EBPB structure)
+//! - ext2/3/4, APFS, Btrfs, and QNX6 through their superblocks
 //!
 //! References:
 //! - Microsoft FAT32 File System Specification (fatgen103.doc)
@@ -39,15 +40,18 @@ pub const BTRFS_SUPERBLOCK_MAGIC: [u8; 8] = *b"_BHRfS_M";
 
 /// Probe length for prefix-based filesystem detection.
 ///
-/// This reaches ext's superblock fields at offset 0x438. Btrfs uses a sparse
-/// secondary probe at [`BTRFS_PRIMARY_SUPERBLOCK_OFFSET`] instead of forcing
-/// every caller to read the intervening 64 KiB.
-pub const FS_DETECT_PROBE_SIZE: usize = 2048;
+/// This reaches every contiguous prefix probe used by the built-in
+/// detectors. Btrfs uses a sparse secondary probe at
+/// [`BTRFS_PRIMARY_SUPERBLOCK_OFFSET`] instead of forcing every caller to
+/// read the intervening 64 KiB.
+pub const FS_DETECT_PROBE_SIZE: usize = qnx6::VOLUME_PROBE_SIZE;
 
 /// Boot signature value (little-endian: 0x55 at offset 510, 0xAA at offset 511)
 pub const BOOT_SIGNATURE: u16 = 0xAA55;
 
 mod ext;
+/// Minimal QNX6 identification and volume-geometry parsing.
+pub mod qnx6;
 
 use ext::probe_ext;
 pub use ext::{

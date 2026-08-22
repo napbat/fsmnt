@@ -6,6 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
+/// Synthetic QNX6 Power-Safe images shared by parser and driver tests.
+pub mod qnx6;
+
 /// Reader wrapper that mutates each successful read before returning it.
 ///
 /// The callback receives the physical stream offset and only the initialized
@@ -205,6 +208,30 @@ pub fn memory_device_member(
     )
 }
 
+/// Encode one inactive MBR partition-table slot.
+///
+/// The complete 16-byte entry is initialized with zeroed boot and CHS fields.
+/// `start_lba` is relative to the table containing the entry, so the helper
+/// works for both primary MBR records and logical records in an EBR fixture.
+///
+/// # Panics
+///
+/// Panics if `entry` is shorter than the 16-byte MBR entry size.
+pub fn write_mbr_partition_entry(
+    entry: &mut [u8],
+    partition_type: u8,
+    start_lba: u32,
+    sector_count: u32,
+) {
+    let entry = entry
+        .get_mut(..16)
+        .expect("an MBR partition entry needs 16 bytes");
+    entry.fill(0);
+    entry[4] = partition_type;
+    entry[8..12].copy_from_slice(&start_lba.to_le_bytes());
+    entry[12..16].copy_from_slice(&sector_count.to_le_bytes());
+}
+
 /// Wrap one byte buffer in a legacy MBR with a single primary partition.
 ///
 /// The partition begins at `start_lba`; its declared length is rounded up
@@ -278,9 +305,7 @@ pub fn single_partition_mbr(
 
     let mut disk = vec![0_u8; disk_length];
     let entry = &mut disk[446..462];
-    entry[4] = partition_type;
-    entry[8..12].copy_from_slice(&start_lba.to_le_bytes());
-    entry[12..16].copy_from_slice(&partition_sectors_u32.to_le_bytes());
+    write_mbr_partition_entry(entry, partition_type, start_lba, partition_sectors_u32);
     disk[510] = 0x55;
     disk[511] = 0xaa;
     let partition_end = partition_offset
@@ -359,7 +384,7 @@ pub fn live_device_id(variable: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::single_partition_mbr;
+    use super::{single_partition_mbr, write_mbr_partition_entry};
 
     #[cfg(feature = "device")]
     #[test]
@@ -385,6 +410,17 @@ mod tests {
     #[test]
     fn single_partition_mbr_rejects_empty_partition() {
         assert!(single_partition_mbr(&[], 0x83, 1, 512).is_err());
+    }
+
+    #[test]
+    fn partition_entry_writer_initializes_the_complete_record() {
+        let mut entry = [0xff; 16];
+        write_mbr_partition_entry(&mut entry, 0x07, 8, 16);
+
+        assert_eq!(entry[0], 0);
+        assert_eq!(entry[4], 0x07);
+        assert_eq!(&entry[8..12], &8_u32.to_le_bytes());
+        assert_eq!(&entry[12..16], &16_u32.to_le_bytes());
     }
 
     #[test]

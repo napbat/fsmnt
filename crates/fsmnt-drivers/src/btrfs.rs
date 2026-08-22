@@ -613,19 +613,7 @@ mod tests {
     #[test]
     fn driver_supports_only_btrfs() {
         let driver = BtrfsDriver;
-        assert!(driver.supports(DetectedBootSector::Btrfs));
-        for other in [
-            DetectedBootSector::Ntfs,
-            DetectedBootSector::Fat32,
-            DetectedBootSector::ExFat,
-            DetectedBootSector::Ext,
-            DetectedBootSector::Apfs,
-            DetectedBootSector::BitLocker,
-            DetectedBootSector::GptPartitioned,
-            DetectedBootSector::Unknown,
-        ] {
-            assert!(!driver.supports(other), "driver must not claim {other:?}");
-        }
+        crate::test_support::assert_supports_exactly(&driver, &[DetectedBootSector::Btrfs]);
     }
 
     #[test]

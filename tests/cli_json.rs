@@ -13,6 +13,7 @@
 
 use std::process::{Command, Output};
 
+use fsmnt_testkit::write_mbr_partition_entry as write_mbr_entry;
 use serde_json::Value;
 
 /// Sector size of the synthetic media.
@@ -41,13 +42,6 @@ fn write_ntfs_boot_sector(media: &mut [u8], offset: usize) {
     sector[0x0b..0x0d].copy_from_slice(&512_u16.to_le_bytes());
     sector[0x0d] = 8;
     sector[510..512].copy_from_slice(&[0x55, 0xaa]);
-}
-
-/// Fill one 16-byte MBR partition-table slot.
-fn write_mbr_entry(entry: &mut [u8], partition_type: u8, start_lba: u32, sectors: u32) {
-    entry[4] = partition_type;
-    entry[8..12].copy_from_slice(&start_lba.to_le_bytes());
-    entry[12..16].copy_from_slice(&sectors.to_le_bytes());
 }
 
 /// Raw media with an MBR whose second partition holds an NTFS volume.

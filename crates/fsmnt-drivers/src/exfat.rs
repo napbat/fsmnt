@@ -309,22 +309,7 @@ mod tests {
 
     #[test]
     fn driver_supports_only_exfat() {
-        assert!(ExFatDriver.supports(DetectedBootSector::ExFat));
-        for other in [
-            DetectedBootSector::Ntfs,
-            // exFAT is a distinct on-disk format from FAT12/16/32.
-            DetectedBootSector::Fat12,
-            DetectedBootSector::Fat16,
-            DetectedBootSector::Fat32,
-            DetectedBootSector::Ext,
-            DetectedBootSector::Apfs,
-            DetectedBootSector::Btrfs,
-            DetectedBootSector::BitLocker,
-            DetectedBootSector::GptPartitioned,
-            DetectedBootSector::Unknown,
-        ] {
-            assert!(!ExFatDriver.supports(other), "must not claim {other:?}");
-        }
+        crate::test_support::assert_supports_exactly(&ExFatDriver, &[DetectedBootSector::ExFat]);
     }
 
     #[test]

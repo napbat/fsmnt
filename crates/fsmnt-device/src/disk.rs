@@ -5,7 +5,8 @@
 //!
 //! - Detects the disk layout (bare filesystem vs GPT vs MBR)
 //! - Caches minimal header info (GPT header or MBR)
-//! - Provides on-demand partition access
+//! - Resolves MBR extended-partition chains
+//! - Provides bounded partition readers
 //!
 //! Partition entries are read on demand using the raw [`GptPartitionEntry`]
 //! / [`MbrPartitionEntry`] types.  Filesystem detection is left to the
@@ -21,6 +22,8 @@ use crate::{
     BOOT_SECTOR_SIZE, DetectedBootSector, GptHeader, GptPartitionEntry, Mbr, MbrPartitionEntry,
     read_gpt_header,
 };
+
+mod mbr;
 
 /// The layout/structure of a disk.
 #[derive(Debug, Clone)]
@@ -53,14 +56,62 @@ const DEFAULT_SECTOR_SIZE: u32 = 512;
 
 /// A disk or image that may contain partitions or a direct filesystem.
 ///
-/// This is a thin wrapper that detects disk layout and provides on-demand
-/// access to partitions.  It does NOT eagerly enumerate all partitions or
-/// detect filesystems — that's left to the caller.
+/// This wrapper detects the disk layout and provides on-demand access to
+/// partitions. MBR extended-partition records are resolved while the disk is
+/// opened so logical partitions have stable absolute offsets. GPT entries and
+/// filesystem detection remain on demand.
 pub struct Disk<R> {
     reader: R,
     layout: DiskLayout,
+    /// Mountable MBR data extents, with extended containers replaced by
+    /// the logical partitions in their EBR chains.
+    mbr_volumes: Vec<ResolvedMbrPartition>,
     /// Logical sector size in bytes (typically 512 or 4096).
     sector_size: u32,
+}
+
+/// One mountable data extent resolved from an MBR or EBR entry.
+///
+/// Raw [`MbrPartitionEntry`] LBAs are relative to the table containing the
+/// entry. This type preserves that entry while carrying the absolute LBA a
+/// disk reader needs, including for logical partitions in an EBR chain.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedMbrPartition {
+    entry: MbrPartitionEntry,
+    start_lba: u64,
+    logical: bool,
+}
+
+impl ResolvedMbrPartition {
+    /// The raw 16-byte entry that described this extent.
+    #[must_use]
+    pub const fn entry(&self) -> &MbrPartitionEntry {
+        &self.entry
+    }
+
+    /// Absolute start LBA measured from the beginning of the disk.
+    #[must_use]
+    pub const fn start_lba(&self) -> u64 {
+        self.start_lba
+    }
+
+    /// Whether the extent came from an EBR rather than the primary MBR.
+    #[must_use]
+    pub const fn is_logical(&self) -> bool {
+        self.logical
+    }
+
+    /// Absolute byte offset for a disk with `bytes_per_sector` sectors.
+    #[must_use]
+    pub fn start_offset(&self, bytes_per_sector: u32) -> u64 {
+        self.start_lba.saturating_mul(u64::from(bytes_per_sector))
+    }
+
+    /// Extent length in bytes for a disk with `bytes_per_sector` sectors.
+    #[must_use]
+    pub fn size_bytes(&self, bytes_per_sector: u32) -> u64 {
+        self.entry.size_bytes(bytes_per_sector)
+    }
 }
 
 impl<R: Read + Seek> Disk<R> {
@@ -92,9 +143,14 @@ impl<R: Read + Seek> Disk<R> {
     /// detection probe.
     pub fn with_sector_size(mut reader: R, sector_size: u32) -> std::io::Result<Self> {
         let layout = Self::detect_layout(&mut reader, sector_size)?;
+        let mbr_volumes = match &layout {
+            DiskLayout::Mbr { mbr } => mbr::resolve_volumes(&mut reader, mbr, sector_size),
+            DiskLayout::Bare(_) | DiskLayout::Gpt { .. } | DiskLayout::Unknown => Vec::new(),
+        };
         let disk = Self {
             reader,
             layout,
+            mbr_volumes,
             sector_size,
         };
         let table = match &disk.layout {
@@ -137,8 +193,10 @@ impl<R: Read + Seek> Disk<R> {
 
     /// The number of partition entries.
     ///
-    /// For GPT this is the size of the partition entry array (including
-    /// empty entries); for MBR the number of valid primary partitions.
+    /// For GPT this is the size of the partition entry array, including empty
+    /// entries. For MBR this is the number of non-empty entries in the primary
+    /// table. Use [`resolved_mbr_partitions`](Self::resolved_mbr_partitions)
+    /// for mountable primary and logical extents.
     #[must_use]
     pub fn partition_count(&self) -> usize {
         match &self.layout {
@@ -289,6 +347,24 @@ impl<R: Read + Seek> Disk<R> {
         }
     }
 
+    /// Iterate over mountable MBR data partitions in ordinal order.
+    ///
+    /// Extended containers are omitted and replaced with the logical
+    /// partitions resolved from their EBR chains. Primary data partitions
+    /// precede logical partitions, matching conventional MBR numbering.
+    pub fn resolved_mbr_partitions(&self) -> impl Iterator<Item = &ResolvedMbrPartition> {
+        self.mbr_volumes.iter()
+    }
+
+    /// Get a resolved MBR data partition by mountable ordinal.
+    ///
+    /// The ordinal covers primary data partitions followed by logical
+    /// partitions. Extended containers are not represented.
+    #[must_use]
+    pub fn resolved_mbr_partition(&self, index: usize) -> Option<&ResolvedMbrPartition> {
+        self.mbr_volumes.get(index)
+    }
+
     /// Borrow the underlying reader.
     pub fn reader(&mut self) -> &mut R {
         &mut self.reader
@@ -345,6 +421,35 @@ impl<R: Read + Seek> Disk<R> {
         Ok(PartitionReader::new(&mut self.reader, offset, size))
     }
 
+    /// Create a [`PartitionReader`] for a resolved MBR data partition.
+    ///
+    /// Unlike [`mbr_partition_reader`](Self::mbr_partition_reader), this
+    /// accepts mountable ordinals from
+    /// [`resolved_mbr_partitions`](Self::resolved_mbr_partitions), including
+    /// logical partitions from EBR chains.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `index` has no resolved data partition.
+    pub fn resolved_mbr_partition_reader(
+        &mut self,
+        index: usize,
+    ) -> std::io::Result<PartitionReader<&mut R>> {
+        let (offset, size) = {
+            let partition = self.resolved_mbr_partition(index).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "resolved MBR partition not found",
+                )
+            })?;
+            (
+                partition.start_offset(self.sector_size),
+                partition.size_bytes(self.sector_size),
+            )
+        };
+        Ok(PartitionReader::new(&mut self.reader, offset, size))
+    }
+
     /// Create a [`PartitionReader`] for the whole disk (offset 0).
     pub fn disk_reader(&mut self) -> PartitionReader<&mut R> {
         PartitionReader::new(&mut self.reader, 0, u64::MAX)
@@ -359,6 +464,21 @@ impl<R: Read + Seek> Disk<R> {
     /// end of a short source is not an error; detection uses the bytes read.
     pub fn detect_boot_sector_at(&mut self, offset: u64) -> std::io::Result<DetectedBootSector> {
         crate::detection::detect_boot_sector_at(&mut self.reader, offset)
+    }
+
+    /// Detect a filesystem within an extent whose exact length is known.
+    ///
+    /// The length permits format-defined end-relative backup probes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if seeking or reading a required probe fails.
+    pub fn detect_boot_sector_within(
+        &mut self,
+        offset: u64,
+        length: u64,
+    ) -> std::io::Result<DetectedBootSector> {
+        crate::detection::detect_boot_sector_within(&mut self.reader, offset, length)
     }
 
     /// Detect the disk layout by classifying the first sectors.
@@ -379,7 +499,8 @@ impl<R: Read + Seek> Disk<R> {
             | DetectedBootSector::BitLocker
             | DetectedBootSector::Ext
             | DetectedBootSector::Apfs
-            | DetectedBootSector::Btrfs => Ok(DiskLayout::Bare(detected)),
+            | DetectedBootSector::Btrfs
+            | DetectedBootSector::Qnx6 => Ok(DiskLayout::Bare(detected)),
 
             DetectedBootSector::GptPartitioned => {
                 match read_gpt_header(reader, u64::from(sector_size)) {

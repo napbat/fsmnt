@@ -41,9 +41,9 @@ struct Cli {
 #[derive(Args, Clone, Debug, Default)]
 struct FilesystemMountOptions {
     /// Filesystem-owned root to mount (Btrfs and APFS only — the
-    /// single-root formats NTFS, FAT, exFAT, ext and `BitLocker` accept just
-    /// `default`): default, top-level, path:PATH, id:NUMBER, index:NUMBER,
-    /// name:NAME, or role:ROLE.
+    /// single-root formats NTFS, FAT, exFAT, ext, QNX6 and `BitLocker`
+    /// accept just `default`): default, top-level, path:PATH, id:NUMBER,
+    /// index:NUMBER, name:NAME, or role:ROLE.
     #[arg(long, value_name = "SELECTOR")]
     fs_root: Option<fsmnt::device::FilesystemRoot>,
 
