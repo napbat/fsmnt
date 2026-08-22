@@ -201,6 +201,63 @@ impl DataRunMap {
         Ok(first_position)
     }
 
+    /// Reads the consecutive allocated prefix beginning at `offset`.
+    ///
+    /// Native NTFS compression stores a compressed unit as one or more
+    /// allocated runs followed by a sparse tail. This helper reads only the
+    /// allocated prefix and stops before that sparse tail, allowing the caller
+    /// to distinguish sparse, compressed, and fully allocated units without
+    /// materializing zeroes for the hole.
+    #[cfg(feature = "compression")]
+    pub(crate) fn read_allocated_prefix_at<T: Read + Seek>(
+        &self,
+        fs: &mut T,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let mut segment_index = self
+            .segment_index_containing(offset)
+            .ok_or(NtfsError::from(IoError::unexpected_eof()))?;
+        let mut bytes_read = 0usize;
+
+        while bytes_read < buf.len() {
+            let current_offset = offset
+                .checked_add(u64::try_from(bytes_read).expect("a slice length fits u64"))
+                .ok_or(NtfsError::from(IoError::invalid_input()))?;
+            let Some(segment) = self.segments.get(segment_index) else {
+                if bytes_read == 0 {
+                    return Err(IoError::unexpected_eof().into());
+                }
+                break;
+            };
+            let offset_in_segment = current_offset
+                .checked_sub(segment.virtual_offset)
+                .ok_or(NtfsError::from(IoError::unexpected_eof()))?;
+            let Some(position) = (segment.position + offset_in_segment).value() else {
+                break;
+            };
+
+            let remaining_in_segment = segment.size.saturating_sub(offset_in_segment);
+            let remaining_destination = buf.len() - bytes_read;
+            let to_read = remaining_destination
+                .min(usize::try_from(remaining_in_segment).unwrap_or(usize::MAX));
+            if to_read == 0 {
+                return Err(IoError::unexpected_eof().into());
+            }
+
+            fs.seek(SeekFrom::Start(position.get()))?;
+            fs.read_exact(&mut buf[bytes_read..bytes_read + to_read])?;
+            bytes_read += to_read;
+            segment_index += 1;
+        }
+
+        Ok(bytes_read)
+    }
+
     /// Returns the end offset of the segment containing `offset`.
     ///
     /// Falls back to `total_size()` if `offset` is not within any segment.

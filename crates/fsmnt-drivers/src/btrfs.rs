@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use fs_btrfs::{
-    Btrfs, BtrfsDeviceSource, BtrfsDirEntry, BtrfsEntry, BtrfsError, BtrfsFileType, BtrfsInode,
-    BtrfsTimestamp, BtrfsZone, BtrfsZoneCondition, BtrfsZoneType, BtrfsZonedDevice,
+    Btrfs, BtrfsDeviceSource, BtrfsDirEntry, BtrfsEntry, BtrfsError, BtrfsFile, BtrfsFileType,
+    BtrfsInode, BtrfsTimestamp, BtrfsZone, BtrfsZoneCondition, BtrfsZoneType, BtrfsZonedDevice,
     ZONED_SUPERBLOCK_LOG_OFFSETS, probe_zoned_superblock,
 };
 use fsmnt_core::{FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem};
@@ -17,7 +17,7 @@ use fsmnt_device::{
 };
 use tracing::debug;
 
-use crate::adapter::PathCache;
+use crate::adapter::{PathCache, string_from_bytes};
 use crate::identity;
 
 fn map_btrfs_error(error: BtrfsError, path: &str) -> FsError {
@@ -200,7 +200,23 @@ fn entry_flags(file_type: BtrfsFileType, inode: &BtrfsInode) -> FsEntryFlags {
 pub struct BtrfsFilesystem<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> {
     volume: Btrfs<R>,
     root: BtrfsEntry,
-    resolved: PathCache<BtrfsEntry>,
+    resolved: PathCache<CachedBtrfsTarget>,
+}
+
+struct CachedBtrfsTarget {
+    entry: BtrfsEntry,
+    inode: Option<BtrfsInode>,
+    file: Option<BtrfsFile>,
+}
+
+impl CachedBtrfsTarget {
+    const fn new(entry: BtrfsEntry) -> Self {
+        Self {
+            entry,
+            inode: None,
+            file: None,
+        }
+    }
 }
 
 impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
@@ -334,8 +350,8 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
     }
 
     fn resolve(&mut self, path: &str) -> FsResult<BtrfsEntry> {
-        if let Some(entry) = self.resolved.get(path) {
-            return Ok(*entry);
+        if let Some(cached) = self.resolved.get(path) {
+            return Ok(cached.entry);
         }
         let components = canonicalise_btrfs_path(path);
         let entry = self
@@ -345,26 +361,67 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
                 components.iter().map(|component| component.as_bytes()),
             )
             .map_err(|error| map_btrfs_error(error, path))?;
-        self.resolved.insert(path, entry);
+        self.resolved.insert(path, CachedBtrfsTarget::new(entry));
         Ok(entry)
+    }
+
+    fn inode_at(&mut self, path: &str) -> FsResult<BtrfsInode> {
+        let entry = self.resolve(path)?;
+        if let Some(inode) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.inode.clone())
+        {
+            return Ok(inode);
+        }
+        let inode = self
+            .volume
+            .inode(entry)
+            .map_err(|error| map_btrfs_error(error, path))?;
+        if let Some(cached) = self.resolved.get_mut(path) {
+            cached.inode = Some(inode.clone());
+        }
+        Ok(inode)
+    }
+
+    fn cache_file(&mut self, path: &str) -> FsResult<()> {
+        let entry = self.resolve(path)?;
+        if self
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.file.is_some())
+        {
+            return Ok(());
+        }
+        let file = self
+            .volume
+            .open_file(entry)
+            .map_err(|error| map_btrfs_error(error, path))?;
+        let cached = self
+            .resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("Btrfs path cache was not populated".to_string()))?;
+        cached.file = Some(file);
+        Ok(())
     }
 
     fn directory_entry(
         &mut self,
         parent: &Path,
-        raw: &BtrfsDirEntry,
+        raw: BtrfsDirEntry,
         source_path: &str,
     ) -> FsResult<FsEntry> {
+        let entry = raw.entry();
         let inode = self
             .volume
-            .inode(raw.entry())
+            .inode(entry)
             .map_err(|error| map_btrfs_error(error, source_path))?;
-        let name = String::from_utf8_lossy(raw.name()).into_owned();
+        let name = string_from_bytes(raw.into_name());
         Ok(FsEntry {
             path: parent.join(&name),
             name,
             flags: entry_flags(inode.file_type(), &inode),
-            file_id: Some(raw.entry().object_id()),
+            file_id: Some(entry.object_id()),
             metadata: metadata_of(&inode),
         })
     }
@@ -372,16 +429,24 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
 
 impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek + Send> TargetFilesystem for BtrfsFilesystem<R> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-        let entry = self.resolve(path)?;
-        self.volume
-            .read_file(entry)
+        self.cache_file(path)?;
+        let file = self
+            .resolved
+            .get_mut(path)
+            .and_then(|cached| cached.file.as_mut())
+            .ok_or_else(|| FsError::Filesystem("Btrfs file cache was not populated".to_string()))?;
+        file.read_all(&mut self.volume)
             .map_err(|error| map_btrfs_error(error, path))
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let entry = self.resolve(path)?;
-        self.volume
-            .read_file_range(entry, offset, buffer)
+        self.cache_file(path)?;
+        let file = self
+            .resolved
+            .get_mut(path)
+            .and_then(|cached| cached.file.as_mut())
+            .ok_or_else(|| FsError::Filesystem("Btrfs file cache was not populated".to_string()))?;
+        file.read_at(&mut self.volume, offset, buffer)
             .map_err(|error| map_btrfs_error(error, path))
     }
 
@@ -410,11 +475,7 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek + Send> TargetFilesystem for Btr
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
-        let entry = self.resolve(path)?;
-        let inode = self
-            .volume
-            .inode(entry)
-            .map_err(|error| map_btrfs_error(error, path))?;
+        let inode = self.inode_at(path)?;
         Ok(metadata_of(&inode))
     }
 
@@ -432,7 +493,7 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek + Send> TargetFilesystem for Btr
         };
         raw_entries
             .into_iter()
-            .map(|entry| self.directory_entry(&parent, &entry, path))
+            .map(|entry| self.directory_entry(&parent, entry, path))
             .collect()
     }
 
@@ -559,6 +620,8 @@ impl FilesystemDriver for BtrfsDriver {
 mod tests {
     use std::io;
 
+    use fsmnt_testkit::{CountingReader, Cursor, read_optional_fixture};
+
     use super::*;
 
     struct StaticZoneReporter {
@@ -646,6 +709,38 @@ mod tests {
         };
 
         assert!(error.to_string().contains("invalid Btrfs magic"), "{error}");
+    }
+
+    #[test]
+    fn adjacent_positioned_reads_reuse_the_extent_map() {
+        let Some(image) = read_optional_fixture(
+            env!("CARGO_MANIFEST_DIR"),
+            "../formats/fs-btrfs/testdata/btrfs-basic.img",
+        ) else {
+            return;
+        };
+        let reader = CountingReader::new(Cursor::new(image));
+        let mut filesystem = BtrfsFilesystem::new(reader).expect("tracked Btrfs fixture must open");
+        filesystem.volume.reader_mut().reset_stats();
+
+        let mut first = [0_u8; 5];
+        filesystem
+            .read_at("hello.txt", 0, &mut first)
+            .expect("opening read");
+        let opening = filesystem.volume.reader().stats();
+
+        filesystem.volume.reader_mut().reset_stats();
+        let mut second = [0_u8; 5];
+        filesystem
+            .read_at("hello.txt", 5, &mut second)
+            .expect("adjacent read");
+        let cached = filesystem.volume.reader().stats();
+
+        assert_eq!(&first, b"hello");
+        assert_eq!(&second, b" from");
+        assert!(opening.read_calls() > cached.read_calls());
+        assert_eq!(cached.read_calls(), 0, "the inline extent stays detached");
+        assert_eq!(cached.seek_calls(), 0, "the tree is not walked again");
     }
 
     #[test]

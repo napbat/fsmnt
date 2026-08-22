@@ -8,7 +8,6 @@
 //! buffer is exhausted mid-entry-set the iterator loads the next
 //! cluster from the chain transparently.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use zerocopy::FromBytes;
@@ -18,7 +17,7 @@ use crate::dir_entry::{
     ENTRY_TYPE_STREAM, ENTRY_TYPE_UPCASE, ENTRY_TYPE_VOLUME_LABEL, EntryTypeInfo,
     FileDirectoryEntry, FileNameEntry, StreamExtensionEntry, VolumeLabelEntry,
 };
-use crate::entry_set::{ExFatDirItem, ExFatEntrySet, decode_volume_label};
+use crate::entry_set::{ExFatDirItem, ExFatEntrySet, decode_volume_label, update_set_checksum};
 use crate::error::{ExFatError, Result};
 use crate::exfat::ExFat;
 use crate::fat::ExFatClusterIterator;
@@ -263,15 +262,16 @@ impl<'e> ExFatDirEntries<'e> {
             });
         }
 
-        // Collect all raw bytes for checksum computation.
-        let total_entries = 1 + usize::from(secondary_count);
-        let total_bytes = total_entries * DIR_ENTRY_SIZE;
-        let mut raw_bytes = vec![0u8; total_bytes];
-        raw_bytes[..DIR_ENTRY_SIZE].copy_from_slice(&primary_bytes);
+        let mut computed_checksum = 0_u16;
+        for (index, byte) in primary_bytes.into_iter().enumerate() {
+            if index != 2 && index != 3 {
+                computed_checksum = update_set_checksum(computed_checksum, byte);
+            }
+        }
 
         // Read secondary entries.
         let mut stream_entry: Option<StreamExtensionEntry> = None;
-        let mut name_entries: Vec<FileNameEntry> = Vec::new();
+        let mut name_chars = Vec::new();
 
         for i in 0..secondary_count {
             let sec_bytes = match self.read_entry_bytes(fs) {
@@ -287,8 +287,9 @@ impl<'e> ExFatDirEntries<'e> {
                 }
             };
 
-            let slot_start = (1 + usize::from(i)) * DIR_ENTRY_SIZE;
-            raw_bytes[slot_start..slot_start + DIR_ENTRY_SIZE].copy_from_slice(&sec_bytes);
+            for byte in sec_bytes {
+                computed_checksum = update_set_checksum(computed_checksum, byte);
+            }
 
             if i == 0 {
                 // First secondary must be StreamExtension (0xC0).
@@ -299,13 +300,15 @@ impl<'e> ExFatDirEntries<'e> {
                         byte_offset: primary_offset,
                     });
                 }
-                stream_entry = Some(StreamExtensionEntry::read_from_bytes(&sec_bytes).map_err(
-                    |_| ExFatError::InvalidEntrySet {
+                let stream = StreamExtensionEntry::read_from_bytes(&sec_bytes).map_err(|_| {
+                    ExFatError::InvalidEntrySet {
                         reason: "failed to parse \
                                      StreamExtensionEntry",
                         byte_offset: primary_offset,
-                    },
-                )?);
+                    }
+                })?;
+                name_chars = Vec::with_capacity(usize::from(stream.name_length));
+                stream_entry = Some(stream);
             } else {
                 // Remaining secondaries must be FileName (0xC1).
                 if sec_bytes[0] != ENTRY_TYPE_NAME {
@@ -315,12 +318,20 @@ impl<'e> ExFatDirEntries<'e> {
                         byte_offset: primary_offset,
                     });
                 }
-                name_entries.push(FileNameEntry::read_from_bytes(&sec_bytes).map_err(|_| {
+                let name_entry = FileNameEntry::read_from_bytes(&sec_bytes).map_err(|_| {
                     ExFatError::InvalidEntrySet {
                         reason: "failed to parse FileNameEntry",
                         byte_offset: primary_offset,
                     }
-                })?);
+                })?;
+                let remaining = stream_entry
+                    .as_ref()
+                    .map_or(0, |stream| usize::from(stream.name_length))
+                    .saturating_sub(name_chars.len());
+                let (pairs, _) = name_entry.file_name.as_chunks::<2>();
+                for bytes in pairs.iter().take(remaining) {
+                    name_chars.push(u16::from_le_bytes([bytes[0], bytes[1]]));
+                }
             }
         }
 
@@ -328,7 +339,8 @@ impl<'e> ExFatDirEntries<'e> {
             reason: "missing StreamExtension entry",
             byte_offset: primary_offset,
         })?;
-        let entry_set = ExFatEntrySet::assemble(file_entry, stream, &name_entries, &raw_bytes);
+        let entry_set =
+            ExFatEntrySet::assemble_owned(file_entry, stream, name_chars, computed_checksum);
 
         Ok(ExFatDirItem::FileEntry(entry_set))
     }

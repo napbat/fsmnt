@@ -8,6 +8,8 @@ use bitflags::bitflags;
 use core::mem::offset_of;
 use nt_string::u16strle::U16StrLe;
 
+#[cfg(feature = "compression")]
+use crate::attribute_value::NtfsCompressedNonResidentAttributeValue;
 use crate::attribute_value::{
     NtfsAttributeListNonResidentAttributeValue, NtfsAttributeValue, NtfsNonResidentAttributeValue,
     NtfsResidentAttributeValue,
@@ -537,12 +539,62 @@ impl<'n, 'f> NtfsAttribute<'n, 'f> {
                 data_size,
                 initialized_size,
             )?;
+            if self.is_compressed() {
+                #[cfg(feature = "compression")]
+                {
+                    let compression_unit_size = self
+                        .compression_unit_size(self.file.ntfs())
+                        .ok_or_else(|| NtfsError::DecompressionError {
+                            message: alloc::format!(
+                                "compressed attribute at {} has a zero compression-unit exponent",
+                                self.position()
+                            ),
+                        })?;
+                    return Ok(NtfsAttributeValue::CompressedNonResident(
+                        NtfsCompressedNonResidentAttributeValue::from_attribute_list(
+                            &value,
+                            fs,
+                            compression_unit_size,
+                            data_size,
+                            initialized_size,
+                        )?,
+                    ));
+                }
+                #[cfg(not(feature = "compression"))]
+                return Err(NtfsError::CompressedAttributeNotSupported);
+            }
             Ok(NtfsAttributeValue::AttributeListNonResident(value))
         } else if self.is_resident() {
             let value = self.resident_value()?;
             Ok(NtfsAttributeValue::Resident(value))
         } else {
             let value = self.non_resident_value()?;
+            if self.is_compressed() {
+                #[cfg(feature = "compression")]
+                {
+                    let compression_unit_size = self
+                        .compression_unit_size(self.file.ntfs())
+                        .ok_or_else(|| NtfsError::DecompressionError {
+                            message: alloc::format!(
+                                "compressed attribute at {} has a zero compression-unit exponent",
+                                self.position()
+                            ),
+                        })?;
+                    let data_size = self.non_resident_value_data_size();
+                    let initialized_size =
+                        self.non_resident_value_initialized_size().min(data_size);
+                    return Ok(NtfsAttributeValue::CompressedNonResident(
+                        NtfsCompressedNonResidentAttributeValue::new(
+                            &value,
+                            compression_unit_size,
+                            data_size,
+                            initialized_size,
+                        )?,
+                    ));
+                }
+                #[cfg(not(feature = "compression"))]
+                return Err(NtfsError::CompressedAttributeNotSupported);
+            }
             Ok(NtfsAttributeValue::NonResident(value))
         }
     }
@@ -586,7 +638,8 @@ impl<'n, 'f> NtfsAttribute<'n, 'f> {
     #[must_use]
     pub fn compression_unit_size(&self, ntfs: &crate::ntfs::Ntfs) -> Option<u64> {
         self.compression_unit_exponent()
-            .map(|exp| (1u64 << exp) * u64::from(ntfs.cluster_size()))
+            .and_then(|exponent| 1_u64.checked_shl(u32::from(exponent)))
+            .and_then(|clusters| clusters.checked_mul(u64::from(ntfs.cluster_size())))
     }
 }
 

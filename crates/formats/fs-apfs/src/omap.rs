@@ -13,7 +13,7 @@ use core::cmp::Ordering;
 use bitflags::bitflags;
 use zerocopy::{FromBytes, I64, Immutable, KnownLayout, LittleEndian as LE, U32, U64, Unaligned};
 
-use crate::btree::{BtreeNode, descend_le};
+use crate::btree::{BtreeNode, BtreeNodeCache, descend_le};
 use crate::checkpoint::read_block;
 use crate::error::{ApfsError, Result};
 use crate::io::{Read, Seek};
@@ -125,6 +125,7 @@ pub struct Omap {
     pub snapshot_tree_oid: Oid,
     /// Transaction id of the most recent snapshot.
     pub most_recent_snap: Xid,
+    node_cache: BtreeNodeCache,
 }
 
 /// Orders two `omap_key_t` keys: object id ascending, then transaction id
@@ -181,6 +182,7 @@ impl Omap {
             tree_oid: Oid(raw.om_tree_oid.get()),
             snapshot_tree_oid: Oid(raw.om_snapshot_tree_oid.get()),
             most_recent_snap: Xid(raw.om_most_recent_snap.get()),
+            node_cache: BtreeNodeCache::new(),
         })
     }
 
@@ -205,7 +207,7 @@ impl Omap {
     ) -> Result<Option<OmapValue>> {
         // The object-map tree is a physical tree: its root is at the block
         // address held in `om_tree_oid`.
-        let root = BtreeNode::parse(read_block(reader, block_size, self.tree_oid.0)?)?;
+        let root = self.resolve_tree_node(reader, block_size, self.tree_oid.0)?;
 
         let mut search = [0u8; OMAP_KEY_SIZE];
         search[0..8].copy_from_slice(&oid.0.to_le_bytes());
@@ -214,7 +216,7 @@ impl Omap {
         let found = descend_le(
             root,
             reader,
-            |reader, child| BtreeNode::parse(read_block(reader, block_size, child)?),
+            |reader, child| self.resolve_tree_node(reader, block_size, child),
             &search,
             omap_key_cmp,
         )?;
@@ -245,6 +247,22 @@ impl Omap {
             paddr: Paddr(raw.ov_paddr.get()),
         }))
     }
+
+    /// Read one physical object-map node, retaining recent immutable blocks.
+    fn resolve_tree_node<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        block_size: u32,
+        address: u64,
+    ) -> Result<BtreeNode> {
+        let key = (u128::from(block_size) << 64) | u128::from(address);
+        if let Some(node) = self.node_cache.get(key) {
+            return Ok(node);
+        }
+        let node = BtreeNode::parse(read_block(reader, block_size, address)?)?;
+        self.node_cache.insert(key, &node);
+        Ok(node)
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +270,7 @@ mod tests {
     use super::*;
     use crate::btree::{BTN_DATA_OFFSET, BTREE_INFO_SIZE};
     use crate::object::OBJ_PHYSICAL;
-    use fsmnt_testkit::Cursor;
+    use fsmnt_testkit::{CountingReader, Cursor};
 
     const BLK: usize = 4096;
 
@@ -382,6 +400,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(value.paddr, Paddr(100));
+    }
+
+    #[test]
+    fn repeated_resolution_reuses_physical_tree_nodes() {
+        let (omap, reader) = spec_example();
+        let mut reader = CountingReader::new(reader);
+        let block_size = u32::try_from(BLK).expect("the test fixture value fits in u32");
+        assert!(
+            omap.resolve(&mut reader, block_size, Oid(588), Xid(2300))
+                .expect("first resolution")
+                .is_some()
+        );
+        assert!(reader.stats().read_calls() > 0);
+
+        reader.reset_stats();
+        assert!(
+            omap.resolve(&mut reader, block_size, Oid(588), Xid(2202))
+                .expect("cached resolution")
+                .is_some()
+        );
+        assert_eq!(reader.stats().read_calls(), 0);
+        assert_eq!(reader.stats().seek_calls(), 0);
     }
 
     #[test]

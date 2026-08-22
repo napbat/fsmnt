@@ -370,6 +370,67 @@ fn synthetic_non_resident_initialized_size_governs_read() {
     assert_eq!(buf[1023], 0x00);
 }
 
+#[cfg(feature = "compression")]
+#[test]
+fn synthetic_compressed_attribute_decompresses_through_owned_value() {
+    let original: Vec<u8> = (0..400_u16)
+        .map(|value| u8::try_from(value % 31).expect("test byte fits u8"))
+        .collect();
+    let header = u16::try_from((original.len() - 1) & 0x0FFF)
+        .expect("test chunk length fits u16")
+        | (0b011 << 12);
+    let mut encoded = header.to_le_bytes().to_vec();
+    encoded.extend_from_slice(&original);
+
+    // One allocated cluster at LCN 2 followed by seven sparse clusters is
+    // one compressed eight-cluster unit (exponent 3).
+    let runs = [0x11, 0x01, 0x02, 0x01, 0x07, 0x00];
+    let data_size = u64::try_from(original.len()).unwrap();
+    let attribute = non_resident_attribute(
+        &runs,
+        NtfsAttributeFlags::COMPRESSED.bits(),
+        3,
+        data_size,
+        data_size,
+    );
+    let (ntfs, mut fs) = open(&attribute);
+    let data_offset = 2 * 512;
+    fs.get_mut()[data_offset..data_offset + encoded.len()].copy_from_slice(&encoded);
+    let file = file(&ntfs, &mut fs);
+    let attribute = NtfsAttribute::new(&file, FIRST_ATTRIBUTE_OFFSET, None).unwrap();
+
+    let value = attribute.value(&mut fs).unwrap();
+    assert!(matches!(
+        &value,
+        NtfsAttributeValue::CompressedNonResident(_)
+    ));
+    let mut value = value.into_owned(&mut fs).unwrap();
+    let mut output = vec![0_u8; original.len()];
+    assert_eq!(value.read_at(&mut fs, 0, &mut output).unwrap(), original.len());
+    assert_eq!(output, original);
+}
+
+#[cfg(not(feature = "compression"))]
+#[test]
+fn synthetic_compressed_attribute_requires_the_feature() {
+    let runs = [0x11, 0x01, 0x02, 0x01, 0x07, 0x00];
+    let attribute = non_resident_attribute(
+        &runs,
+        NtfsAttributeFlags::COMPRESSED.bits(),
+        3,
+        400,
+        400,
+    );
+    let (ntfs, mut fs) = open(&attribute);
+    let file = file(&ntfs, &mut fs);
+    let attribute = NtfsAttribute::new(&file, FIRST_ATTRIBUTE_OFFSET, None).unwrap();
+
+    assert!(matches!(
+        attribute.value(&mut fs),
+        Err(NtfsError::CompressedAttributeNotSupported)
+    ));
+}
+
 /// Extracts the `expected`/`actual` fields of an `InvalidAttributeLength`.
 fn invalid_length_fields(err: &NtfsError) -> (usize, usize) {
     match err {

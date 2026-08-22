@@ -15,37 +15,35 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(test)]
+use crate::dir_entry::FileNameEntry;
 use crate::dir_entry::{
-    ExFatFileAttributes, FileDirectoryEntry, FileNameEntry, StreamExtensionEntry, VolumeLabelEntry,
+    ExFatFileAttributes, FileDirectoryEntry, StreamExtensionEntry, VolumeLabelEntry,
 };
 use crate::time::ExFatTimestamp;
-
-// ============================================================
-// SetChecksum computation
-// ============================================================
 
 /// Computes the entry set checksum over raw entry set bytes.
 ///
 /// The algorithm rotates the 16-bit accumulator right by one bit
 /// (with carry) and adds each byte, skipping bytes 2 and 3 which
 /// hold the `SetChecksum` field itself in the primary entry.
+#[cfg(test)]
 pub(crate) fn compute_set_checksum(entries: &[u8]) -> u16 {
     let mut checksum: u16 = 0;
     for (i, &byte) in entries.iter().enumerate() {
         if i == 2 || i == 3 {
             continue;
         }
-        let bit0 = if checksum & 1 != 0 { 0x8000u16 } else { 0u16 };
-        checksum = bit0
-            .wrapping_add(checksum >> 1)
-            .wrapping_add(u16::from(byte));
+        checksum = update_set_checksum(checksum, byte);
     }
     checksum
 }
 
-// ============================================================
-// ExFatDirItem
-// ============================================================
+pub(crate) fn update_set_checksum(checksum: u16, byte: u8) -> u16 {
+    let bit0 = if checksum & 1 != 0 { 0x8000_u16 } else { 0 };
+    bit0.wrapping_add(checksum >> 1)
+        .wrapping_add(u16::from(byte))
+}
 
 /// An item yielded by the directory entry iterator.
 ///
@@ -84,10 +82,6 @@ pub enum ExFatDirItem {
     },
 }
 
-// ============================================================
-// ExFatEntrySet
-// ============================================================
-
 /// An assembled file entry set containing the primary file entry,
 /// stream extension, assembled file name, and checksum validation
 /// status.
@@ -96,7 +90,6 @@ pub struct ExFatEntrySet {
     file_entry: FileDirectoryEntry,
     stream_entry: StreamExtensionEntry,
     name_chars: Vec<u16>,
-    name_utf16le: Vec<u8>,
     checksum_valid: bool,
 }
 
@@ -106,6 +99,7 @@ impl ExFatEntrySet {
     /// Called by the directory iterator after collecting all entries
     /// in the set. Validates the checksum by computing it over
     /// `raw_bytes` and comparing to the stored value.
+    #[cfg(test)]
     pub(crate) fn assemble(
         file_entry: FileDirectoryEntry,
         stream_entry: StreamExtensionEntry,
@@ -113,18 +107,22 @@ impl ExFatEntrySet {
         raw_bytes: &[u8],
     ) -> Self {
         let name_chars = assemble_file_name(name_entries, stream_entry.name_length);
-        let mut name_utf16le = Vec::with_capacity(name_chars.len() * 2);
-        for &ch in &name_chars {
-            name_utf16le.extend_from_slice(&ch.to_le_bytes());
-        }
         let computed = compute_set_checksum(raw_bytes);
+        Self::assemble_owned(file_entry, stream_entry, name_chars, computed)
+    }
+
+    pub(crate) fn assemble_owned(
+        file_entry: FileDirectoryEntry,
+        stream_entry: StreamExtensionEntry,
+        name_chars: Vec<u16>,
+        computed_checksum: u16,
+    ) -> Self {
         let stored = file_entry.set_checksum.get();
         Self {
             file_entry,
             stream_entry,
             name_chars,
-            name_utf16le,
-            checksum_valid: computed == stored,
+            checksum_valid: computed_checksum == stored,
         }
     }
 
@@ -138,10 +136,10 @@ impl ExFatEntrySet {
         &self.name_chars
     }
 
-    /// Returns the file name as raw UTF-16LE bytes.
+    /// Consume the entry set and return its UTF-16 filename allocation.
     #[must_use]
-    pub fn name_utf16le(&self) -> &[u8] {
-        &self.name_utf16le
+    pub fn into_name(self) -> Vec<u16> {
+        self.name_chars
     }
 
     /// Returns the file name as a Rust `String`, replacing invalid
@@ -265,15 +263,12 @@ impl ExFatEntrySet {
     }
 }
 
-// ============================================================
-// File name assembly
-// ============================================================
-
 /// Assembles a file name from one or more [`FileNameEntry`] entries.
 ///
 /// Each entry carries up to 15 UTF-16LE code units (30 bytes).
 /// The `name_length` from the stream extension entry limits the
 /// total number of characters extracted.
+#[cfg(test)]
 fn assemble_file_name(entries: &[FileNameEntry], name_length: u8) -> Vec<u16> {
     let limit = usize::from(name_length);
     let mut chars = Vec::with_capacity(limit);
@@ -290,10 +285,6 @@ fn assemble_file_name(entries: &[FileNameEntry], name_length: u8) -> Vec<u16> {
     chars.truncate(limit);
     chars
 }
-
-// ============================================================
-// Volume label decoding
-// ============================================================
 
 /// Decodes a volume label from a [`VolumeLabelEntry`].
 ///
@@ -504,16 +495,6 @@ mod tests {
         let name_entry = FileNameEntry::read_from_bytes(&raw[64..96]).unwrap();
 
         ExFatEntrySet::assemble(file, stream, core::slice::from_ref(&name_entry), &raw)
-    }
-
-    /// `name_utf16le` returns the file name as raw UTF-16LE bytes.
-    /// Asserting the exact bytes for an ASCII name kills mutations
-    /// that substitute `Vec::leak(Vec::new())` or `vec![0]` / `vec![1]`.
-    #[test]
-    fn name_utf16le_returns_correct_bytes() {
-        let es = build_entry_set("ABC", 0, 0);
-        // 'A','B','C' in UTF-16LE = [0x41,0x00, 0x42,0x00, 0x43,0x00].
-        assert_eq!(es.name_utf16le(), &[0x41, 0x00, 0x42, 0x00, 0x43, 0x00]);
     }
 
     /// Pins `valid_data_length` to the field stored in the stream

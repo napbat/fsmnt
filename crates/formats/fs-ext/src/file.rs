@@ -8,6 +8,7 @@ use crate::ext::Ext;
 use crate::extent::{collect_extents_into, resolve_extent};
 use crate::inode::InodeFlags;
 use crate::io::{FsReadSeek, Read, Seek, SeekFrom};
+use crate::positioned_file::ExtPositionedFile;
 
 fn usize_from_u64(value: u64) -> Result<usize> {
     usize::try_from(value).map_err(|_| ExtError::from(IoError::invalid_input()))
@@ -215,6 +216,68 @@ impl<'e> ExtFile<'e> {
             backing: ExtFileBacking::InlineOverflow { i_block, overflow },
             size,
             stream_pos: 0,
+        }
+    }
+
+    /// Detaches this reader from its parent [`Ext`] for long-lived positioned
+    /// access.
+    ///
+    /// The returned handle retains decoded inode mapping state and any
+    /// lazily initialized fscrypt or fs-verity workspace. Call
+    /// [`ExtPositionedFile::read_at`] with the same [`Ext`] that created this
+    /// file.
+    #[must_use]
+    pub fn into_positioned(self) -> ExtPositionedFile {
+        match self.backing {
+            ExtFileBacking::Mapped {
+                inode_number,
+                generation,
+                i_block,
+                i_flags,
+                ..
+            } => ExtPositionedFile::mapped(inode_number, generation, i_block, i_flags, self.size),
+            #[cfg(feature = "fscrypt")]
+            ExtFileBacking::EncryptedMapped {
+                inode_number,
+                generation,
+                i_block,
+                i_flags,
+                cipher,
+                scratch,
+                ..
+            } => ExtPositionedFile::encrypted(
+                inode_number,
+                generation,
+                i_block,
+                i_flags,
+                cipher,
+                scratch,
+                self.size,
+            ),
+            #[cfg(feature = "verity")]
+            ExtFileBacking::VerityMapped {
+                inode_number,
+                generation,
+                i_block,
+                i_flags,
+                verifier,
+                scratch,
+                ..
+            } => ExtPositionedFile::verity(
+                inode_number,
+                generation,
+                i_block,
+                i_flags,
+                verifier,
+                scratch,
+                self.size,
+            ),
+            ExtFileBacking::InlineShort { data, len } => {
+                ExtPositionedFile::inline_short(data, len, self.size)
+            }
+            ExtFileBacking::InlineOverflow { i_block, overflow } => {
+                ExtPositionedFile::inline_overflow(i_block, overflow, self.size)
+            }
         }
     }
 
@@ -437,18 +500,18 @@ fn build_verifier<R: Read + Seek>(
 /// Inputs for [`verity_read`]; a context struct keeps the positional
 /// parameter count within the project limit.
 #[cfg(feature = "verity")]
-struct VerityReadCtx<'a, R: Read + Seek> {
-    ext: &'a Ext,
-    fs: &'a mut R,
-    inode_number: u32,
-    generation: u32,
-    i_block: [u8; 60],
-    i_flags: InodeFlags,
-    verifier: &'a mut Box<core::cell::OnceCell<crate::verity::VerityVerifier>>,
-    scratch: &'a mut alloc::vec::Vec<u8>,
-    size: u64,
-    stream_pos: u64,
-    buf: &'a mut [u8],
+pub(crate) struct VerityReadCtx<'a, R: Read + Seek> {
+    pub(crate) ext: &'a Ext,
+    pub(crate) fs: &'a mut R,
+    pub(crate) inode_number: u32,
+    pub(crate) generation: u32,
+    pub(crate) i_block: [u8; 60],
+    pub(crate) i_flags: InodeFlags,
+    pub(crate) verifier: &'a mut Box<core::cell::OnceCell<crate::verity::VerityVerifier>>,
+    pub(crate) scratch: &'a mut alloc::vec::Vec<u8>,
+    pub(crate) size: u64,
+    pub(crate) stream_pos: u64,
+    pub(crate) buf: &'a mut [u8],
 }
 
 /// Read and fs-verity-verify one data block of a `VERITY_FL` inode.
@@ -459,7 +522,7 @@ struct VerityReadCtx<'a, R: Read + Seek> {
 /// `[offset_in_block, offset_in_block + n)` slice is copied to `buf`.
 /// Returns the number of bytes copied.
 #[cfg(feature = "verity")]
-fn verity_read<R: Read + Seek>(ctx: VerityReadCtx<'_, R>) -> Result<usize> {
+pub(crate) fn verity_read<R: Read + Seek>(ctx: VerityReadCtx<'_, R>) -> Result<usize> {
     let VerityReadCtx {
         ext,
         fs,
@@ -594,17 +657,17 @@ fn resolve_data_extent<T: Read + Seek>(
     }
 }
 
-struct MappedReadContext<'a> {
-    ext: &'a Ext,
-    inode_number: u32,
-    generation: u32,
-    i_block: &'a [u8; 60],
-    i_flags: InodeFlags,
-    size: u64,
-    stream_pos: u64,
+pub(crate) struct MappedReadContext<'a> {
+    pub(crate) ext: &'a Ext,
+    pub(crate) inode_number: u32,
+    pub(crate) generation: u32,
+    pub(crate) i_block: &'a [u8; 60],
+    pub(crate) i_flags: InodeFlags,
+    pub(crate) size: u64,
+    pub(crate) stream_pos: u64,
 }
 
-fn mapped_read<T: Read + Seek>(
+pub(crate) fn mapped_read<T: Read + Seek>(
     context: &MappedReadContext<'_>,
     fs: &mut T,
     buffer: &mut [u8],
@@ -635,20 +698,20 @@ fn mapped_read<T: Read + Seek>(
 }
 
 #[cfg(feature = "fscrypt")]
-struct EncryptedReadContext<'a> {
-    ext: &'a Ext,
-    inode_number: u32,
-    generation: u32,
-    i_block: &'a [u8; 60],
-    i_flags: InodeFlags,
-    cipher: &'a core::cell::OnceCell<crate::fscrypt::ContentCipher>,
-    scratch: &'a mut alloc::vec::Vec<u8>,
-    size: u64,
-    stream_pos: u64,
+pub(crate) struct EncryptedReadContext<'a> {
+    pub(crate) ext: &'a Ext,
+    pub(crate) inode_number: u32,
+    pub(crate) generation: u32,
+    pub(crate) i_block: &'a [u8; 60],
+    pub(crate) i_flags: InodeFlags,
+    pub(crate) cipher: &'a core::cell::OnceCell<crate::fscrypt::ContentCipher>,
+    pub(crate) scratch: &'a mut alloc::vec::Vec<u8>,
+    pub(crate) size: u64,
+    pub(crate) stream_pos: u64,
 }
 
 #[cfg(feature = "fscrypt")]
-fn encrypted_mapped_read<T: Read + Seek>(
+pub(crate) fn encrypted_mapped_read<T: Read + Seek>(
     context: &mut EncryptedReadContext<'_>,
     fs: &mut T,
     buffer: &mut [u8],
@@ -729,7 +792,7 @@ fn ensure_encrypted_file_key<R: Read + Seek>(
 /// Read from an inline buffer at `stream_pos` into `buf`, returning
 /// the number of bytes copied. The inline content is described by
 /// `i_block[0..i_block_len]` followed by `overflow[0..overflow_len]`.
-fn read_inline(
+pub(crate) fn read_inline(
     i_block: &[u8; 60],
     i_block_len: usize,
     overflow: &[u8],

@@ -26,7 +26,7 @@ use tracing::debug;
 
 use crate::identity;
 
-use crate::adapter::{found, found_and};
+use crate::adapter::{PathCache, found};
 
 /// The extended attribute that marks a `decmpfs`-compressed file.
 const DECMPFS_XATTR: &str = "com.apple.decmpfs";
@@ -151,9 +151,22 @@ fn metadata_of(inode: &Inode, size: u64) -> FsMetadata {
     }
 }
 
-struct CachedFile {
-    path: String,
-    file: File,
+struct CachedApfsTarget {
+    obj_id: u64,
+    inode: Option<Inode>,
+    metadata: Option<FsMetadata>,
+    file: Option<File>,
+}
+
+impl CachedApfsTarget {
+    const fn new(obj_id: u64) -> Self {
+        Self {
+            obj_id,
+            inode: None,
+            metadata: None,
+            file: None,
+        }
+    }
 }
 
 /// One volume of a raw APFS container exposed as a [`TargetFilesystem`].
@@ -163,8 +176,8 @@ pub struct ApfsFilesystem<R: Read + Seek + Send> {
     volume_uuid: [u8; 16],
     block_size: u32,
     total_size: u64,
-    /// Most recently opened regular file, bounded to one mount read stream.
-    cached_file: Option<CachedFile>,
+    /// Most recently resolved path and its incrementally populated state.
+    resolved: PathCache<CachedApfsTarget>,
 }
 
 impl<R: Read + Seek + Send> ApfsFilesystem<R> {
@@ -218,25 +231,43 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
             volume_uuid,
             block_size,
             total_size,
-            cached_file: None,
+            resolved: PathCache::new(),
         })
     }
 
     /// Resolve a path to its APFS object identifier.
     fn navigate(&mut self, path: &str) -> FsResult<u64> {
-        self.volume
+        if let Some(cached) = self.resolved.get(path) {
+            return Ok(cached.obj_id);
+        }
+        let obj_id = self
+            .volume
             .resolve_path(&mut self.reader, path)
-            .map_err(|e| map_apfs_error(e, path))
+            .map_err(|e| map_apfs_error(e, path))?;
+        self.resolved.insert(path, CachedApfsTarget::new(obj_id));
+        Ok(obj_id)
     }
 
-    /// Look up the inode for `path`, mapping a missing inode to
-    /// [`FsError::NotFound`].
-    fn inode_at(&mut self, path: &str) -> FsResult<Inode> {
+    /// Populate the active path's inode once.
+    fn cache_inode(&mut self, path: &str) -> FsResult<()> {
         let obj_id = self.navigate(path)?;
-        self.volume
+        if self
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.inode.is_some())
+        {
+            return Ok(());
+        }
+        let inode = self
+            .volume
             .inode(&mut self.reader, obj_id)
             .map_err(|e| map_apfs_error(e, path))?
-            .ok_or_else(|| FsError::NotFound(path.to_string()))
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
+        self.resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("APFS path cache was not populated".to_string()))?
+            .inode = Some(inode);
+        Ok(())
     }
 
     /// The logical data-stream size in an inode's extended fields, or zero
@@ -258,21 +289,30 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
     /// file. Retaining only the most recent handle avoids repeating path,
     /// inode, xattr, and extent-tree walks while keeping cache memory bounded.
     fn cache_regular_file(&mut self, path: &str) -> FsResult<()> {
+        self.cache_inode(path)?;
         if self
-            .cached_file
-            .as_ref()
-            .is_some_and(|cached| cached.path == path)
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.file.is_some())
         {
             return Ok(());
         }
 
-        let obj_id = self.navigate(path)?;
-        let inode = self
-            .volume
-            .inode(&mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?
-            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
-        if inode.file_type() != FileType::Regular {
+        let (obj_id, file_type, private_id, size) = {
+            let cached = self.resolved.get(path).ok_or_else(|| {
+                FsError::Filesystem("APFS path cache was not populated".to_string())
+            })?;
+            let inode = cached.inode.as_ref().ok_or_else(|| {
+                FsError::Filesystem("APFS inode cache was not populated".to_string())
+            })?;
+            (
+                cached.obj_id,
+                inode.file_type(),
+                inode.private_id,
+                Self::data_stream_size(inode)?,
+            )
+        };
+        if file_type != FileType::Regular {
             return Err(FsError::NotAFile(path.to_string()));
         }
         if Xattr::contains_name(
@@ -287,19 +327,45 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
                 "'{path}' uses decmpfs transparent compression, which is not supported"
             )));
         }
-        let size = Self::data_stream_size(&inode)?;
-        let file = File::open(
-            self.volume.catalog(),
-            &mut self.reader,
-            inode.private_id,
-            size,
-        )
-        .map_err(|e| map_apfs_error(e, path))?;
-        self.cached_file = Some(CachedFile {
-            path: path.to_string(),
-            file,
-        });
+        let file = File::open(self.volume.catalog(), &mut self.reader, private_id, size)
+            .map_err(|e| map_apfs_error(e, path))?;
+        self.resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("APFS path cache was not populated".to_string()))?
+            .file = Some(file);
         Ok(())
+    }
+
+    /// Return and retain mount-facing metadata for the active path.
+    fn metadata_at(&mut self, path: &str) -> FsResult<FsMetadata> {
+        self.cache_inode(path)?;
+        if let Some(metadata) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.metadata.clone())
+        {
+            return Ok(metadata);
+        }
+        let metadata = {
+            let inode = self
+                .resolved
+                .get(path)
+                .and_then(|cached| cached.inode.as_ref())
+                .ok_or_else(|| {
+                    FsError::Filesystem("APFS inode cache was not populated".to_string())
+                })?;
+            let size = if inode.is_directory() {
+                0
+            } else {
+                Self::data_stream_size(inode)?
+            };
+            metadata_of(inode, size)
+        };
+        self.resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("APFS path cache was not populated".to_string()))?
+            .metadata = Some(metadata.clone());
+        Ok(metadata)
     }
 
     /// Convert an APFS [`DirEntry`] to an [`FsEntry`].
@@ -307,7 +373,7 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
     /// The child inode is looked up best-effort: on failure the entry still
     /// appears, classified by the directory record's own type byte, so one
     /// unreadable inode never aborts a listing.
-    fn entry_to_fs_entry(&mut self, parent: &Path, entry: &DirEntry) -> FsEntry {
+    fn entry_to_fs_entry(&mut self, parent: &Path, entry: DirEntry) -> FsEntry {
         let mut flags = FsEntryFlags::empty();
         if entry.file_type == DirEntryType::Symlink {
             flags |= FsEntryFlags::REPARSE_POINT;
@@ -328,9 +394,10 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
             },
         };
 
+        let name = entry.name;
         FsEntry {
-            name: entry.name.clone(),
-            path: parent.join(&entry.name),
+            path: parent.join(&name),
+            name,
             flags,
             file_id: Some(entry.file_id),
             metadata,
@@ -341,20 +408,20 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
 impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_regular_file(path)?;
-        self.cached_file
-            .as_ref()
+        self.resolved
+            .get(path)
+            .and_then(|cached| cached.file.as_ref())
             .ok_or_else(|| FsError::Filesystem("APFS file cache was not populated".to_string()))?
-            .file
             .read_all(&mut self.reader, self.block_size)
             .map_err(|e| map_apfs_error(e, path))
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
         self.cache_regular_file(path)?;
-        self.cached_file
-            .as_ref()
+        self.resolved
+            .get(path)
+            .and_then(|cached| cached.file.as_ref())
             .ok_or_else(|| FsError::Filesystem("APFS file cache was not populated".to_string()))?
-            .file
             .read_at(&mut self.reader, self.block_size, offset, buffer)
             .map_err(|e| map_apfs_error(e, path))
     }
@@ -364,35 +431,43 @@ impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
-        found_and(self.inode_at(path), |inode| inode.is_directory())
+        match self.cache_inode(path) {
+            Ok(()) => Ok(self
+                .resolved
+                .get(path)
+                .and_then(|cached| cached.inode.as_ref())
+                .is_some_and(Inode::is_directory)),
+            Err(FsError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
-        found_and(self.inode_at(path), |inode| {
-            inode.file_type() == FileType::Regular
-        })
+        match self.cache_inode(path) {
+            Ok(()) => Ok(self
+                .resolved
+                .get(path)
+                .and_then(|cached| cached.inode.as_ref())
+                .is_some_and(|inode| inode.file_type() == FileType::Regular)),
+            Err(FsError::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
-        let inode = self.inode_at(path)?;
-        let size = if inode.is_directory() {
-            0
-        } else {
-            Self::data_stream_size(&inode)?
-        };
-        Ok(metadata_of(&inode, size))
+        self.metadata_at(path)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
-        let obj_id = self.navigate(path)?;
-        let dir_inode = self
-            .volume
-            .inode(&mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?
-            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
-        if !dir_inode.is_directory() {
+        self.cache_inode(path)?;
+        let cached = self
+            .resolved
+            .get(path)
+            .ok_or_else(|| FsError::Filesystem("APFS path cache was not populated".to_string()))?;
+        if !cached.inode.as_ref().is_some_and(Inode::is_directory) {
             return Err(FsError::NotADirectory(path.to_string()));
         }
+        let obj_id = cached.obj_id;
         let raw = self
             .volume
             .read_dir(&mut self.reader, obj_id)
@@ -401,7 +476,7 @@ impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
 
         let mut entries = Vec::with_capacity(raw.len());
         for entry in raw {
-            entries.push(self.entry_to_fs_entry(&parent, &entry));
+            entries.push(self.entry_to_fs_entry(&parent, entry));
         }
         Ok(entries)
     }

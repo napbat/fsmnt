@@ -195,7 +195,14 @@ impl ParserError for ExFatError {
         let Self::Io(e) = self else {
             return None;
         };
-        Some(fse::ErrorKind::from(e.kind()))
+        #[cfg(feature = "std")]
+        {
+            Some(fse::ErrorKind::from(e.kind()))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Some(e.kind())
+        }
     }
 
     fn byte_offset(&self) -> Option<u64> {

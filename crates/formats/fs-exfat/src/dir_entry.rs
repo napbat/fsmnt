@@ -15,10 +15,6 @@ use bitflags::bitflags;
 use zerocopy::byteorder::LittleEndian;
 use zerocopy::{FromBytes, Immutable, KnownLayout, U16, U32, U64, Unaligned};
 
-// ============================================================
-// Entry type constants
-// ============================================================
-
 /// End-of-directory marker (not in use, type code 0).
 pub const ENTRY_TYPE_END: u8 = 0x00;
 
@@ -54,10 +50,6 @@ pub const ENTRY_TYPE_VENDOR_ALLOC: u8 = 0xE1;
 
 /// Size of every directory entry in bytes.
 pub const DIR_ENTRY_SIZE: usize = 32;
-
-// ============================================================
-// EntryTypeInfo
-// ============================================================
 
 /// Parsed representation of the one-byte `EntryType` field.
 ///
@@ -111,10 +103,6 @@ impl EntryTypeInfo {
     }
 }
 
-// ============================================================
-// ExFatFileAttributes
-// ============================================================
-
 bitflags! {
     /// File attribute flags from the File Directory Entry.
     ///
@@ -134,10 +122,6 @@ bitflags! {
         const ARCHIVE   = 0x0020;
     }
 }
-
-// ============================================================
-// On-disk entry structures (32 bytes each, zerocopy)
-// ============================================================
 
 /// File Directory Entry (`EntryType` 0x85).
 ///

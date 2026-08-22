@@ -66,6 +66,16 @@ pub(crate) fn found_and<T>(
     }
 }
 
+/// Decode owned UTF-8 bytes without reallocating the common valid case.
+///
+/// Filesystems that permit arbitrary or damaged names still receive lossy
+/// replacement characters, while conforming UTF-8 names transfer their
+/// existing allocation directly into the returned string.
+pub(crate) fn string_from_bytes(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned())
+}
+
 /// Largest single allocation `read_up_to` makes before it has seen data:
 /// files past this size are read in growing steps instead of one buffer.
 ///
@@ -205,6 +215,17 @@ mod tests {
             )
             .expect("not found")
         );
+    }
+
+    #[test]
+    fn owned_utf8_decoder_reuses_valid_storage_and_repairs_invalid_names() {
+        let bytes = b"hello".to_vec();
+        let allocation = bytes.as_ptr();
+        let decoded = string_from_bytes(bytes);
+        assert_eq!(decoded, "hello");
+        assert_eq!(decoded.as_ptr(), allocation);
+
+        assert_eq!(string_from_bytes(vec![b'a', 0xff, b'b']), "a\u{fffd}b");
     }
 
     #[test]

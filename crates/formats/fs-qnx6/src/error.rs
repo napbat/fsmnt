@@ -159,7 +159,14 @@ impl ParserError for Qnx6Error {
         let Self::Io(error) = self else {
             return None;
         };
-        Some(parser_error::ErrorKind::from(error.kind()))
+        #[cfg(feature = "std")]
+        {
+            Some(parser_error::ErrorKind::from(error.kind()))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Some(error.kind())
+        }
     }
 
     fn byte_offset(&self) -> Option<u64> {

@@ -188,22 +188,26 @@ impl ExFatFile {
                     reason: "cluster chain is too large to cache",
                     byte_offset: 0,
                 })?;
-            let mut iter = exfat.cluster_iter(first_cluster);
-            let mut chain_length = 0u64;
-            while let Some(result) = iter.next(fs) {
-                let cluster = result?;
-                if chain_length < clusters_needed {
-                    chain.push(cluster);
-                }
-                chain_length += 1;
+            if first_cluster < 2 || first_cluster > exfat.cluster_count().saturating_add(1) {
+                return Err(ExFatError::InvalidCluster {
+                    cluster: first_cluster,
+                });
             }
 
-            // Validate chain covers the declared data length
-            if chain_length < clusters_needed {
-                return Err(ExFatError::InvalidEntrySet {
-                    reason: "FAT chain too short for declared data length",
-                    byte_offset: 0,
-                });
+            if clusters_needed == 1 {
+                // The stream metadata already identifies its sole cluster;
+                // reading the FAT entry would only confirm an EOC marker that
+                // is irrelevant to the declared file length.
+                chain.push(first_cluster);
+            } else {
+                let mut iter = exfat.cluster_iter(first_cluster);
+                while chain.len() < capacity {
+                    let cluster = iter.next(fs).ok_or(ExFatError::InvalidEntrySet {
+                        reason: "FAT chain too short for declared data length",
+                        byte_offset: 0,
+                    })??;
+                    chain.push(cluster);
+                }
             }
 
             ClusterChain::from_dense(chain)

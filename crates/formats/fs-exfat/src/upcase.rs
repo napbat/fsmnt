@@ -111,8 +111,14 @@ impl ExFatUpcaseTable {
     /// Computes the `NameHash` for a file name (applies upcase first).
     #[must_use]
     pub fn name_hash_for_name(&self, name: &[u16]) -> u16 {
-        let upcased: Vec<u16> = name.iter().map(|&ch| self.upcase(ch)).collect();
-        compute_name_hash(&upcased)
+        hash_name_units(name.iter().map(|&character| self.upcase(character)))
+    }
+
+    /// Computes the `NameHash` for a UTF-8 path component without allocating
+    /// an intermediate UTF-16 buffer.
+    #[must_use]
+    pub fn name_hash_for_str(&self, name: &str) -> u16 {
+        hash_name_units(name.encode_utf16().map(|character| self.upcase(character)))
     }
 
     /// Compares two UTF-16 names case-insensitively using the
@@ -156,8 +162,12 @@ impl ExFatUpcaseTable {
 /// representation of each UTF-16 code unit.
 #[must_use]
 pub fn compute_name_hash(upcased_name: &[u16]) -> u16 {
+    hash_name_units(upcased_name.iter().copied())
+}
+
+fn hash_name_units(units: impl IntoIterator<Item = u16>) -> u16 {
     let mut hash: u16 = 0;
-    for &ch in upcased_name {
+    for ch in units {
         let [lo, hi] = ch.to_le_bytes();
         let bit0 = if hash & 1 != 0 { 0x8000u16 } else { 0u16 };
         hash = bit0.wrapping_add(hash >> 1).wrapping_add(u16::from(lo));

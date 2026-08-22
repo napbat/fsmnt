@@ -6,7 +6,189 @@ use crate::item::{Compression, EXTENT_DATA_KEY, ExtentKind, FileExtent};
 use crate::{Btrfs, BtrfsEntry, BtrfsError, DiskKey, Result};
 use fsmnt_parser_core::io::{Read, Seek};
 
+mod compression;
+
+#[cfg(feature = "fuzzing")]
+pub(crate) use compression::decompress;
+use compression::decompress_into;
+
+/// Detached file metadata and extent maps for repeated positioned reads.
+///
+/// Opening this handle walks the file's committed and pending tree-log extent
+/// records once. The handle owns that compact mapping, so later reads avoid
+/// reparsing tree blocks or allocating temporary extent vectors. It does not
+/// own device data; reads still go through the [`Btrfs`] volume that created
+/// it.
+#[derive(Debug)]
+pub struct BtrfsFile {
+    size: u64,
+    verify_checksums: bool,
+    committed: Vec<FileExtent>,
+    logged: Vec<FileExtent>,
+    read_cache: ExtentReadCache,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtentLayer {
+    Committed,
+    Logged,
+}
+
+#[derive(Debug)]
+struct DecodedExtent {
+    layer: ExtentLayer,
+    file_offset: u64,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+struct ExtentReadCache {
+    decoded: Option<DecodedExtent>,
+    encoded: Vec<u8>,
+}
+
+impl DecodedExtent {
+    fn matches(&self, layer: ExtentLayer, extent: &FileExtent) -> bool {
+        self.layer == layer && self.file_offset == extent.file_offset
+    }
+}
+
+impl BtrfsFile {
+    /// Logical file size in bytes.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.size
+    }
+
+    /// Whether the file has no logical bytes.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    /// Read file bytes at `offset` without changing cursor state.
+    ///
+    /// Sparse and preallocated ranges produce zeroes. Compressed extents
+    /// require the `std` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns a mapping, decompression, checksum, range, or I/O error.
+    pub fn read_at<R: Read + Seek>(
+        &mut self,
+        volume: &mut Btrfs<R>,
+        offset: u64,
+        buffer: &mut [u8],
+    ) -> Result<usize> {
+        let buffer_length = u64::try_from(buffer.len()).map_err(|_| BtrfsError::IntegerOverflow)?;
+        let read_length = self.size.saturating_sub(offset).min(buffer_length);
+        let read_length = usize::try_from(read_length).map_err(|_| BtrfsError::IntegerOverflow)?;
+        if read_length == 0 {
+            return Ok(0);
+        }
+
+        let output = &mut buffer[..read_length];
+        output.fill(0);
+        let range_end = offset
+            .checked_add(u64::try_from(read_length).map_err(|_| BtrfsError::IntegerOverflow)?)
+            .ok_or(BtrfsError::IntegerOverflow)?;
+        for extent in extent_candidates(&self.committed, offset, range_end) {
+            volume.apply_extent_range(
+                extent,
+                ExtentLayer::Committed,
+                offset,
+                output,
+                self.verify_checksums,
+                &mut self.read_cache,
+            )?;
+        }
+        for extent in extent_candidates(&self.logged, offset, range_end) {
+            clear_extent_range(extent, offset, output)?;
+            volume.apply_extent_range(
+                extent,
+                ExtentLayer::Logged,
+                offset,
+                output,
+                self.verify_checksums,
+                &mut self.read_cache,
+            )?;
+        }
+        Ok(read_length)
+    }
+
+    /// Read the complete file into one newly allocated buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a checked allocation, mapping, decompression, checksum, range,
+    /// or I/O error.
+    pub fn read_all<R: Read + Seek>(&mut self, volume: &mut Btrfs<R>) -> Result<Vec<u8>> {
+        let file_size =
+            usize::try_from(self.size).map_err(|_| BtrfsError::FileTooLarge { size: self.size })?;
+        let mut output = zeroed_buffer(file_size, self.size)?;
+        if !output.is_empty() {
+            self.read_at(volume, 0, &mut output)?;
+        }
+        Ok(output)
+    }
+}
+
 impl<R: Read + Seek> Btrfs<R> {
+    /// Open a reusable file handle with its complete extent mapping.
+    ///
+    /// Regular files and symbolic-link targets are accepted. The resulting
+    /// handle is independent of the volume's current reader position and can
+    /// be retained across adjacent reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BtrfsError::NotAFile`] for other inode kinds, or an inode,
+    /// tree, extent-parsing, allocation, or I/O error.
+    pub fn open_file(&mut self, entry: BtrfsEntry) -> Result<BtrfsFile> {
+        let inode = self.inode(entry)?;
+        if !inode.file_type().has_file_data() {
+            return Err(BtrfsError::NotAFile);
+        }
+
+        let size = inode.size();
+        if size == 0 {
+            return Ok(BtrfsFile {
+                size,
+                verify_checksums: inode.has_data_checksums(),
+                committed: Vec::new(),
+                logged: Vec::new(),
+                read_cache: ExtentReadCache::default(),
+            });
+        }
+
+        let root = self.lookup_tree_root(entry.tree_id())?;
+        let start_key = DiskKey {
+            object_id: entry.object_id(),
+            item_type: EXTENT_DATA_KEY,
+            offset: 0,
+        };
+        let end_key = DiskKey {
+            offset: size.checked_sub(1).ok_or(BtrfsError::IntegerOverflow)?,
+            ..start_key
+        };
+        let sector_size = self.superblock().sector_size();
+        let committed = parse_extent_layer(
+            self.collect_items_raw(root, start_key, end_key)?,
+            sector_size,
+        )?;
+        let logged = parse_extent_layer(
+            self.logged_file_extents(entry.tree_id(), entry.object_id(), 0, end_key.offset),
+            sector_size,
+        )?;
+        Ok(BtrfsFile {
+            size,
+            verify_checksums: inode.has_data_checksums(),
+            committed,
+            logged,
+            read_cache: ExtentReadCache::default(),
+        })
+    }
+
     /// Read all bytes of a regular file or symbolic-link target.
     ///
     /// Sparse and preallocated ranges are returned as zeroes. With the `std`
@@ -18,24 +200,8 @@ impl<R: Read + Seek> Btrfs<R> {
     /// Returns [`BtrfsError::NotAFile`] for other inode kinds, or a checked
     /// allocation, tree, mapping, encoding, decompression, or I/O error.
     pub fn read_file(&mut self, entry: BtrfsEntry) -> Result<Vec<u8>> {
-        let inode = self.inode(entry)?;
-        if !inode.file_type().has_file_data() {
-            return Err(BtrfsError::NotAFile);
-        }
-        let file_size = usize::try_from(inode.size())
-            .map_err(|_| BtrfsError::FileTooLarge { size: inode.size() })?;
-        let mut output = zeroed_buffer(file_size, inode.size())?;
-        if output.is_empty() {
-            return Ok(output);
-        }
-        self.read_file_range_known_size(
-            entry,
-            inode.size(),
-            inode.has_data_checksums(),
-            0,
-            &mut output,
-        )?;
-        Ok(output)
+        let mut file = self.open_file(entry)?;
+        file.read_all(self)
     }
 
     /// Read a bounded range of a regular file or symbolic-link target.
@@ -113,15 +279,30 @@ impl<R: Read + Seek> Btrfs<R> {
 
         let sector_size = self.superblock().sector_size();
         let committed = parse_extent_layer(items, sector_size)?;
+        let mut read_cache = ExtentReadCache::default();
         for extent in &committed {
-            self.apply_extent_range(extent, offset, output, verify_checksums)?;
+            self.apply_extent_range(
+                extent,
+                ExtentLayer::Committed,
+                offset,
+                output,
+                verify_checksums,
+                &mut read_cache,
+            )?;
         }
         let logged =
             self.logged_file_extents(entry.tree_id(), entry.object_id(), offset, end_key.offset);
         let logged = parse_extent_layer(logged, sector_size)?;
         for extent in &logged {
             clear_extent_range(extent, offset, output)?;
-            self.apply_extent_range(extent, offset, output, verify_checksums)?;
+            self.apply_extent_range(
+                extent,
+                ExtentLayer::Logged,
+                offset,
+                output,
+                verify_checksums,
+                &mut read_cache,
+            )?;
         }
         Ok(read_length)
     }
@@ -129,9 +310,11 @@ impl<R: Read + Seek> Btrfs<R> {
     fn apply_extent_range(
         &mut self,
         extent: &FileExtent,
+        layer: ExtentLayer,
         request_offset: u64,
         output: &mut [u8],
         verify_checksums: bool,
+        read_cache: &mut ExtentReadCache,
     ) -> Result<()> {
         let Some(window) = extent_window(extent, request_offset, output.len())? else {
             return Ok(());
@@ -160,16 +343,11 @@ impl<R: Read + Seek> Btrfs<R> {
                 if required_output > extent.ram_bytes {
                     return Err(BtrfsError::InvalidFileExtentRange);
                 }
-                let decoded = decompress(
-                    &extent.inline_data,
-                    extent.compression,
-                    required_output,
-                    self.superblock().sector_size(),
-                )?;
+                let decoded = self.decode_extent(extent, layer, verify_checksums, read_cache)?;
                 copy_window(
                     output,
                     window.destination_start,
-                    &decoded,
+                    decoded,
                     usize::try_from(window.extent_offset)
                         .map_err(|_| BtrfsError::IntegerOverflow)?,
                     window.length,
@@ -179,12 +357,27 @@ impl<R: Read + Seek> Btrfs<R> {
                 self.read_uncompressed_extent_range(extent, window, output, verify_checksums)
             }
             ExtentKind::Regular => {
-                let (data, source_offset) =
-                    self.read_regular_extent_range(extent, window, verify_checksums)?;
+                let window_length =
+                    u64::try_from(window.length).map_err(|_| BtrfsError::IntegerOverflow)?;
+                let required_output = extent
+                    .extent_offset
+                    .checked_add(window.extent_offset)
+                    .and_then(|offset| offset.checked_add(window_length))
+                    .ok_or(BtrfsError::IntegerOverflow)?;
+                if required_output > extent.ram_bytes {
+                    return Err(BtrfsError::InvalidFileExtentRange);
+                }
+                let source_offset = extent
+                    .extent_offset
+                    .checked_add(window.extent_offset)
+                    .ok_or(BtrfsError::IntegerOverflow)?;
+                let source_offset =
+                    usize::try_from(source_offset).map_err(|_| BtrfsError::IntegerOverflow)?;
+                let data = self.decode_extent(extent, layer, verify_checksums, read_cache)?;
                 copy_window(
                     output,
                     window.destination_start,
-                    &data,
+                    data,
                     source_offset,
                     window.length,
                 )
@@ -227,55 +420,59 @@ impl<R: Read + Seek> Btrfs<R> {
         )
     }
 
-    fn read_regular_extent_range(
+    fn decode_extent<'a>(
         &mut self,
         extent: &FileExtent,
-        window: ExtentWindow,
+        layer: ExtentLayer,
         verify_checksums: bool,
-    ) -> Result<(Vec<u8>, usize)> {
-        if extent.compression == Compression::None {
-            let (logical, length, source_offset) = uncompressed_read_window(
-                extent,
-                window.extent_offset,
-                window.length,
-                self.superblock().sector_size(),
-            )?;
-            return self
-                .read_extent_bytes(logical, length, verify_checksums)
-                .map(|data| (data, source_offset));
+        cache: &'a mut ExtentReadCache,
+    ) -> Result<&'a [u8]> {
+        let cache_hit = cache
+            .decoded
+            .as_ref()
+            .is_some_and(|decoded| decoded.matches(layer, extent));
+        if cache_hit {
+            return cache
+                .decoded
+                .as_ref()
+                .map(|decoded| decoded.data.as_slice())
+                .ok_or(BtrfsError::InvalidFileExtentRange);
         }
 
-        if extent.disk_bytes > self.active_total_bytes() {
-            return Err(BtrfsError::InvalidFileExtentRange);
-        }
-        let disk_length =
-            usize::try_from(extent.disk_bytes).map_err(|_| BtrfsError::IntegerOverflow)?;
-        let encoded = self.read_extent_bytes(extent.disk_logical, disk_length, verify_checksums)?;
-        let window_length =
-            u64::try_from(window.length).map_err(|_| BtrfsError::IntegerOverflow)?;
-        let required_output = extent
-            .extent_offset
-            .checked_add(window.extent_offset)
-            .and_then(|offset| offset.checked_add(window_length))
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        if required_output > extent.ram_bytes {
-            return Err(BtrfsError::InvalidFileExtentRange);
-        }
-        let decoded = decompress(
-            &encoded,
+        let mut decoded = cache
+            .decoded
+            .take()
+            .map_or_else(Vec::new, |cached| cached.data);
+        let encoded = if extent.kind == ExtentKind::Inline {
+            extent.inline_data.as_slice()
+        } else {
+            if extent.disk_bytes > self.active_total_bytes() {
+                return Err(BtrfsError::InvalidFileExtentRange);
+            }
+            let disk_length =
+                usize::try_from(extent.disk_bytes).map_err(|_| BtrfsError::IntegerOverflow)?;
+            resize_zeroed_buffer(&mut cache.encoded, disk_length, extent.disk_bytes)?;
+            self.read_extent_bytes_into(extent.disk_logical, &mut cache.encoded, verify_checksums)?;
+            cache.encoded.as_slice()
+        };
+        decompress_into(
+            encoded,
             extent.compression,
-            required_output,
+            extent.ram_bytes,
             self.superblock().sector_size(),
+            &mut decoded,
         )
         .map_err(|error| add_extent_context(error, extent))?;
-        let source_offset = extent
-            .extent_offset
-            .checked_add(window.extent_offset)
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        Ok((
-            decoded,
-            usize::try_from(source_offset).map_err(|_| BtrfsError::IntegerOverflow)?,
-        ))
+        cache.decoded = Some(DecodedExtent {
+            layer,
+            file_offset: extent.file_offset,
+            data: decoded,
+        });
+        cache
+            .decoded
+            .as_ref()
+            .map(|decoded| decoded.data.as_slice())
+            .ok_or(BtrfsError::InvalidFileExtentRange)
     }
 
     fn read_extent_bytes(
@@ -321,6 +518,18 @@ impl<R: Read + Seek> Btrfs<R> {
         }
         Err(last_error.unwrap_or(BtrfsError::LogicalAddressUnmapped { logical }))
     }
+}
+
+fn extent_candidates(
+    extents: &[FileExtent],
+    request_start: u64,
+    request_end: u64,
+) -> &[FileExtent] {
+    let after_start = extents.partition_point(|extent| extent.file_offset <= request_start);
+    let first = after_start.saturating_sub(1);
+    let candidates = &extents[first..];
+    let count = candidates.partition_point(|extent| extent.file_offset < request_end);
+    &candidates[..count]
 }
 
 fn parse_extent_layer(
@@ -455,206 +664,21 @@ fn copy_window(
     Ok(())
 }
 
-pub(crate) fn decompress(
-    data: &[u8],
-    compression: Compression,
-    output_length: u64,
-    sector_size: u32,
-) -> Result<Vec<u8>> {
-    if compression == Compression::None {
-        return copy_buffer(data);
-    }
-
-    #[cfg(feature = "std")]
-    {
-        decompress_with_std(data, compression, output_length, sector_size)
-    }
-    #[cfg(not(feature = "std"))]
-    {
-        let _ = (data, output_length, sector_size);
-        Err(BtrfsError::CompressionUnavailable {
-            compression: compression.raw(),
-        })
-    }
-}
-
-#[cfg(feature = "std")]
-fn decompress_with_std(
-    data: &[u8],
-    compression: Compression,
-    output_length: u64,
-    sector_size: u32,
-) -> Result<Vec<u8>> {
-    let output_length = usize::try_from(output_length).map_err(|_| BtrfsError::IntegerOverflow)?;
-    match compression {
-        Compression::None => copy_buffer(data),
-        Compression::Zlib => {
-            let mut decoder = flate2::read::ZlibDecoder::new(data);
-            read_decoded_exact(&mut decoder, output_length, compression)
-        }
-        Compression::Zstd => {
-            // The kernel ends decoding at the first frame and ignores the
-            // sector padding that fills `disk_num_bytes`. The zstd crate
-            // otherwise assumes concatenated frames and treats that padding
-            // as another frame header.
-            let mut decoder = zstd::stream::read::Decoder::new(data)
-                .map_err(|error| {
-                    decode_error(
-                        compression,
-                        alloc::format!(
-                            "{error}; encoded length {}, prefix {:02x?}",
-                            data.len(),
-                            data.get(..8).unwrap_or(data)
-                        ),
-                    )
-                })?
-                .single_frame();
-            read_decoded_exact(&mut decoder, output_length, compression)
-                .map_err(|error| add_zstd_frame_context(error, data))
-        }
-        Compression::Lzo => decompress_lzo(
-            data,
-            output_length,
-            usize::try_from(sector_size).map_err(|_| BtrfsError::IntegerOverflow)?,
-        ),
-    }
-}
-
-#[cfg(feature = "std")]
-fn read_decoded_exact(
-    decoder: &mut impl std::io::Read,
-    output_length: usize,
-    compression: Compression,
-) -> Result<Vec<u8>> {
-    use std::io::Read as _;
-
-    let output_size =
-        u64::try_from(output_length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_length)
-        .map_err(|_| BtrfsError::FileTooLarge { size: output_size })?;
-    let limit = u64::try_from(output_length).map_err(|_| BtrfsError::IntegerOverflow)?;
-    decoder
-        .take(limit)
-        .read_to_end(&mut output)
-        .map_err(|error| decode_error(compression, error.to_string()))?;
-    if output.len() != output_length {
-        return Err(decode_error(
-            compression,
-            alloc::format!(
-                "decoded {} byte(s), but the extent requires {output_length}",
-                output.len()
-            ),
-        ));
-    }
-    Ok(output)
-}
-
-#[cfg(feature = "std")]
-fn decompress_lzo(data: &[u8], output_length: usize, sector_size: usize) -> Result<Vec<u8>> {
-    if data.len() < 4 || sector_size < 4 {
-        return Err(decode_error(Compression::Lzo, "truncated LZO header"));
-    }
-    let total_length = usize::try_from(u32::from_le_bytes(
-        data[..4]
-            .try_into()
-            .map_err(|_| decode_error(Compression::Lzo, "truncated LZO length"))?,
-    ))
-    .map_err(|_| BtrfsError::IntegerOverflow)?;
-    if total_length > data.len() {
-        return Err(decode_error(
-            Compression::Lzo,
-            "LZO total length exceeds the extent",
-        ));
-    }
-
-    let output_size =
-        u64::try_from(output_length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(output_length)
-        .map_err(|_| BtrfsError::FileTooLarge { size: output_size })?;
-    let mut position = 4_usize;
-    while position < total_length && output.len() < output_length {
-        let sector_remaining = sector_size - (position % sector_size);
-        if sector_remaining < 4 {
-            if total_length - position <= sector_remaining {
-                break;
-            }
-            position = position
-                .checked_add(sector_remaining)
-                .ok_or(BtrfsError::IntegerOverflow)?;
-        }
-        let header_end = position.checked_add(4).ok_or(BtrfsError::IntegerOverflow)?;
-        if header_end > total_length {
-            return Err(decode_error(
-                Compression::Lzo,
-                "truncated LZO segment header",
-            ));
-        }
-        let segment_length = usize::try_from(u32::from_le_bytes(
-            data[position..header_end]
-                .try_into()
-                .map_err(|_| decode_error(Compression::Lzo, "truncated LZO segment length"))?,
-        ))
-        .map_err(|_| BtrfsError::IntegerOverflow)?;
-        position = header_end;
-        let segment_end = position
-            .checked_add(segment_length)
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        if segment_end > total_length {
-            return Err(decode_error(Compression::Lzo, "truncated LZO segment"));
-        }
-        let decoded_size =
-            u64::try_from(sector_size).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
-        let mut decoded = zeroed_buffer(sector_size, decoded_size)?;
-        let decoded_length =
-            lzokay::decompress::decompress(&data[position..segment_end], &mut decoded)
-                .map_err(|error| decode_error(Compression::Lzo, alloc::format!("{error:?}")))?;
-        let required = output_length - output.len();
-        output.extend_from_slice(&decoded[..decoded_length.min(required)]);
-        position = segment_end;
-    }
-    if output.len() != output_length {
-        return Err(decode_error(
-            Compression::Lzo,
-            "decoded LZO length differs from ram_bytes",
-        ));
-    }
-    Ok(output)
-}
-
 fn zeroed_buffer(length: usize, reported_size: u64) -> Result<Vec<u8>> {
     let mut output = Vec::new();
+    resize_zeroed_buffer(&mut output, length, reported_size)?;
+    Ok(output)
+}
+
+fn resize_zeroed_buffer(output: &mut Vec<u8>, length: usize, reported_size: u64) -> Result<()> {
+    output.clear();
     output
         .try_reserve_exact(length)
         .map_err(|_| BtrfsError::FileTooLarge {
             size: reported_size,
         })?;
     output.resize(length, 0);
-    Ok(output)
-}
-
-fn copy_buffer(data: &[u8]) -> Result<Vec<u8>> {
-    let reported_size =
-        u64::try_from(data.len()).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
-    let mut output = Vec::new();
-    output
-        .try_reserve_exact(data.len())
-        .map_err(|_| BtrfsError::FileTooLarge {
-            size: reported_size,
-        })?;
-    output.extend_from_slice(data);
-    Ok(output)
-}
-
-#[cfg(feature = "std")]
-fn decode_error(compression: Compression, reason: impl Into<alloc::string::String>) -> BtrfsError {
-    BtrfsError::DecompressionFailed {
-        compression: compression.raw(),
-        reason: reason.into(),
-    }
+    Ok(())
 }
 
 fn add_extent_context(error: BtrfsError, extent: &FileExtent) -> BtrfsError {
@@ -673,25 +697,6 @@ fn add_extent_context(error: BtrfsError, extent: &FileExtent) -> BtrfsError {
                 extent.extent_offset,
                 extent.logical_bytes
             ),
-        },
-        other => other,
-    }
-}
-
-#[cfg(feature = "std")]
-fn add_zstd_frame_context(error: BtrfsError, data: &[u8]) -> BtrfsError {
-    let frame_offsets: Vec<usize> = data
-        .windows(4)
-        .enumerate()
-        .filter_map(|(offset, window)| (window == [0x28, 0xb5, 0x2f, 0xfd]).then_some(offset))
-        .collect();
-    match error {
-        BtrfsError::DecompressionFailed {
-            compression,
-            reason,
-        } => BtrfsError::DecompressionFailed {
-            compression,
-            reason: alloc::format!("{reason}; zstd frame offsets {frame_offsets:?}"),
         },
         other => other,
     }
@@ -798,18 +803,56 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn zstd_decoder_stops_before_sector_padding() {
-        let source = alloc::vec![0x5a_u8; 128 * 1024];
-        let mut encoded = zstd::stream::encode_all(source.as_slice(), 3).expect("compress");
-        encoded.resize(encoded.len().next_multiple_of(4096), 0);
+    fn adjacent_reads_reuse_one_decoded_compressed_extent() {
+        use std::fs::File;
+        use std::path::Path;
 
-        let decoded = decompress(
-            &encoded,
-            Compression::Zstd,
-            u64::try_from(source.len()).expect("source length"),
-            4096,
-        )
-        .expect("decode padded extent");
-        assert_eq!(decoded, source);
+        let testdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let paths = [
+            testdata.join("btrfs-multi-1.img"),
+            testdata.join("btrfs-multi-2.img"),
+        ];
+        if paths.iter().any(|path| !path.is_file()) {
+            return;
+        }
+        let readers = paths
+            .iter()
+            .map(|path| File::open(path).expect("open Btrfs member"))
+            .collect();
+        let mut volume = Btrfs::from_devices(readers).expect("open multi-device volume");
+        let entry = volume
+            .resolve_path([b"zstd.txt".as_slice()])
+            .expect("resolve compressed file");
+        let mut file = volume.open_file(entry).expect("open compressed file");
+
+        let mut first = [0_u8; 4096];
+        assert_eq!(
+            file.read_at(&mut volume, 0, &mut first)
+                .expect("first positioned read"),
+            first.len()
+        );
+        let allocation = file
+            .read_cache
+            .decoded
+            .as_ref()
+            .expect("compressed read populates cache")
+            .data
+            .as_ptr();
+
+        let mut second = [0_u8; 4096];
+        assert_eq!(
+            file.read_at(&mut volume, 4096, &mut second)
+                .expect("adjacent positioned read"),
+            second.len()
+        );
+        assert_eq!(
+            file.read_cache
+                .decoded
+                .as_ref()
+                .expect("decoded extent remains cached")
+                .data
+                .as_ptr(),
+            allocation
+        );
     }
 }

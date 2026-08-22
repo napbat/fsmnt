@@ -14,6 +14,7 @@
 //! the inode tables when the directory tree is not usable.
 
 mod backup;
+mod cache;
 mod dir;
 mod fscrypt;
 mod salvage;
@@ -22,18 +23,21 @@ use std::io;
 
 use chrono::{DateTime, Utc};
 use fs_ext::io::{Read, Seek, SeekFrom};
-use fs_ext::{Ext, ExtError, ExtTimestamp, JournalReplay, OrphanReplay, OverlayReader};
+use fs_ext::{
+    Ext, ExtError, ExtFileKind, ExtPositionedFile, ExtTimestamp, JournalReplay, OrphanReplay,
+    OverlayReader,
+};
 use fsmnt_core::{FsEntry, FsError, FsMetadata, FsResult, TargetFilesystem};
 use fsmnt_device::{
     DetectedBootSector, DeviceReader, FilesystemDriver, FilesystemOpenOptions, FilesystemRoot,
     FscryptKeySpec,
 };
-use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
 use tracing::debug;
 
-use crate::adapter::{PathCache, found, read_at_through, read_up_to};
+use crate::adapter::{PathCache, found, read_up_to};
 use crate::identity;
+use cache::{CachedExtTarget, Target};
 
 /// Root inode number for ext2/ext3/ext4.
 const EXT4_ROOT_INO: u32 = 2;
@@ -56,33 +60,9 @@ pub struct ExtFilesystem<R: Read + Seek + Send> {
     /// How the volume was opened, when that departed from a plain open —
     /// reported through [`TargetFilesystem::notices`].
     notices: Vec<String>,
-    /// Most recently resolved path, bounded to the active mount stream.
-    resolved: PathCache<Target>,
-}
-
-/// What a path names inside the mounted volume.
-#[derive(Clone, Copy)]
-enum Target {
-    /// The mount root, which salvage mode treats specially.
-    Root,
-    /// An inode reached through the directory tree, or directly by number
-    /// under the salvage directory.
-    Inode(u32),
-    /// The synthetic salvage directory itself. It has no inode: its
-    /// entries are produced by sweeping the inode tables.
-    SalvageRoot,
-}
-
-impl Target {
-    /// The inode backing this target, or `None` for the synthetic salvage
-    /// directory.
-    const fn inode(self) -> Option<u32> {
-        match self {
-            Self::Root => Some(EXT4_ROOT_INO),
-            Self::Inode(inum) => Some(inum),
-            Self::SalvageRoot => None,
-        }
-    }
+    /// Most recently resolved path and its reusable inode-derived state,
+    /// bounded to the active mount stream.
+    resolved: PathCache<CachedExtTarget>,
 }
 
 /// Which replay artifact, if any, serves overlay reads.
@@ -513,16 +493,18 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// browsable under its real names.
     fn resolve(&mut self, path: &str) -> FsResult<Target> {
         if let Some(target) = self.resolved.get(path) {
-            return Ok(*target);
+            return Ok(target.target);
         }
         let stack = canonicalise_ext_path(path);
         let Some((first, rest)) = stack.split_first() else {
-            self.resolved.insert(path, Target::Root);
+            self.resolved
+                .insert(path, CachedExtTarget::new(Target::Root));
             return Ok(Target::Root);
         };
         let target = if self.salvage && *first == salvage::SALVAGE_DIR {
             let Some((entry, below)) = rest.split_first() else {
-                self.resolved.insert(path, Target::SalvageRoot);
+                self.resolved
+                    .insert(path, CachedExtTarget::new(Target::SalvageRoot));
                 return Ok(Target::SalvageRoot);
             };
             let inum =
@@ -531,7 +513,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         } else {
             Target::Inode(self.walk(EXT4_ROOT_INO, &stack, path)?)
         };
-        self.resolved.insert(path, target);
+        self.resolved.insert(path, CachedExtTarget::new(target));
         Ok(target)
     }
 
@@ -580,6 +562,53 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             .ok_or_else(|| FsError::NotAFile(path.to_string()))
     }
 
+    /// Returns and caches the POSIX type of an already resolved inode.
+    fn inode_kind(&mut self, path: &str, inum: u32) -> FsResult<ExtFileKind> {
+        if let Some(kind) = self.resolved.get(path).and_then(|cached| cached.kind) {
+            return Ok(kind);
+        }
+        let kind = self.with_reader(|ext, reader| {
+            ext.inode(reader, inum)
+                .map(|inode| inode.kind())
+                .map_err(|error| map_ext_error(error, path))
+        })?;
+        if let Some(cached) = self.resolved.get_mut(path) {
+            cached.kind = Some(kind);
+        }
+        Ok(kind)
+    }
+
+    /// Opens and detaches the active regular file once for adjacent reads.
+    fn cache_file(&mut self, path: &str) -> FsResult<()> {
+        let inum = self.resolve_inode(path)?;
+        if self
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.file.is_some())
+        {
+            return Ok(());
+        }
+        let file = self.with_reader(|ext, reader| {
+            let inode = ext
+                .inode(reader, inum)
+                .map_err(|error| map_ext_error(error, path))?;
+            if !inode.is_regular_file() {
+                return Err(FsError::NotAFile(path.to_string()));
+            }
+            inode
+                .open_file()
+                .map(fs_ext::ExtFile::into_positioned)
+                .map_err(|error| map_ext_error(error, path))
+        })?;
+        let cached = self
+            .resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("ext path cache was not populated".to_string()))?;
+        cached.kind = Some(ExtFileKind::RegularFile);
+        cached.file = Some(file);
+        Ok(())
+    }
+
     /// The sweep results, running the sweep on first use.
     fn salvaged(&mut self) -> &[salvage::SalvagedInode] {
         if self.salvaged.is_none() {
@@ -603,6 +632,31 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
         f(&self.ext, &mut reader)
     }
 
+    /// Runs `f` with the active positioned file and overlay reader.
+    fn with_cached_file<T>(
+        &mut self,
+        path: &str,
+        f: impl FnOnce(&Ext, &mut Reader<'_, R>, &mut ExtPositionedFile) -> FsResult<T>,
+    ) -> FsResult<T> {
+        let Self {
+            reader,
+            ext,
+            overlay,
+            resolved,
+            ..
+        } = self;
+        let file = resolved
+            .get_mut(path)
+            .and_then(|cached| cached.file.as_mut())
+            .ok_or_else(|| FsError::Filesystem("ext file cache was not populated".to_string()))?;
+        let mut reader = match overlay {
+            Overlay::Clean | Overlay::Unreplayed => Reader::Direct(reader),
+            Overlay::Journal(journal) => Reader::Journal(OverlayReader::new(reader, journal)),
+            Overlay::Orphan(orphan) => Reader::Orphan(OverlayReader::new(reader, orphan)),
+        };
+        f(ext, &mut reader, file)
+    }
+
     /// Which recovery overlay is serving reads: `"clean"`, `"journal"` or
     /// `"orphan"`.
     ///
@@ -621,40 +675,24 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
 
 impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-        let inum = self.resolve_inode(path)?;
-        self.with_reader(|ext, reader| -> FsResult<Vec<u8>> {
-            let inode = ext
-                .inode(reader, inum)
-                .map_err(|e| map_ext_error(e, path))?;
-            // Gate on is_regular_file(), NOT merely !is_directory: a
-            // symlink's target bytes must not leak through the file reader.
-            if !inode.is_regular_file() {
-                return Err(FsError::NotAFile(path.to_string()));
-            }
-            let mut file = inode.open_file().map_err(|e| map_ext_error(e, path))?;
-            read_up_to(inode.size(), |buffer| {
-                file.read(reader, buffer)
-                    .map_err(|e| map_ext_error(e, path))
+        self.cache_file(path)?;
+        self.with_cached_file(path, |ext, reader, file| {
+            let mut offset = 0_u64;
+            read_up_to(file.len(), |buffer| {
+                let read = file
+                    .read_at(ext, reader, offset, buffer)
+                    .map_err(|error| map_ext_error(error, path))?;
+                offset += u64::try_from(read).expect("a slice length fits u64");
+                Ok(read)
             })
         })
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let target = self.resolve(path)?;
-        let Some(inum) = target.inode() else {
-            return Err(FsError::NotAFile(path.to_string()));
-        };
-        self.with_reader(|ext, reader| -> FsResult<usize> {
-            let inode = ext
-                .inode(reader, inum)
-                .map_err(|e| map_ext_error(e, path))?;
-            if !inode.is_regular_file() {
-                return Err(FsError::NotAFile(path.to_string()));
-            }
-            let mut file = inode.open_file().map_err(|e| map_ext_error(e, path))?;
-            read_at_through(&mut file, reader, offset, buffer, |e| {
-                map_ext_error(e, path)
-            })
+        self.cache_file(path)?;
+        self.with_cached_file(path, |ext, reader, file| {
+            file.read_at(ext, reader, offset, buffer)
+                .map_err(|error| map_ext_error(error, path))
         })
     }
 
@@ -672,12 +710,8 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
             Err(FsError::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
         };
-        self.with_reader(|ext, reader| -> FsResult<bool> {
-            let inode = ext
-                .inode(reader, inum)
-                .map_err(|e| map_ext_error(e, path))?;
-            Ok(inode.is_directory())
-        })
+        self.inode_kind(path, inum)
+            .map(|kind| kind == ExtFileKind::Directory)
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
@@ -689,34 +723,45 @@ impl<R: Read + Seek + Send> TargetFilesystem for ExtFilesystem<R> {
             Err(FsError::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
         };
-        self.with_reader(|ext, reader| -> FsResult<bool> {
-            let inode = ext
-                .inode(reader, inum)
-                .map_err(|e| map_ext_error(e, path))?;
-            Ok(inode.is_regular_file())
-        })
+        self.inode_kind(path, inum)
+            .map(|kind| kind == ExtFileKind::RegularFile)
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
         let Some(inum) = self.resolve(path)?.inode() else {
             return Ok(salvage::directory_metadata());
         };
-        self.with_reader(|ext, reader| -> FsResult<FsMetadata> {
+        if let Some(metadata) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.metadata.clone())
+        {
+            return Ok(metadata);
+        }
+        let (metadata, kind) = self.with_reader(|ext, reader| -> FsResult<_> {
             let inode = ext
                 .inode(reader, inum)
                 .map_err(|e| map_ext_error(e, path))?;
             let is_dir = inode.is_directory();
-            Ok(FsMetadata {
-                size: if is_dir { 0 } else { inode.size() },
-                is_dir,
-                created: inode.crtime().and_then(ts_to_utc),
-                modified: ts_to_utc(inode.mtime()),
-                accessed: ts_to_utc(inode.atime()),
-                readonly: false,
-                hidden: false,
-                system: false,
-            })
-        })
+            Ok((
+                FsMetadata {
+                    size: if is_dir { 0 } else { inode.size() },
+                    is_dir,
+                    created: inode.crtime().and_then(ts_to_utc),
+                    modified: ts_to_utc(inode.mtime()),
+                    accessed: ts_to_utc(inode.atime()),
+                    readonly: false,
+                    hidden: false,
+                    system: false,
+                },
+                inode.kind(),
+            ))
+        })?;
+        if let Some(cached) = self.resolved.get_mut(path) {
+            cached.kind = Some(kind);
+            cached.metadata = Some(metadata.clone());
+        }
+        Ok(metadata)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {

@@ -73,10 +73,6 @@ fn test_diagnose_boot_sector_unsupported_hpfs() {
     );
 }
 
-// ========================================================================
-// DetectedBootSector non-BPB filesystem detection tests
-// ========================================================================
-
 fn synthesize_ext_superblock(buf: &mut [u8]) {
     // s_magic at offset 1024 + 0x38 = 0x438 (little-endian 0xEF53)
     buf[0x438] = 0x53;
@@ -260,10 +256,6 @@ fn from_bytes_rejects_ext_when_sanity_fields_are_bogus() {
     );
 }
 
-// ========================================================================
-// probe_ext / probe_apfs constant and boundary tests
-// ========================================================================
-
 #[test]
 fn ext_probe_min_len_matches_block_group_nr_field_end() {
     // The constant must equal the offset of the last byte of
@@ -401,11 +393,6 @@ fn apfs_probe_below_minimum_buffer_size_returns_unknown() {
     );
 }
 
-// ========================================================================
-// DosBpb::looks_like_ntfs — each of the four AND-chain branches must
-// independently veto an NTFS classification.
-// ========================================================================
-
 #[test]
 fn looks_like_ntfs_requires_every_field_zero() {
     // Each row keeps three of the four fields zero and makes the fourth
@@ -426,10 +413,6 @@ fn looks_like_ntfs_requires_every_field_zero() {
     assert!(ntfs.looks_like_ntfs());
 }
 
-// ========================================================================
-// DetectedBootSector::is_partition_table — anchor MBR/GPT as true.
-// ========================================================================
-
 #[test]
 fn is_partition_table_true_for_mbr_and_gpt_only() {
     assert!(DetectedBootSector::MbrPartitioned.is_partition_table());
@@ -444,10 +427,6 @@ fn is_partition_table_true_for_mbr_and_gpt_only() {
     assert!(!DetectedBootSector::BitLocker.is_partition_table());
     assert!(!DetectedBootSector::Unknown.is_partition_table());
 }
-
-// ========================================================================
-// diagnose_boot_sector_standard hints — exfat_zeroed_bpb / OR logic.
-// ========================================================================
 
 #[test]
 fn unknown_diagnosis_reports_exfat_zeroed_bpb_hint_when_bpb_is_all_zero() {
@@ -475,11 +454,6 @@ fn unknown_diagnosis_reports_exfat_zeroed_bpb_hint_when_bpb_is_all_zero() {
         })
     );
 }
-
-// ========================================================================
-// ExFatBootSector::is_valid — each guard rejects the corresponding
-// malformation; the well-formed sector must classify as valid.
-// ========================================================================
 
 #[test]
 fn exfat_is_valid_well_formed_sector() {
@@ -518,11 +492,6 @@ fn exfat_is_valid_rejects_each_invariant_violation() {
     let bs = create_exfat_boot_sector(13, 3, 0);
     assert!(!bs.is_valid());
 }
-
-// ========================================================================
-// Full-sector parsing for each filesystem type and the partition table
-// fallback. These exercise try_parse_filesystem and determine_fat_type.
-// ========================================================================
 
 /// Stamp the boot signature into bytes 0x1FE..0x200.
 fn stamp_boot_signature(buf: &mut [u8; 512]) {
@@ -834,10 +803,6 @@ fn hpfs_detection_via_oem_prefix() {
         "non-HPFS OEM should fall through to FAT12/16, got {parsed:?}",
     );
 }
-
-// ========================================================================
-// determine_fat_type cluster-count boundaries
-// ========================================================================
 
 #[test]
 fn fat12_to_fat16_boundary_at_4085_clusters() {

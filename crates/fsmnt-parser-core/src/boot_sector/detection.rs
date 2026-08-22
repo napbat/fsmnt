@@ -5,10 +5,6 @@ use super::{
 use zerocopy::byteorder::LittleEndian;
 use zerocopy::{FromBytes, Immutable, KnownLayout, U16, Unaligned};
 
-// ============================================================================
-// Boot Sector Parsing and Detection
-// ============================================================================
-
 /// Detected filesystem type (used internally for FAT type determination)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesystemType {
@@ -642,10 +638,6 @@ fn determine_fat_type(bpb: &DosBpb) -> FilesystemType {
         FilesystemType::Fat32
     }
 }
-
-// ============================================================================
-// Helper Types for Complete Boot Sector Layout (optional, for direct casting)
-// ============================================================================
 
 /// Complete FAT12/FAT16 boot sector layout (512 bytes)
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout, Unaligned)]

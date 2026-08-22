@@ -11,7 +11,7 @@ use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::{Read, Seek};
 use tracing::debug;
 
-use crate::adapter::{PathCache, found, found_and};
+use crate::adapter::{PathCache, found, found_and, string_from_bytes};
 use crate::identity;
 
 /// Map a parser error onto the mount abstraction's semantic error variants.
@@ -167,7 +167,7 @@ impl<R: Read + Seek + Send> TargetFilesystem for Qnx6Filesystem<R> {
         let parent = if normalized.is_empty() {
             PathBuf::from("/")
         } else {
-            PathBuf::from("/").join(normalized)
+            PathBuf::from("/").join(normalized.as_ref())
         };
 
         let mut entries = Vec::new();
@@ -178,11 +178,12 @@ impl<R: Read + Seek + Send> TargetFilesystem for Qnx6Filesystem<R> {
             if matches!(raw.name(), b"." | b"..") {
                 continue;
             }
+            let inode_number = raw.inode();
             let inode = self
                 .volume
-                .inode(raw.inode())
+                .inode(inode_number)
                 .map_err(|error| map_qnx6_error(error, path))?;
-            let name = String::from_utf8_lossy(raw.name()).into_owned();
+            let name = string_from_bytes(raw.into_name());
             entries.push(FsEntry {
                 path: parent.join(&name),
                 name,

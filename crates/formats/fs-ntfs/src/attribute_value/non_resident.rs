@@ -104,6 +104,10 @@ impl<'n, 'f> NtfsNonResidentAttributeValue<'n, 'f> {
         self.stream_state.stream_position()
     }
 
+    pub(super) const fn initialized_size(&self) -> u64 {
+        self.initialized_size
+    }
+
     /// Returns the next Data Run from the iterator, or `None`
     /// when all data runs have been consumed.
     fn next_data_run(stream_data_runs: &mut NtfsDataRuns<'n, 'f>) -> Result<Option<NtfsDataRun>> {

@@ -1,9 +1,5 @@
 use super::*;
 
-// ========================================
-// NtfsReparseTag::as_u32() tests
-// ========================================
-
 #[test]
 fn test_as_u32_known_tags() {
     assert_eq!(NtfsReparseTag::MountPoint.as_u32(), 0xA000_0003);
@@ -52,10 +48,6 @@ fn test_as_u32_unknown_tag() {
     assert_eq!(NtfsReparseTag::Unknown(u32::MAX).as_u32(), u32::MAX);
 }
 
-// ========================================
-// NtfsReparseTag::is_microsoft() tests
-// ========================================
-
 #[test]
 fn test_is_microsoft_with_m_bit_set() {
     // M bit is 0x8000_0000 - all known Microsoft tags have this bit set
@@ -73,10 +65,6 @@ fn test_is_microsoft_without_m_bit() {
     assert!(!NtfsReparseTag::Unknown(0x7FFF_FFFF).is_microsoft());
     assert!(!NtfsReparseTag::Unknown(0x0000_0001).is_microsoft());
 }
-
-// ========================================
-// NtfsReparseTag::is_name_surrogate() tests
-// ========================================
 
 #[test]
 fn test_is_name_surrogate_with_n_bit_set() {
@@ -97,10 +85,6 @@ fn test_is_name_surrogate_without_n_bit() {
     assert!(!NtfsReparseTag::Unknown(0x0000_0000).is_name_surrogate());
 }
 
-// ========================================
-// NtfsReparseTag::is_directory() tests
-// ========================================
-
 #[test]
 fn test_is_directory_with_d_bit_set() {
     // D bit is 0x1000_0000 - indicates directory with tag can have children
@@ -117,10 +101,6 @@ fn test_is_directory_without_d_bit() {
     assert!(!NtfsReparseTag::Unknown(0x0000_0000).is_directory());
 }
 
-// ========================================
-// NtfsReparseTag::is_reserved() tests
-// ========================================
-
 #[test]
 fn test_is_reserved_values() {
     assert!(NtfsReparseTag::Unknown(0).is_reserved());
@@ -135,10 +115,6 @@ fn test_is_reserved_non_reserved_values() {
     assert!(!NtfsReparseTag::SymbolicLink.is_reserved());
     assert!(!NtfsReparseTag::Unknown(0x8000_0000).is_reserved());
 }
-
-// ========================================
-// NtfsReparseTag::from_u32() tests
-// ========================================
 
 #[test]
 fn test_from_u32_known_tags() {
@@ -278,10 +254,6 @@ fn test_from_u32_unknown_tags() {
     );
 }
 
-// ========================================
-// reparse_tags module constants tests
-// ========================================
-
 #[test]
 fn test_reparse_tags_constants() {
     assert_eq!(reparse_tags::RESERVED_ZERO, 0x0000_0000);
@@ -326,19 +298,11 @@ fn test_reparse_tags_constants() {
     assert_eq!(reparse_tags::WCI_LINK_1, 0xA000_1027);
 }
 
-// ========================================
-// symlink_flags module constants tests
-// ========================================
-
 #[test]
 fn test_symlink_flags_constants() {
     assert_eq!(symlink_flags::ABSOLUTE, 0x0000_0000);
     assert_eq!(symlink_flags::SYMLINK_FLAG_RELATIVE, 0x0000_0001);
 }
-
-// ========================================
-// decode_utf16le tests (via helper)
-// ========================================
 
 #[test]
 fn test_decode_utf16le_valid_ascii() {
@@ -386,14 +350,6 @@ fn test_decode_utf16le_path_like() {
     let result = decode_utf16le(&bytes).unwrap();
     assert_eq!(result, "C:\\test");
 }
-
-// ========================================
-// Roundtrip tests for from_u32 / as_u32
-// ========================================
-
-// ========================================
-// NtfsLxSymlink tests
-// ========================================
 
 /// Helper: build an `NtfsReparsePoint` with the given tag and data.
 fn make_reparse_point(tag: u32, data: &[u8]) -> NtfsReparsePoint {
@@ -498,10 +454,6 @@ fn test_lx_symlink_unicode_path() {
     let lx = rp.as_lx_symlink().unwrap();
     assert_eq!(lx.target_path().unwrap(), "/home/用户/文件");
 }
-
-// ========================================
-// NtfsAppExecLink tests
-// ========================================
 
 /// Helper: encode a UTF-16LE null-terminated string.
 fn utf16le_null(s: &str) -> Vec<u8> {
@@ -625,10 +577,6 @@ fn test_app_exec_link_unicode_paths() {
     assert_eq!(ael.executable().unwrap(), "C:\\プログラム\\app.exe");
 }
 
-// ========================================
-// split_utf16le_null_terminated tests
-// ========================================
-
 #[test]
 fn test_split_utf16le_three_strings() {
     // "A\0B\0C\0" in UTF-16LE
@@ -698,10 +646,6 @@ fn test_app_exec_link_odd_length_payload() {
             if reason.contains("odd number of bytes")
     ));
 }
-
-// ========================================
-// NtfsNfsReparsePoint tests
-// ========================================
 
 /// Helper: build NFS reparse data with type and payload.
 fn make_nfs_data(nfs_type: u64, payload: &[u8]) -> Vec<u8> {

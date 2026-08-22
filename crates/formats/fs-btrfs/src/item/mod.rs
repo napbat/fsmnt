@@ -1,18 +1,22 @@
 //! Typed metadata items stored in root and filesystem trees.
 
+mod directory;
 mod raw;
 
 use alloc::vec::Vec;
 
+#[cfg(any(feature = "fuzzing", test))]
+use self::raw::{DIR_ITEM_HEADER_SIZE, RawDirectoryItemHeader};
 use self::raw::{
-    DIR_ITEM_HEADER_SIZE, FILE_EXTENT_INLINE_HEADER_SIZE, FILE_EXTENT_REGULAR_SIZE,
-    INODE_ITEM_SIZE, ROOT_ITEM_LEGACY_SIZE, ROOT_ITEM_SIZE, RawDirectoryItemHeader,
-    RawFileExtentHeader, RawFileExtentRegular, RawInodeItem, RawRootItem, RawRootItemLegacy,
-    RawTimespec,
+    FILE_EXTENT_INLINE_HEADER_SIZE, FILE_EXTENT_REGULAR_SIZE, INODE_ITEM_SIZE,
+    ROOT_ITEM_LEGACY_SIZE, ROOT_ITEM_SIZE, RawFileExtentHeader, RawFileExtentRegular, RawInodeItem,
+    RawRootItem, RawRootItemLegacy, RawTimespec,
 };
-use crate::bytes::slice;
 use crate::key::DiskKey;
 use crate::{BtrfsError, Result};
+pub(crate) use directory::{
+    DirectoryLookup, RawDirectoryEntry, find_directory_entry, name_hash, parse_directory_entries,
+};
 use zerocopy::FromBytes;
 #[cfg(feature = "fuzzing")]
 use zerocopy::IntoBytes;
@@ -357,70 +361,6 @@ impl RootItem {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RawDirectoryEntry {
-    pub(crate) location: DiskKey,
-    pub(crate) trans_id: u64,
-    pub(crate) file_type: BtrfsFileType,
-    pub(crate) name: Vec<u8>,
-    pub(crate) data: Vec<u8>,
-}
-
-pub(crate) fn parse_directory_entries(key: DiskKey, data: &[u8]) -> Result<Vec<RawDirectoryEntry>> {
-    if !valid_inode_object_id(key.object_id)
-        || !matches!(key.item_type, DIR_ITEM_KEY | DIR_INDEX_KEY)
-    {
-        return Err(malformed(key));
-    }
-    let mut entries = Vec::new();
-    let mut position = 0_usize;
-    while position < data.len() {
-        let header_end = position
-            .checked_add(DIR_ITEM_HEADER_SIZE)
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        if header_end > data.len() {
-            return Err(malformed(key));
-        }
-        let raw =
-            RawDirectoryItemHeader::ref_from_bytes(slice(data, position, DIR_ITEM_HEADER_SIZE)?)
-                .map_err(|_| malformed(key))?;
-        let location = raw.location.to_disk_key();
-        let data_length = usize::from(raw.data_length.get());
-        let name_length = usize::from(raw.name_length.get());
-        let file_type = BtrfsFileType::from_dir_type(raw.file_type)
-            .filter(|file_type| *file_type != BtrfsFileType::Unknown)
-            .ok_or_else(|| malformed(key))?;
-        let name_start = header_end;
-        let data_start = name_start
-            .checked_add(name_length)
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        let entry_end = data_start
-            .checked_add(data_length)
-            .ok_or(BtrfsError::IntegerOverflow)?;
-        if name_length == 0
-            || name_length > MAX_NAME_LENGTH
-            || data_length != 0
-            || entry_end > data.len()
-            || !valid_directory_location(location)
-        {
-            return Err(malformed(key));
-        }
-        let name = slice(data, name_start, name_length)?;
-        if key.item_type == DIR_ITEM_KEY && key.offset != name_hash(name) {
-            return Err(malformed(key));
-        }
-        entries.push(RawDirectoryEntry {
-            location,
-            trans_id: raw.transaction_id.get(),
-            file_type,
-            name: name.to_vec(),
-            data: slice(data, data_start, data_length)?.to_vec(),
-        });
-        position = entry_end;
-    }
-    Ok(entries)
-}
-
 fn valid_directory_location(location: DiskKey) -> bool {
     match location.item_type {
         ROOT_ITEM_KEY => valid_filesystem_tree_id(location.object_id),
@@ -438,10 +378,6 @@ pub(crate) const fn valid_inode_object_id(object_id: u64) -> bool {
 pub(crate) const fn valid_filesystem_tree_id(object_id: u64) -> bool {
     object_id == FS_TREE_OBJECT_ID
         || (object_id >= FIRST_FREE_OBJECT_ID && object_id <= LAST_FREE_OBJECT_ID)
-}
-
-fn name_hash(name: &[u8]) -> u64 {
-    u64::from(!crc32c::crc32c_append(1, name))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

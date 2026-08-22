@@ -86,7 +86,14 @@ impl ParserError for ApfsError {
         let Self::Io(error) = self else {
             return None;
         };
-        Some(fse::ErrorKind::from(error.kind()))
+        #[cfg(feature = "std")]
+        {
+            Some(fse::ErrorKind::from(error.kind()))
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            Some(error.kind())
+        }
     }
 
     fn byte_offset(&self) -> Option<u64> {

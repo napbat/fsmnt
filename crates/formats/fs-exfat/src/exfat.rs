@@ -515,8 +515,7 @@ impl ExFat {
     where
         T: Read + Seek,
     {
-        let search_utf16: alloc::vec::Vec<u16> = name.encode_utf16().collect();
-        let search_hash = upcase.name_hash_for_name(&search_utf16);
+        let search_hash = upcase.name_hash_for_str(name);
 
         let mut iter = self.dir_entries(dir_cluster);
         while let Some(result) = iter.next(fs) {

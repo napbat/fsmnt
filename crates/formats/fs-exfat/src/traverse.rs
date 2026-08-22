@@ -5,6 +5,8 @@
 //! types that implement the [`FsDirectory`], [`FsTryIterator`], and
 //! [`FsDirEntry`] traits from fsmnt-parser-core.
 
+use alloc::vec::Vec;
+
 use fsmnt_parser_core::iter::{FsTryIterator, FsTryIteratorType};
 use fsmnt_parser_core::traverse::{EntryKind, FsDirEntry, FsDirectory, FsId};
 
@@ -12,10 +14,6 @@ use crate::entry_set::{ExFatDirItem, ExFatEntrySet};
 use crate::error::{ExFatError, Result};
 use crate::exfat::ExFat;
 use crate::io::{Read, Seek};
-
-// ================================================================
-// ExFatDirectory
-// ================================================================
 
 /// An exFAT directory handle implementing [`FsDirectory`].
 ///
@@ -53,10 +51,6 @@ impl<'e, R: Read + Seek> FsDirectory<R> for ExFatDirectory<'e> {
     }
 }
 
-// ================================================================
-// ExFatDirectoryIter
-// ================================================================
-
 /// Iterator adapter wrapping [`ExFatDirEntries`] for the
 /// [`FsDirectory`] trait.
 ///
@@ -90,8 +84,13 @@ impl<'e, R: Read + Seek> FsTryIterator<R> for ExFatDirectoryIter<'e> {
         loop {
             match self.inner.next(r) {
                 Some(Ok(ExFatDirItem::FileEntry(entry_set))) => {
+                    let mut name_utf16le = Vec::with_capacity(entry_set.name().len() * 2);
+                    for character in entry_set.name() {
+                        name_utf16le.extend_from_slice(&character.to_le_bytes());
+                    }
                     return Ok(Some(ExFatTraversalEntry {
                         entry_set,
+                        name_utf16le,
                         exfat: self.exfat,
                     }));
                 }
@@ -107,14 +106,11 @@ impl<'e, R: Read + Seek> FsTryIterator<R> for ExFatDirectoryIter<'e> {
     }
 }
 
-// ================================================================
-// ExFatTraversalEntry
-// ================================================================
-
 /// An exFAT directory entry paired with an [`ExFat`] reference,
 /// implementing [`FsDirEntry`].
 pub struct ExFatTraversalEntry<'e> {
     entry_set: ExFatEntrySet,
+    name_utf16le: Vec<u8>,
     exfat: &'e ExFat,
 }
 
@@ -139,7 +135,7 @@ impl<'e, R: Read + Seek> FsDirEntry<R> for ExFatTraversalEntry<'e> {
     }
 
     fn name_bytes(&self) -> &[u8] {
-        self.entry_set.name_utf16le()
+        &self.name_utf16le
     }
 
     fn id(&self) -> Option<FsId> {

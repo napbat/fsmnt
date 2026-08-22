@@ -290,6 +290,16 @@ struct Route {
 
 fn canonical_path(path: &str) -> FsResult<String> {
     let normalized = normalize_path(path);
+    if normalized.is_empty() {
+        return Ok(String::new());
+    }
+    if normalized
+        .split('/')
+        .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+    {
+        return Ok(normalized.into_owned());
+    }
+
     let mut components = Vec::new();
     for component in normalized
         .split('/')

@@ -2,12 +2,16 @@
 
 use alloc::vec::Vec;
 
+use super::attribute_list_non_resident::NtfsAttributeListNonResidentAttributeValue;
 use super::non_resident::NtfsNonResidentAttributeValue;
+use super::owned::NtfsAttributeValueOwned;
 use super::seek_contiguous;
 use fsmnt_parser_core::io::FsReadSeek;
 
+use crate::data_run_map::DataRunMap;
 use crate::error::{NtfsError, Result};
 use crate::io::{Read, Seek, SeekFrom};
+use crate::ntfs::Ntfs;
 
 /// Controls how compression errors are handled during decompression.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -25,9 +29,11 @@ pub enum CompressionRecoveryMode {
 /// This type wraps a non-resident attribute value and transparently
 /// decompresses data using the LZNT1 algorithm as it is read.
 #[derive(Clone, Debug)]
-pub struct NtfsCompressedNonResidentAttributeValue<'n, 'f> {
-    /// The underlying raw (compressed) data reader
-    inner: NtfsNonResidentAttributeValue<'n, 'f>,
+pub struct NtfsCompressedNonResidentAttributeValue<'n> {
+    /// Filesystem geometry and collation state associated with the value.
+    ntfs: &'n Ntfs,
+    /// Decoded mapping of logical compression-unit bytes to disk extents.
+    map: DataRunMap,
     /// Size of a compression unit in bytes (typically 64KB)
     compression_unit_size: u64,
     /// Decompressed data size (from attribute header)
@@ -47,24 +53,50 @@ pub struct NtfsCompressedNonResidentAttributeValue<'n, 'f> {
     buffered_unit: Option<u64>,
 }
 
-impl<'n, 'f> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
+impl<'n> NtfsCompressedNonResidentAttributeValue<'n> {
     /// Creates a new compressed value reader.
     ///
     /// # Panics
     ///
-    /// Panics when the compression-unit size exceeds the target's addressable
-    /// memory. Valid NTFS compression units are far smaller than this limit.
-    #[must_use]
+    /// Panics when the compression-unit size is zero or exceeds the target's
+    /// addressable memory. Valid NTFS compression units satisfy both bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the attribute's data-run stream is malformed.
     pub fn new(
-        inner: NtfsNonResidentAttributeValue<'n, 'f>,
+        inner: &NtfsNonResidentAttributeValue<'n, '_>,
+        compression_unit_size: u64,
+        decompressed_size: u64,
+        initialized_size: u64,
+    ) -> Result<Self> {
+        let ntfs = inner.ntfs();
+        let map = DataRunMap::from_data_runs(inner.data_runs())?;
+        Ok(Self::from_map(
+            ntfs,
+            map,
+            compression_unit_size,
+            decompressed_size,
+            initialized_size,
+        ))
+    }
+
+    fn from_map(
+        ntfs: &'n Ntfs,
+        map: DataRunMap,
         compression_unit_size: u64,
         decompressed_size: u64,
         initialized_size: u64,
     ) -> Self {
+        assert!(
+            compression_unit_size != 0,
+            "an NTFS compression unit cannot be empty"
+        );
         let cu_size = usize::try_from(compression_unit_size)
             .expect("an NTFS compression unit must fit in addressable memory");
         Self {
-            inner,
+            ntfs,
+            map,
             compression_unit_size,
             decompressed_size,
             initialized_size: initialized_size.min(decompressed_size),
@@ -74,6 +106,23 @@ impl<'n, 'f> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
             decompressed_buffer: alloc::vec![0u8; cu_size],
             buffered_unit: None,
         }
+    }
+
+    pub(crate) fn from_attribute_list<T: Read + Seek>(
+        inner: &NtfsAttributeListNonResidentAttributeValue<'n, '_>,
+        fs: &mut T,
+        compression_unit_size: u64,
+        decompressed_size: u64,
+        initialized_size: u64,
+    ) -> Result<Self> {
+        let map = inner.data_run_map(fs)?;
+        Ok(Self::from_map(
+            inner.ntfs(),
+            map,
+            compression_unit_size,
+            decompressed_size,
+            initialized_size,
+        ))
     }
 
     /// Returns `true` if the attribute value contains no data.
@@ -99,7 +148,7 @@ impl<'n, 'f> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
     /// [`Ntfs`]: crate::Ntfs
     #[must_use]
     pub fn ntfs(&self) -> &'n crate::ntfs::Ntfs {
-        self.inner.ntfs()
+        self.ntfs
     }
 
     /// Sets the compression error recovery mode.
@@ -109,6 +158,30 @@ impl<'n, 'f> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
     /// returning an error.
     pub fn set_recovery_mode(&mut self, mode: CompressionRecoveryMode) {
         self.recovery_mode = mode;
+    }
+
+    /// Detaches this compressed value from its file record while preserving
+    /// its reusable compression-unit work buffers.
+    pub(super) fn into_owned(self) -> NtfsAttributeValueOwned {
+        let Self {
+            map,
+            compression_unit_size,
+            decompressed_size,
+            initialized_size,
+            recovery_mode,
+            compressed_buffer,
+            decompressed_buffer,
+            ..
+        } = self;
+        NtfsAttributeValueOwned::compressed(
+            map,
+            compression_unit_size,
+            decompressed_size,
+            initialized_size,
+            recovery_mode,
+            compressed_buffer,
+            decompressed_buffer,
+        )
     }
 
     /// Ensures the compression unit containing `position` is decompressed.
@@ -122,24 +195,26 @@ impl<'n, 'f> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
             return Ok(()); // Already buffered
         }
 
-        // Seek to the start of this compression unit in the raw stream.
         let raw_offset = unit_index * self.compression_unit_size;
-        self.inner.seek(fs, SeekFrom::Start(raw_offset))?;
 
         // Read the compression unit. In BestEffort mode, I/O errors
         // result in a zero-filled buffer instead of propagating.
-        let bytes_read = match self.inner.read(fs, &mut self.compressed_buffer) {
-            Ok(n) => n,
-            Err(e) => {
-                if self.recovery_mode == CompressionRecoveryMode::BestEffort {
-                    self.decompressed_buffer.fill(0);
-                    self.enforce_initialized_size(unit_index);
-                    self.buffered_unit = Some(unit_index);
-                    return Ok(());
+        let bytes_read =
+            match self
+                .map
+                .read_allocated_prefix_at(fs, raw_offset, &mut self.compressed_buffer)
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    if self.recovery_mode == CompressionRecoveryMode::BestEffort {
+                        self.decompressed_buffer.fill(0);
+                        self.enforce_initialized_size(unit_index);
+                        self.buffered_unit = Some(unit_index);
+                        return Ok(());
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
 
         if bytes_read == 0 {
             // Past end of data — zero-fill.
@@ -222,7 +297,7 @@ impl<'n, 'f> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
     }
 }
 
-impl<R: Read + Seek> FsReadSeek<R> for NtfsCompressedNonResidentAttributeValue<'_, '_> {
+impl<R: Read + Seek> FsReadSeek<R> for NtfsCompressedNonResidentAttributeValue<'_> {
     type Error = NtfsError;
 
     fn read(&mut self, fs: &mut R, buf: &mut [u8]) -> Result<usize> {
@@ -345,53 +420,56 @@ mod tests {
         ]
     }
 
+    /// One allocated cluster followed by a seven-cluster sparse tail.
+    fn compressed_data_run_bytes() -> std::vec::Vec<u8> {
+        std::vec![
+            0x11,
+            1,
+            u8::try_from(DATA_RUN_LCN).expect("test value fits u8"),
+            0x01,
+            u8::try_from(DATA_RUN_CLUSTERS - 1).expect("test value fits u8"),
+            0x00,
+        ]
+    }
+
     /// Builds a compressed value reader over the synthetic data run.
     ///
     /// `compression_unit_size` equals one cluster (512) so each unit reads as
     /// a full, "incompressible" cluster — the raw bytes are copied verbatim
     /// into the decompressed buffer, exercising the read/seek/position
     /// arithmetic without needing real LZNT1 input.
-    fn make_value<'n, 'f>(
+    fn make_value<'n>(
         ntfs: &'n Ntfs,
-        run: &'f [u8],
+        run: &[u8],
         decompressed_size: u64,
         initialized_size: u64,
-    ) -> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
-        let allocated = DATA_RUN_CLUSTERS * CLUSTER_SIZE;
-        make_value_sized(
-            ntfs,
-            run,
-            allocated,
-            CLUSTER_SIZE,
-            decompressed_size,
-            initialized_size,
-        )
+    ) -> NtfsCompressedNonResidentAttributeValue<'n> {
+        make_value_sized(ntfs, run, CLUSTER_SIZE, decompressed_size, initialized_size)
     }
 
-    /// Like [`make_value`] but with an explicit inner (raw) data size and
-    /// compression unit size, used to force a partial unit read.
-    fn make_value_sized<'n, 'f>(
+    /// Like [`make_value`] but with an explicit compression-unit size.
+    fn make_value_sized<'n>(
         ntfs: &'n Ntfs,
-        run: &'f [u8],
-        inner_data_size: u64,
+        run: &[u8],
         compression_unit_size: u64,
         decompressed_size: u64,
         initialized_size: u64,
-    ) -> NtfsCompressedNonResidentAttributeValue<'n, 'f> {
+    ) -> NtfsCompressedNonResidentAttributeValue<'n> {
         let inner = NtfsNonResidentAttributeValue::new(
             ntfs,
             run,
             crate::types::NtfsPosition::new(0x1000),
-            inner_data_size,
-            inner_data_size,
+            decompressed_size,
+            initialized_size,
         )
         .expect("data run parses");
         NtfsCompressedNonResidentAttributeValue::new(
-            inner,
+            &inner,
             compression_unit_size,
             decompressed_size,
             initialized_size,
         )
+        .expect("data-run map parses")
     }
 
     #[test]
@@ -569,13 +647,11 @@ mod tests {
 
         let mut fs = build_image(&compressed);
         let ntfs = Ntfs::new(&mut fs).unwrap();
-        let run = data_run_bytes();
-        // Inner raw size = compressed length so the unit read is partial.
+        let run = compressed_data_run_bytes();
         let mut value = make_value_sized(
             &ntfs,
             &run,
-            u64::try_from(compressed.len()).expect("test compressed length fits in u64"),
-            CLUSTER_SIZE,
+            DATA_RUN_CLUSTERS * CLUSTER_SIZE,
             u64::try_from(original.len()).expect("test data length fits in u64"),
             u64::try_from(original.len()).expect("test data length fits in u64"),
         );
@@ -628,15 +704,15 @@ mod tests {
         let garbage = std::vec![0xFFu8; 200];
         let mut fs = build_image(&garbage);
         let ntfs = Ntfs::new(&mut fs).unwrap();
-        let run = data_run_bytes();
+        let run = compressed_data_run_bytes();
 
         // Strict mode: decompressing the garbage fails.
-        let mut strict = make_value_sized(&ntfs, &run, 200, CLUSTER_SIZE, 256, 256);
+        let mut strict = make_value_sized(&ntfs, &run, DATA_RUN_CLUSTERS * CLUSTER_SIZE, 256, 256);
         let mut out = std::vec![0u8; 256];
         assert!(strict.read(&mut fs, &mut out).is_err());
 
         // BestEffort mode: the same input is recovered without error.
-        let mut lenient = make_value_sized(&ntfs, &run, 200, CLUSTER_SIZE, 256, 256);
+        let mut lenient = make_value_sized(&ntfs, &run, DATA_RUN_CLUSTERS * CLUSTER_SIZE, 256, 256);
         lenient.set_recovery_mode(CompressionRecoveryMode::BestEffort);
         let mut out2 = std::vec![0u8; 256];
         assert_eq!(lenient.read(&mut fs, &mut out2).unwrap(), 256);

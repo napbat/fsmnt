@@ -8,8 +8,11 @@
 //!
 //! [`btree_node_phys_t`]: BtreeNode
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 use core::cmp::Ordering;
+use core::ops::Deref;
 
 use bitflags::bitflags;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LittleEndian as LE, U16, U32, U64, Unaligned};
@@ -150,12 +153,72 @@ pub struct Entry<'a> {
 /// A parsed APFS B-tree node, owning its block.
 #[derive(Debug, Clone)]
 pub struct BtreeNode {
-    block: Vec<u8>,
+    block: Arc<BtreeBlock>,
     flags: BtnodeFlags,
     level: u16,
     nkeys: u32,
     toc_off: usize,
     toc_len: usize,
+}
+
+/// Shared ownership wrapper that keeps an existing block allocation intact.
+#[derive(Debug)]
+struct BtreeBlock(Vec<u8>);
+
+impl Deref for BtreeBlock {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Number of recently used nodes retained per APFS B-tree handle.
+const NODE_CACHE_CAPACITY: usize = 8;
+
+#[derive(Debug, Clone)]
+struct CachedBtreeNode {
+    key: u128,
+    node: BtreeNode,
+}
+
+/// Small least-recently-used cache for immutable snapshot B-tree nodes.
+#[derive(Debug, Clone)]
+pub(crate) struct BtreeNodeCache {
+    nodes: RefCell<Vec<CachedBtreeNode>>,
+}
+
+impl BtreeNodeCache {
+    /// Create an empty node cache.
+    pub(crate) const fn new() -> Self {
+        Self {
+            nodes: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Return a cheaply shared node and mark it as most recently used.
+    pub(crate) fn get(&self, key: u128) -> Option<BtreeNode> {
+        let mut nodes = self.nodes.borrow_mut();
+        let index = nodes.iter().position(|cached| cached.key == key)?;
+        let cached = nodes.remove(index);
+        let node = cached.node.clone();
+        nodes.push(cached);
+        Some(node)
+    }
+
+    /// Retain a node, evicting the least recently used node when full.
+    pub(crate) fn insert(&self, key: u128, node: &BtreeNode) {
+        let mut nodes = self.nodes.borrow_mut();
+        if let Some(index) = nodes.iter().position(|cached| cached.key == key) {
+            nodes.remove(index);
+        } else if nodes.len() == NODE_CACHE_CAPACITY {
+            nodes.remove(0);
+        }
+        nodes.push(CachedBtreeNode {
+            key,
+            node: node.clone(),
+        });
+    }
 }
 
 impl BtreeNode {
@@ -198,7 +261,7 @@ impl BtreeNode {
         }
 
         Ok(Self {
-            block,
+            block: Arc::new(BtreeBlock(block)),
             flags,
             level,
             nkeys,

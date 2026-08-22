@@ -36,6 +36,7 @@ mod volume;
 
 pub use checksum::ChecksumType;
 pub use error::{BtrfsError, Result};
+pub use file::BtrfsFile;
 pub use fsmnt_parser_core::io;
 pub use item::{BtrfsFileType, BtrfsInode, BtrfsTimestamp};
 pub use key::DiskKey;

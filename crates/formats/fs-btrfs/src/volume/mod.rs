@@ -15,9 +15,9 @@ use alloc::vec::Vec;
 
 use crate::chunk::{CHUNK_ITEM_KEY, ChunkMapping, merge_chunk, parse_system_chunks};
 use crate::item::{
-    BtrfsFileType, BtrfsInode, DIR_INDEX_KEY, DIR_ITEM_KEY, FIRST_FREE_OBJECT_ID,
+    BtrfsFileType, BtrfsInode, DIR_INDEX_KEY, DIR_ITEM_KEY, DirectoryLookup, FIRST_FREE_OBJECT_ID,
     FS_TREE_OBJECT_ID, INODE_ITEM_KEY, ROOT_ITEM_KEY, ROOT_TREE_DIR_OBJECT_ID, ROOT_TREE_OBJECT_ID,
-    RawDirectoryEntry, RootItem, parse_directory_entries,
+    RawDirectoryEntry, RootItem, find_directory_entry, name_hash, parse_directory_entries,
 };
 use crate::tree::{TreeBlock, TreeItem, TreeRoot};
 use crate::{BtrfsDeviceSource, BtrfsError, BtrfsSuperblock, DiskKey, Result};
@@ -88,6 +88,12 @@ impl BtrfsDirEntry {
         &self.name
     }
 
+    /// Consume the entry and return its byte-exact filename allocation.
+    #[must_use]
+    pub fn into_name(self) -> Vec<u8> {
+        self.name
+    }
+
     /// Object referenced by this name.
     #[must_use]
     pub const fn entry(&self) -> BtrfsEntry {
@@ -114,6 +120,7 @@ pub struct Btrfs<R> {
     chunks: Vec<ChunkMapping>,
     root_tree: Option<TreeRoot>,
     cached_roots: Vec<CachedRoot>,
+    cached_inode: Option<(BtrfsEntry, BtrfsInode)>,
     raid_stripe_root: Option<TreeRoot>,
     remap_root: Option<TreeRoot>,
     global_roots: GlobalRootState,
@@ -209,6 +216,7 @@ impl<R: Read + Seek> Btrfs<R> {
             chunks: Vec::new(),
             root_tree: None,
             cached_roots: Vec::new(),
+            cached_inode: None,
             raid_stripe_root: None,
             remap_root: None,
             global_roots: GlobalRootState::default(),
@@ -261,6 +269,7 @@ impl<R: Read + Seek> Btrfs<R> {
 
         self.root_tree = Some(candidate.root_tree);
         self.cached_roots.clear();
+        self.cached_inode = None;
         self.cached_roots
             .push(CachedRoot::new(0, candidate.root_tree));
         self.validate_direct_remap_root()?;
@@ -304,6 +313,7 @@ impl<R: Read + Seek> Btrfs<R> {
         self.chunks.clear();
         self.root_tree = None;
         self.cached_roots.clear();
+        self.cached_inode = None;
         self.raid_stripe_root = None;
         self.remap_root = match (
             self.superblock().remap_root(),
@@ -396,11 +406,40 @@ impl<R: Read + Seek> Btrfs<R> {
     /// Returns [`BtrfsError::NotADirectory`] for a non-directory parent,
     /// [`BtrfsError::NotFound`] for an absent name, or a parsing/I/O error.
     pub fn lookup(&mut self, parent: BtrfsEntry, name: &[u8]) -> Result<BtrfsEntry> {
-        self.read_dir(parent)?
-            .into_iter()
-            .find(|candidate| candidate.name == name)
-            .map(|candidate| candidate.entry)
-            .ok_or(BtrfsError::NotFound)
+        self.initialize()?;
+        if !self.inode(parent)?.file_type().is_directory() {
+            return Err(BtrfsError::NotADirectory);
+        }
+        let root = self.lookup_tree_root(parent.tree_id)?;
+        if self
+            .log_overlay
+            .directory_index_changed(parent.tree_id, parent.object_id)
+        {
+            let items = self.collect_items(
+                root,
+                DiskKey::range_start(parent.object_id, DIR_INDEX_KEY),
+                DiskKey::range_end(parent.object_id, DIR_INDEX_KEY),
+            )?;
+            for item in items {
+                if let Some(found) = find_directory_entry(item.key, &item.data, name)? {
+                    return self.resolve_directory_location(parent.tree_id, found);
+                }
+            }
+            return Err(BtrfsError::NotFound);
+        }
+        let key = DiskKey {
+            object_id: parent.object_id,
+            item_type: DIR_ITEM_KEY,
+            offset: name_hash(name),
+        };
+        let item = self.collect_items(root, key, key)?.into_iter().next();
+        let found = item
+            .as_ref()
+            .map(|item| find_directory_entry(item.key, &item.data, name))
+            .transpose()?
+            .flatten()
+            .ok_or(BtrfsError::NotFound)?;
+        self.resolve_directory_location(parent.tree_id, found)
     }
 
     /// Resolve a sequence of byte-exact path components from the default root.
@@ -424,8 +463,15 @@ impl<R: Read + Seek> Btrfs<R> {
     /// tree/I/O error when it cannot be parsed.
     pub fn inode(&mut self, entry: BtrfsEntry) -> Result<BtrfsInode> {
         self.initialize()?;
+        if let Some((cached_entry, inode)) = &self.cached_inode
+            && *cached_entry == entry
+        {
+            return Ok(inode.clone());
+        }
         let root = self.lookup_tree_root(entry.tree_id)?;
-        self.inode_from_root(root, entry.object_id)
+        let inode = self.inode_from_root(root, entry.object_id)?;
+        self.cached_inode = Some((entry, inode.clone()));
+        Ok(inode)
     }
 
     /// Enumerate a directory in its stable on-disk index order.
@@ -811,6 +857,25 @@ impl<R: Read + Seek> Btrfs<R> {
         parent_tree_id: u64,
         raw: RawDirectoryEntry,
     ) -> Result<BtrfsDirEntry> {
+        let entry = self.resolve_directory_location(
+            parent_tree_id,
+            DirectoryLookup {
+                location: raw.location,
+                file_type: raw.file_type,
+            },
+        )?;
+        Ok(BtrfsDirEntry {
+            name: raw.name,
+            entry,
+            trans_id: raw.trans_id,
+        })
+    }
+
+    fn resolve_directory_location(
+        &mut self,
+        parent_tree_id: u64,
+        raw: DirectoryLookup,
+    ) -> Result<BtrfsEntry> {
         let entry = match raw.location.item_type {
             INODE_ITEM_KEY => BtrfsEntry {
                 tree_id: parent_tree_id,
@@ -833,11 +898,7 @@ impl<R: Read + Seek> Btrfs<R> {
                 });
             }
         };
-        Ok(BtrfsDirEntry {
-            name: raw.name,
-            entry,
-            trans_id: raw.trans_id,
-        })
+        Ok(entry)
     }
 }
 

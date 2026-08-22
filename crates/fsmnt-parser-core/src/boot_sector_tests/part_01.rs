@@ -41,10 +41,6 @@ fn test_exfat_calculations() {
     assert_eq!(1u32 << (9 + 3), 4096); // 512 byte sectors, 8 sectors per cluster
 }
 
-// ========================================================================
-// BootSectorHeader tests
-// ========================================================================
-
 fn create_header(oem_id: [u8; 8]) -> BootSectorHeader {
     BootSectorHeader {
         jump_instruction: [0xEB, 0x76, 0x90],
@@ -100,10 +96,6 @@ fn test_boot_sector_header_oem_id_str() {
     let mixed_header = create_header(*b"ABC \0 \0\0");
     assert_eq!(mixed_header.oem_id_str(), "ABC"); // all trailing space/null trimmed
 }
-
-// ========================================================================
-// DosBpb tests
-// ========================================================================
 
 #[expect(
     clippy::too_many_arguments,
@@ -201,10 +193,6 @@ fn test_dos_bpb_looks_like_exfat() {
     assert!(!fat_bpb.looks_like_exfat());
 }
 
-// ========================================================================
-// Fat16Ebpb tests
-// ========================================================================
-
 fn create_fat16_ebpb(boot_sig: u8, volume_label: &[u8; 11], fs_type: [u8; 8]) -> Fat16Ebpb {
     Fat16Ebpb {
         drive_number: 0x80,
@@ -258,10 +246,6 @@ fn test_fat16_ebpb_filesystem_type_str() {
     let ebpb_fat = create_fat16_ebpb(0x29, b"NO NAME    ", *b"FAT     ");
     assert_eq!(ebpb_fat.filesystem_type_str(), "FAT");
 }
-
-// ========================================================================
-// Fat32Ebpb tests
-// ========================================================================
 
 fn create_fat32_ebpb(ext_flags: u16, volume_label: &[u8; 11]) -> Fat32Ebpb {
     Fat32Ebpb {
@@ -321,10 +305,6 @@ fn test_fat32_ebpb_volume_label_str() {
     let ebpb_null = create_fat32_ebpb(0x0000, b"TEST\0\0\0\0\0\0\0");
     assert_eq!(ebpb_null.volume_label_str(), "TEST");
 }
-
-// ========================================================================
-// Fat32FsInfo tests
-// ========================================================================
 
 fn create_fat32_fsinfo(
     lead_sig: u32,
@@ -472,10 +452,6 @@ fn test_fat32_fsinfo_next_free() {
     assert_eq!(fsinfo_one.next_free(), None);
 }
 
-// ========================================================================
-// ExFatBootSector tests
-// ========================================================================
-
 fn create_exfat_boot_sector(
     bytes_per_sector_shift: u8,
     sectors_per_cluster_shift: u8,
@@ -604,10 +580,6 @@ fn test_exfat_active_fat() {
     assert_eq!(exfat_other.active_fat(), 0);
 }
 
-// ========================================================================
-// FilesystemType enum tests
-// ========================================================================
-
 #[test]
 fn test_filesystem_type_debug() {
     // Test Debug derivation
@@ -642,10 +614,6 @@ fn test_filesystem_type_copy() {
     assert_eq!(fat32, copied); // Can still use original
 }
 
-// ========================================================================
-// ParseError enum tests
-// ========================================================================
-
 #[test]
 fn test_parse_error_debug() {
     let err = ParseError::BufferTooSmall;
@@ -678,10 +646,6 @@ fn test_parse_error_copy() {
     assert_eq!(err, copied); // Can still use original
 }
 
-// ========================================================================
-// NtfsEbpb additional tests
-// ========================================================================
-
 #[test]
 fn test_ntfs_ebpb_mft_record_size() {
     let mut ebpb_data = [0u8; 48];
@@ -713,10 +677,6 @@ fn test_ntfs_ebpb_positive_cluster_values() {
     assert_eq!(ebpb.mft_record_size(4096), 8192); // 2 * 4096
     assert_eq!(ebpb.index_buffer_size(4096), 16384); // 4 * 4096
 }
-
-// ========================================================================
-// parse_boot_sector function tests
-// ========================================================================
 
 #[test]
 fn test_parse_boot_sector_buffer_too_small() {

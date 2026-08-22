@@ -8,6 +8,7 @@ use std::io::{self, Read, Seek};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+use fs_ntfs::attribute_value::NtfsAttributeValueOwned;
 use fs_ntfs::indexes::NtfsFileNameIndex;
 use fs_ntfs::structured_values::NtfsFileAttributeFlags;
 use fs_ntfs::{Ntfs, NtfsTime};
@@ -17,7 +18,7 @@ use fsmnt_core::{
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use tracing::debug;
 
-use crate::adapter::{PathCache, found, read_at_through};
+use crate::adapter::{PathCache, found, read_up_to};
 use crate::boot_backup;
 use crate::identity;
 use fsmnt_parser_core::iter::FsTryIterator;
@@ -31,14 +32,34 @@ fn ntfs_time_to_datetime(nt: NtfsTime) -> Option<DateTime<Utc>> {
     Some(DateTime::<Utc>::from(nt))
 }
 
+/// Bounded state retained for the most recently addressed NTFS record.
+struct CachedNtfsRecord {
+    record_number: u64,
+    is_directory: Option<bool>,
+    metadata: Option<FsMetadata>,
+    data: Option<NtfsAttributeValueOwned>,
+}
+
+impl CachedNtfsRecord {
+    const fn new(record_number: u64) -> Self {
+        Self {
+            record_number,
+            is_directory: None,
+            metadata: None,
+            data: None,
+        }
+    }
+}
+
 /// A raw NTFS volume exposed as a [`TargetFilesystem`].
 pub struct NtfsFilesystem<T: Read + Seek> {
     reader: T,
     ntfs: Ntfs,
     /// How the volume was opened, when that departed from the normal path.
     notices: Vec<String>,
-    /// Most recently resolved file record for adjacent mount reads.
-    resolved: PathCache<u64>,
+    /// Most recently resolved record and any detached data/metadata derived
+    /// from it for adjacent mount operations.
+    resolved: PathCache<CachedNtfsRecord>,
 }
 
 impl<T: Read + Seek> NtfsFilesystem<T> {
@@ -87,7 +108,7 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
     /// borrow of `self.reader` from escaping the helper.
     fn navigate_to_record(&mut self, path: &str) -> FsResult<u64> {
         if let Some(record) = self.resolved.get(path) {
-            return Ok(*record);
+            return Ok(record.record_number);
         }
         let normalized = normalize_path(path);
 
@@ -130,7 +151,7 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
                 None => return Err(FsError::NotFound(target_name.to_string())),
             }
         }
-        self.resolved.insert(path, record);
+        self.resolved.insert(path, CachedNtfsRecord::new(record));
         Ok(record)
     }
 
@@ -139,71 +160,102 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
     fn record_is_directory(&mut self, path: &str) -> FsResult<Option<bool>> {
         match self.navigate_to_record(path) {
             Ok(record) => {
+                if let Some(is_directory) = self
+                    .resolved
+                    .get(path)
+                    .and_then(|cached| cached.is_directory)
+                {
+                    return Ok(Some(is_directory));
+                }
                 let file = self
                     .ntfs
                     .file(&mut self.reader, record)
                     .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
-                Ok(Some(file.is_directory()))
+                let is_directory = file.is_directory();
+                if let Some(cached) = self.resolved.get_mut(path) {
+                    cached.is_directory = Some(is_directory);
+                }
+                Ok(Some(is_directory))
             }
             Err(FsError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
     }
+
+    /// Detaches and caches the unnamed `$DATA` value for `path`.
+    fn cache_data(&mut self, path: &str) -> FsResult<()> {
+        let record = self.navigate_to_record(path)?;
+        if self
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.data.is_some())
+        {
+            return Ok(());
+        }
+
+        let file = self
+            .ntfs
+            .file(&mut self.reader, record)
+            .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
+        if file.is_directory() {
+            if let Some(cached) = self.resolved.get_mut(path) {
+                cached.is_directory = Some(true);
+            }
+            return Err(FsError::NotAFile(path.to_string()));
+        }
+        let data_attr = file
+            .data(&mut self.reader, "")
+            .ok_or_else(|| FsError::NotAFile(path.to_string()))?
+            .map_err(|e| FsError::Filesystem(format!("failed to get data attribute: {e}")))?;
+        let data_attr = data_attr
+            .to_attribute()
+            .map_err(|e| FsError::Filesystem(format!("failed to convert attribute: {e}")))?;
+        let data = data_attr
+            .value(&mut self.reader)
+            .and_then(|value| value.into_owned(&mut self.reader))
+            .map_err(|e| FsError::Filesystem(format!("failed to cache attribute value: {e}")))?;
+
+        let cached = self
+            .resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("NTFS path cache was not populated".to_string()))?;
+        cached.is_directory = Some(false);
+        cached.data = Some(data);
+        Ok(())
+    }
 }
 
 impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-        use fsmnt_parser_core::io::FsReadSeek;
-
-        let record = self.navigate_to_record(path)?;
-
-        let file = self
-            .ntfs
-            .file(&mut self.reader, record)
-            .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
-
-        let data_attr = file
-            .data(&mut self.reader, "")
-            .ok_or_else(|| FsError::NotAFile(path.to_string()))?
-            .map_err(|e| FsError::Filesystem(format!("failed to get data attribute: {e}")))?;
-
-        let data_attr = data_attr
-            .to_attribute()
-            .map_err(|e| FsError::Filesystem(format!("failed to convert attribute: {e}")))?;
-
-        let mut data_value = data_attr
-            .value(&mut self.reader)
-            .map_err(|e| FsError::Filesystem(format!("failed to get attribute value: {e}")))?;
-
-        let len = usize::try_from(data_value.len())
-            .map_err(|_| FsError::Filesystem("file too large to read in one call".to_string()))?;
-        let mut buffer = vec![0u8; len];
-        data_value
-            .read_exact(&mut self.reader, &mut buffer)
-            .map_err(|e| FsError::Io(io::Error::other(e.to_string())))?;
-
-        Ok(buffer)
+        self.cache_data(path)?;
+        let Self {
+            reader, resolved, ..
+        } = self;
+        let data = resolved
+            .get_mut(path)
+            .and_then(|cached| cached.data.as_mut())
+            .ok_or_else(|| FsError::Filesystem("NTFS data cache was not populated".to_string()))?;
+        let mut offset = 0_u64;
+        read_up_to(data.len(), |buffer| {
+            let read = data
+                .read_at(reader, offset, buffer)
+                .map_err(|e| FsError::Io(io::Error::other(e.to_string())))?;
+            offset += u64::try_from(read).expect("a slice length fits u64");
+            Ok(read)
+        })
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let record = self.navigate_to_record(path)?;
-        let file = self
-            .ntfs
-            .file(&mut self.reader, record)
-            .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
-        let data_attr = file
-            .data(&mut self.reader, "")
-            .ok_or_else(|| FsError::NotAFile(path.to_string()))?
-            .map_err(|e| FsError::Filesystem(format!("failed to get data attribute: {e}")))?;
-        let data_attr = data_attr
-            .to_attribute()
-            .map_err(|e| FsError::Filesystem(format!("failed to convert attribute: {e}")))?;
-        let mut data_value = data_attr
-            .value(&mut self.reader)
-            .map_err(|e| FsError::Filesystem(format!("failed to get attribute value: {e}")))?;
-        read_at_through(&mut data_value, &mut self.reader, offset, buffer, |e| {
-            FsError::Io(io::Error::other(e.to_string()))
-        })
+        self.cache_data(path)?;
+        let Self {
+            reader, resolved, ..
+        } = self;
+        let data = resolved
+            .get_mut(path)
+            .and_then(|cached| cached.data.as_mut())
+            .ok_or_else(|| FsError::Filesystem("NTFS data cache was not populated".to_string()))?;
+        data.read_at(reader, offset, buffer)
+            .map_err(|e| FsError::Io(io::Error::other(e.to_string())))
     }
 
     // `open` is deliberately left at the trait default (read into a
@@ -227,36 +279,47 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
         let record = self.navigate_to_record(path)?;
+        if let Some(metadata) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.metadata.clone())
+        {
+            return Ok(metadata);
+        }
 
-        // First pass: `info()` needs no reader, so it can borrow the file.
+        let cached_data_size = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.data.as_ref())
+            .map(NtfsAttributeValueOwned::len);
+
+        // Parse the record once for both standard information and `$DATA`.
         let file = self
             .ntfs
             .file(&mut self.reader, record)
             .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
 
-        let info = file
-            .info()
-            .map_err(|e| FsError::Filesystem(format!("failed to get file info: {e}")))?;
-
         let is_dir = file.is_directory();
-        let flags = info.file_attributes();
-        let created = ntfs_time_to_datetime(info.creation_time());
-        let modified = ntfs_time_to_datetime(info.modification_time());
-        let accessed = ntfs_time_to_datetime(info.access_time());
-        let readonly = flags.contains(NtfsFileAttributeFlags::READ_ONLY);
-        let hidden = flags.contains(NtfsFileAttributeFlags::HIDDEN);
-        let system = flags.contains(NtfsFileAttributeFlags::SYSTEM);
-
-        // Release the file before the size lookup, which needs the reader.
-        drop(file);
+        let (created, modified, accessed, readonly, hidden, system) = {
+            let info = file
+                .info()
+                .map_err(|e| FsError::Filesystem(format!("failed to get file info: {e}")))?;
+            let flags = info.file_attributes();
+            (
+                ntfs_time_to_datetime(info.creation_time()),
+                ntfs_time_to_datetime(info.modification_time()),
+                ntfs_time_to_datetime(info.access_time()),
+                flags.contains(NtfsFileAttributeFlags::READ_ONLY),
+                flags.contains(NtfsFileAttributeFlags::HIDDEN),
+                flags.contains(NtfsFileAttributeFlags::SYSTEM),
+            )
+        };
 
         let size = if is_dir {
             0
+        } else if let Some(size) = cached_data_size {
+            size
         } else {
-            let file = self
-                .ntfs
-                .file(&mut self.reader, record)
-                .map_err(|e| FsError::Filesystem(format!("failed to get file: {e}")))?;
             let mut file_size = 0u64;
             if let Some(Ok(data_item)) = file.data(&mut self.reader, "")
                 && let Ok(data_attr) = data_item.to_attribute()
@@ -266,7 +329,7 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
             file_size
         };
 
-        Ok(FsMetadata {
+        let metadata = FsMetadata {
             size,
             is_dir,
             created,
@@ -275,7 +338,12 @@ impl<T: Read + Seek + Send> TargetFilesystem for NtfsFilesystem<T> {
             readonly,
             hidden,
             system,
-        })
+        };
+        if let Some(cached) = self.resolved.get_mut(path) {
+            cached.is_directory = Some(is_dir);
+            cached.metadata = Some(metadata.clone());
+        }
+        Ok(metadata)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {

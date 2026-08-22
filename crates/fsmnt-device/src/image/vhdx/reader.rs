@@ -157,6 +157,9 @@ pub(in crate::image) struct VhdxReader {
     chunk_ratio: u64,
     regions: format::Regions,
     log_region: Option<Region>,
+    bat_cache: [Option<(u64, BatEntry)>; 2],
+    next_bat_cache_slot: usize,
+    bitmap_byte_cache: Option<(u64, u8)>,
     parent: Option<Box<Self>>,
 }
 
@@ -231,6 +234,9 @@ impl VhdxReader {
             chunk_ratio,
             regions,
             log_region,
+            bat_cache: [None; 2],
+            next_bat_cache_slot: 0,
+            bitmap_byte_cache: None,
             parent,
         })
     }
@@ -338,11 +344,10 @@ impl VhdxReader {
                 .file_offset
                 .checked_add(sector_in_chunk / 8)
                 .ok_or(VhdxError::OutOfBounds)?;
-            let mut bitmap_byte = [0_u8; 1];
-            self.read_container_exact(bitmap_byte_offset, &mut bitmap_byte)?;
+            let bitmap_byte = self.read_bitmap_byte(bitmap_byte_offset)?;
             let bit = u8::try_from(sector_in_chunk % 8).map_err(|_| VhdxError::OutOfBounds)?;
             let destination = &mut buffer[written..written + chunk_length];
-            if bitmap_byte[0] & (1_u8 << bit) != 0 {
+            if bitmap_byte & (1_u8 << bit) != 0 {
                 let file_offset = payload
                     .file_offset
                     .checked_add(block_offset)
@@ -365,6 +370,14 @@ impl VhdxReader {
     }
 
     fn read_bat_entry(&mut self, index: u64) -> Result<BatEntry, VhdxError> {
+        if let Some((_, entry)) = self
+            .bat_cache
+            .iter()
+            .flatten()
+            .find(|(cached_index, _)| *cached_index == index)
+        {
+            return Ok(*entry);
+        }
         let relative_offset = index
             .checked_mul(BAT_ENTRY_SIZE)
             .ok_or(VhdxError::OutOfBounds)?;
@@ -382,7 +395,22 @@ impl VhdxReader {
             .ok_or(VhdxError::OutOfBounds)?;
         let mut bytes = [0_u8; 8];
         self.read_container_exact(file_offset, &mut bytes)?;
-        BatEntry::parse(u64::from_le_bytes(bytes))
+        let entry = BatEntry::parse(u64::from_le_bytes(bytes))?;
+        self.bat_cache[self.next_bat_cache_slot] = Some((index, entry));
+        self.next_bat_cache_slot = (self.next_bat_cache_slot + 1) % self.bat_cache.len();
+        Ok(entry)
+    }
+
+    fn read_bitmap_byte(&mut self, file_offset: u64) -> Result<u8, VhdxError> {
+        if let Some((cached_offset, byte)) = self.bitmap_byte_cache
+            && cached_offset == file_offset
+        {
+            return Ok(byte);
+        }
+        let mut byte = [0_u8; 1];
+        self.read_container_exact(file_offset, &mut byte)?;
+        self.bitmap_byte_cache = Some((file_offset, byte[0]));
+        Ok(byte[0])
     }
 
     fn validate_allocated_block(&self, offset: u64, length: u64) -> Result<(), VhdxError> {

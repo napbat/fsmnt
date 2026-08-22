@@ -79,6 +79,8 @@ struct DynamicState {
     block_size: u64,
     bitmap_size: u64,
     bat: Vec<VhdBatEntry>,
+    bitmap: Vec<u8>,
+    cached_bitmap_block: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,8 +246,15 @@ impl VhdReader {
             VhdBatEntry::Allocated { file_offset } => file_offset,
         };
         let bitmap_length = usize::try_from(bitmap_size).map_err(|_| VhdError::OutOfBounds)?;
-        let mut bitmap = vec![0_u8; bitmap_length];
-        read_exact_at(&mut self.file, block_file_offset, &mut bitmap)?;
+        let dynamic = self
+            .dynamic
+            .as_mut()
+            .ok_or(VhdError::InvalidDynamicHeader("missing dynamic state"))?;
+        if dynamic.cached_bitmap_block != Some(block_index) {
+            dynamic.bitmap.resize(bitmap_length, 0);
+            read_exact_at(&mut self.file, block_file_offset, &mut dynamic.bitmap)?;
+            dynamic.cached_bitmap_block = Some(block_index);
+        }
 
         let mut block_offset = offset_in_block;
         let mut logical_offset = virtual_offset;
@@ -260,8 +269,10 @@ impl VhdReader {
                 usize::try_from(sector_in_block / 8).map_err(|_| VhdError::OutOfBounds)?;
             let bitmap_bit =
                 u8::try_from(sector_in_block % 8).map_err(|_| VhdError::OutOfBounds)?;
-            let present = bitmap
-                .get(bitmap_byte)
+            let present = self
+                .dynamic
+                .as_ref()
+                .and_then(|dynamic| dynamic.bitmap.get(bitmap_byte))
                 .is_some_and(|byte| byte & (0x80_u8 >> bitmap_bit) != 0);
             let destination = &mut buffer[written..written + chunk_length];
             if present {
@@ -561,6 +572,8 @@ fn load_dynamic_state(
         block_size,
         bitmap_size,
         bat,
+        bitmap: Vec::new(),
+        cached_bitmap_block: None,
     })
 }
 

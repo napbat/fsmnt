@@ -4,6 +4,7 @@ mod attribute_list_non_resident;
 #[cfg(feature = "compression")]
 mod compressed;
 mod non_resident;
+mod owned;
 mod resident;
 #[cfg(feature = "compression")]
 mod wof;
@@ -12,6 +13,7 @@ pub use attribute_list_non_resident::*;
 #[cfg(feature = "compression")]
 pub use compressed::*;
 pub use non_resident::*;
+pub use owned::*;
 pub use resident::*;
 #[cfg(feature = "compression")]
 pub use wof::*;
@@ -38,7 +40,7 @@ pub enum NtfsAttributeValue<'n, 'f> {
     AttributeListNonResident(NtfsAttributeListNonResidentAttributeValue<'n, 'f>),
     /// A compressed non-resident attribute value (requires the `compression` feature).
     #[cfg(feature = "compression")]
-    CompressedNonResident(NtfsCompressedNonResidentAttributeValue<'n, 'f>),
+    CompressedNonResident(NtfsCompressedNonResidentAttributeValue<'n>),
 }
 
 impl NtfsAttributeValue<'_, '_> {
@@ -64,6 +66,45 @@ impl NtfsAttributeValue<'_, '_> {
             }),
             #[cfg(feature = "compression")]
             Self::CompressedNonResident(_) => Err(NtfsError::CompressedAttributeNotSupported),
+        }
+    }
+
+    /// Detaches this value from its file record for stateless positioned
+    /// access and long-lived caching.
+    ///
+    /// Resident bytes are copied into a tightly sized allocation. For a
+    /// non-resident value, only its decoded data-run map is retained.
+    /// Compressed values also retain their reusable compression-unit buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when data runs are malformed or connected attribute
+    /// records cannot be read.
+    pub fn into_owned<T: Read + Seek>(self, fs: &mut T) -> Result<NtfsAttributeValueOwned> {
+        match self {
+            Self::Resident(value) => Ok(NtfsAttributeValueOwned::resident(value.data())),
+            Self::NonResident(value) => {
+                let data_size = value.len();
+                let initialized_size = value.initialized_size();
+                let map = DataRunMap::from_data_runs(value.data_runs())?;
+                Ok(NtfsAttributeValueOwned::non_resident(
+                    map,
+                    data_size,
+                    initialized_size,
+                ))
+            }
+            Self::AttributeListNonResident(value) => {
+                let data_size = value.len();
+                let initialized_size = value.initialized_size();
+                let map = value.data_run_map(fs)?;
+                Ok(NtfsAttributeValueOwned::non_resident(
+                    map,
+                    data_size,
+                    initialized_size,
+                ))
+            }
+            #[cfg(feature = "compression")]
+            Self::CompressedNonResident(value) => Ok(value.into_owned()),
         }
     }
 

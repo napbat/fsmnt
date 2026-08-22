@@ -58,6 +58,28 @@ pub(super) struct LogOverlay {
 }
 
 impl LogOverlay {
+    pub(super) fn directory_index_changed(&self, tree_id: u64, object_id: u64) -> bool {
+        let Some(tree) = self
+            .trees
+            .binary_search_by_key(&tree_id, |tree| tree.tree_id)
+            .ok()
+            .and_then(|index| self.trees.get(index))
+        else {
+            return false;
+        };
+        if tree
+            .authoritative_ranges
+            .iter()
+            .any(|range| range.object_id == object_id && range.item_type == DIR_INDEX_KEY)
+        {
+            return true;
+        }
+        let start = DiskKey::range_start(object_id, DIR_INDEX_KEY);
+        let end = DiskKey::range_end(object_id, DIR_INDEX_KEY);
+        let first = tree.items.partition_point(|item| item.key < start);
+        tree.items.get(first).is_some_and(|item| item.key <= end)
+    }
+
     pub(super) fn overlay_items(
         &self,
         tree_id: u64,

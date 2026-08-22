@@ -6,6 +6,7 @@
 //! ([`crate::DirFilesystem`]), a raw partition image parsed in userspace, a
 //! remote system, and so on.
 
+use std::borrow::Cow;
 use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 
@@ -303,21 +304,29 @@ pub trait TargetFilesystem: Send {
     }
 }
 
-/// Normalize a filesystem path: convert backslashes to forward slashes and
-/// strip a leading drive letter (e.g. `C:\foo` -> `foo`).
+/// Normalizes a filesystem path by converting backslashes to forward slashes
+/// and stripping a leading drive letter (for example, `C:\foo` becomes
+/// `foo`).
+///
+/// The original path is borrowed when it needs no separator conversion.
+/// Removing a drive or root prefix also returns a borrowed subslice; only a
+/// remaining backslash requires an owned result.
 #[must_use]
-pub fn normalize_path(path: &str) -> String {
-    let with_forward_slashes = path.replace('\\', "/");
-
-    if with_forward_slashes.len() >= 2
-        && with_forward_slashes.as_bytes()[0].is_ascii_alphabetic()
-        && with_forward_slashes.as_bytes()[1] == b':'
+pub fn normalize_path(path: &str) -> Cow<'_, str> {
+    let without_drive = if path.len() >= 2
+        && path.as_bytes()[0].is_ascii_alphabetic()
+        && path.as_bytes()[1] == b':'
     {
-        with_forward_slashes[2..]
-            .trim_start_matches('/')
-            .to_string()
+        &path[2..]
     } else {
-        with_forward_slashes.trim_start_matches('/').to_string()
+        path
+    };
+    let relative = without_drive.trim_start_matches(['/', '\\']);
+
+    if relative.contains('\\') {
+        Cow::Owned(relative.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(relative)
     }
 }
 
@@ -363,6 +372,26 @@ mod tests {
     #[test]
     fn normalize_path_no_prefix() {
         assert_eq!(normalize_path("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn normalize_path_borrows_when_no_separator_conversion_is_needed() {
+        assert!(matches!(
+            normalize_path("C:/Users/test"),
+            Cow::Borrowed("Users/test")
+        ));
+        assert!(matches!(
+            normalize_path("relative/path"),
+            Cow::Borrowed("relative/path")
+        ));
+    }
+
+    #[test]
+    fn normalize_path_owns_only_when_converting_separators() {
+        assert!(matches!(
+            normalize_path("foo\\bar"),
+            Cow::Owned(ref normalized) if normalized == "foo/bar"
+        ));
     }
 
     #[test]

@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::ops::ControlFlow;
 
-use crate::btree::{BtreeNode, descend};
+use crate::btree::{BtreeNode, BtreeNodeCache, descend};
 use crate::checkpoint::read_block;
 use crate::error::{ApfsError, Result};
 use crate::io::{Read, Seek};
@@ -226,6 +226,7 @@ pub struct Catalog {
     omap: Omap,
     block_size: u32,
     xid: Xid,
+    node_cache: BtreeNodeCache,
 }
 
 impl Catalog {
@@ -240,11 +241,15 @@ impl Catalog {
             omap,
             block_size,
             xid,
+            node_cache: BtreeNodeCache::new(),
         }
     }
 
     /// Resolves a virtual catalog-tree node identifier to a parsed node.
     fn resolve_node<T: Read + Seek>(&self, reader: &mut T, node_oid: u64) -> Result<BtreeNode> {
+        if let Some(node) = self.node_cache.get(u128::from(node_oid)) {
+            return Ok(node);
+        }
         let mapping = self
             .omap
             .resolve(reader, self.block_size, Oid(node_oid), self.xid)?
@@ -255,7 +260,9 @@ impl Catalog {
             structure: "omap_val_t",
             reason: "catalog node address is negative",
         })?;
-        BtreeNode::parse(read_block(reader, self.block_size, address)?)
+        let node = BtreeNode::parse(read_block(reader, self.block_size, address)?)?;
+        self.node_cache.insert(u128::from(node_oid), &node);
+        Ok(node)
     }
 
     /// Returns every catalog record belonging to `obj_id`, across all record
@@ -481,7 +488,7 @@ mod tests {
     use super::*;
     use crate::btree::{BTN_DATA_OFFSET, BTREE_INFO_SIZE};
     use crate::object::OBJ_PHYSICAL;
-    use fsmnt_testkit::Cursor;
+    use fsmnt_testkit::{CountingReader, Cursor};
 
     const BLK: usize = 4096;
 
@@ -773,6 +780,29 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn repeated_lookup_reuses_catalog_and_object_map_nodes() {
+        let (catalog, reader) = two_level_catalog();
+        let mut reader = CountingReader::new(reader);
+        assert_eq!(
+            catalog
+                .find_record(&mut reader, 5, JObjType::Inode)
+                .expect("first lookup"),
+            Some(vec![0x53; 4])
+        );
+        assert!(reader.stats().read_calls() > 0);
+
+        reader.reset_stats();
+        assert_eq!(
+            catalog
+                .find_record(&mut reader, 5, JObjType::Inode)
+                .expect("cached lookup"),
+            Some(vec![0x53; 4])
+        );
+        assert_eq!(reader.stats().read_calls(), 0);
+        assert_eq!(reader.stats().seek_calls(), 0);
     }
 
     #[test]

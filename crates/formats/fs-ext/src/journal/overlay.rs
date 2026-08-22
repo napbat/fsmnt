@@ -46,7 +46,14 @@ impl<'r, 'p, R: Read + Seek, S: OverlaySource> OverlayReader<'r, 'p, R, S> {
 }
 
 fn make_invalid_input() -> io::Error {
-    IoError::invalid_input().into()
+    #[cfg(feature = "std")]
+    {
+        IoError::invalid_input().into()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        IoError::invalid_input()
+    }
 }
 
 #[allow(

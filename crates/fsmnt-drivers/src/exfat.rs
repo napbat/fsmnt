@@ -62,14 +62,30 @@ fn metadata_of(entry: &ExFatEntrySet) -> FsMetadata {
     }
 }
 
+struct CachedExFatTarget {
+    entry: Option<ExFatEntrySet>,
+    metadata: Option<FsMetadata>,
+    file: Option<ExFatFile>,
+}
+
+impl CachedExFatTarget {
+    const fn new(entry: Option<ExFatEntrySet>) -> Self {
+        Self {
+            entry,
+            metadata: None,
+            file: None,
+        }
+    }
+}
+
 /// A raw `exFAT` volume exposed as a [`TargetFilesystem`].
 pub struct ExFatFilesystem<T: Read + Seek> {
     reader: T,
     exfat: ExFat,
     /// How the volume was opened, when that departed from the normal path.
     notices: Vec<String>,
-    /// Most recently opened data stream, including its resolved FAT chain.
-    files: PathCache<ExFatFile>,
+    /// Most recently resolved path, metadata, and data stream.
+    resolved: PathCache<CachedExFatTarget>,
 }
 
 impl<T: Read + Seek> ExFatFilesystem<T> {
@@ -100,7 +116,7 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
             reader,
             exfat,
             notices: Vec::new(),
-            files: PathCache::new(),
+            resolved: PathCache::new(),
         })
     }
 
@@ -111,17 +127,23 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
         &self.exfat
     }
 
-    /// Resolve a path to its entry set, or `None` for the root directory
-    /// (which has no directory entry of its own).
-    fn entry_at(&mut self, path: &str) -> FsResult<Option<ExFatEntrySet>> {
-        let normalized = normalize_path(path);
-        if normalized.is_empty() {
-            return Ok(None);
+    /// Resolve and retain a path entry, using `None` for the implicit root.
+    fn cache_entry(&mut self, path: &str) -> FsResult<()> {
+        if self.resolved.get(path).is_some() {
+            return Ok(());
         }
-        self.exfat
-            .open(&mut self.reader, &normalized)
-            .map(Some)
-            .map_err(|e| map_exfat_error(e, path))
+        let normalized = normalize_path(path);
+        let entry = if normalized.is_empty() {
+            None
+        } else {
+            Some(
+                self.exfat
+                    .open(&mut self.reader, &normalized)
+                    .map_err(|e| map_exfat_error(e, path))?,
+            )
+        };
+        self.resolved.insert(path, CachedExFatTarget::new(entry));
+        Ok(())
     }
 
     /// The first cluster of the directory at `path`.
@@ -130,7 +152,12 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
     ///
     /// Returns [`FsError::NotADirectory`] if `path` is a file.
     fn directory_cluster(&mut self, path: &str) -> FsResult<u32> {
-        match self.entry_at(path)? {
+        self.cache_entry(path)?;
+        match self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.entry.as_ref())
+        {
             None => Ok(self.exfat.root_directory_cluster()),
             Some(entry) if entry.is_directory() => Ok(entry.first_cluster()),
             Some(_) => Err(FsError::NotADirectory(path.to_string())),
@@ -139,25 +166,69 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
 
     /// Opens `path` as the bounded active file handle.
     fn cache_file(&mut self, path: &str) -> FsResult<()> {
-        if self.files.get(path).is_some() {
+        self.cache_entry(path)?;
+        if self
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.file.is_some())
+        {
             return Ok(());
         }
-        let Some(entry) = self.entry_at(path)? else {
+        let Some(entry) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.entry.as_ref())
+        else {
             return Err(FsError::NotAFile(path.to_string()));
         };
         if entry.is_directory() {
             return Err(FsError::NotAFile(path.to_string()));
         }
-        let file = ExFatFile::new(
-            &self.exfat,
-            &mut self.reader,
+        let (first_cluster, data_length, no_fat_chain) = (
             entry.first_cluster(),
             entry.data_length(),
             entry.no_fat_chain(),
+        );
+        let file = ExFatFile::new(
+            &self.exfat,
+            &mut self.reader,
+            first_cluster,
+            data_length,
+            no_fat_chain,
         )
         .map_err(|e| map_exfat_error(e, path))?;
-        self.files.insert(path, file);
+        self.resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("exFAT path cache was not populated".to_string()))?
+            .file = Some(file);
         Ok(())
+    }
+
+    fn metadata_at(&mut self, path: &str) -> FsResult<FsMetadata> {
+        self.cache_entry(path)?;
+        if let Some(metadata) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.metadata.clone())
+        {
+            return Ok(metadata);
+        }
+        let metadata = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.entry.as_ref())
+            .map_or_else(
+                || FsMetadata {
+                    is_dir: true,
+                    ..FsMetadata::default()
+                },
+                metadata_of,
+            );
+        self.resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("exFAT path cache was not populated".to_string()))?
+            .metadata = Some(metadata.clone());
+        Ok(metadata)
     }
 }
 
@@ -165,8 +236,9 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_file(path)?;
         let file = self
-            .files
+            .resolved
             .get_mut(path)
+            .and_then(|cached| cached.file.as_mut())
             .ok_or_else(|| FsError::Filesystem("exFAT file cache was not populated".to_string()))?;
         let length = file.len();
         file.seek(&mut self.reader, std::io::SeekFrom::Start(0))
@@ -181,8 +253,9 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
         self.cache_file(path)?;
         let file = self
-            .files
+            .resolved
             .get_mut(path)
+            .and_then(|cached| cached.file.as_mut())
             .ok_or_else(|| FsError::Filesystem("exFAT file cache was not populated".to_string()))?;
         read_at_through(file, &mut self.reader, offset, buffer, |e| {
             map_exfat_error(e, path)
@@ -190,37 +263,35 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        found(self.entry_at(path))
+        found(self.cache_entry(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
-        match self.entry_at(path) {
-            // The root is always a directory.
-            Ok(None) => Ok(true),
-            Ok(Some(entry)) => Ok(entry.is_directory()),
+        match self.cache_entry(path) {
+            Ok(()) => Ok(self
+                .resolved
+                .get(path)
+                .and_then(|cached| cached.entry.as_ref())
+                .is_none_or(ExFatEntrySet::is_directory)),
             Err(FsError::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
-        match self.entry_at(path) {
-            Ok(Some(entry)) => Ok(!entry.is_directory()),
-            // The root is a directory, and a missing path is not a file.
-            Ok(None) | Err(FsError::NotFound(_)) => Ok(false),
+        match self.cache_entry(path) {
+            Ok(()) => Ok(self
+                .resolved
+                .get(path)
+                .and_then(|cached| cached.entry.as_ref())
+                .is_some_and(|entry| !entry.is_directory())),
+            Err(FsError::NotFound(_)) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
-        match self.entry_at(path)? {
-            // The root directory carries no timestamps or attributes.
-            None => Ok(FsMetadata {
-                is_dir: true,
-                ..FsMetadata::default()
-            }),
-            Some(entry) => Ok(metadata_of(&entry)),
-        }
+        self.metadata_at(path)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
@@ -450,6 +521,23 @@ mod tests {
         assert!(opening.read_calls() > cached.read_calls());
         assert_eq!(cached.read_calls(), 1, "only the requested data is read");
         assert_eq!(cached.seek_calls(), 1, "only the data seek remains");
+    }
+
+    #[test]
+    fn metadata_then_read_reuses_the_resolved_entry() {
+        let reader = CountingReader::new(Cursor::new(image::build()));
+        let mut fs = ExFatFilesystem::new(reader).expect("synthetic exFAT volume must open");
+        fs.metadata("/hello.txt").expect("resolve metadata");
+
+        fs.reader.reset_stats();
+        let mut contents = [0_u8; 5];
+        fs.read_at("/hello.txt", 0, &mut contents)
+            .expect("positioned read");
+        let stats = fs.reader.stats();
+
+        assert_eq!(&contents, b"Hello");
+        assert_eq!(stats.read_calls(), 1, "only file data is read");
+        assert_eq!(stats.seek_calls(), 1, "only the data seek remains");
     }
 
     #[test]

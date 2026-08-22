@@ -493,10 +493,6 @@ pub fn read_gpt_partitions<R: std::io::Read + std::io::Seek>(
     Ok(partitions)
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 #[path = "partition_tests/mod.rs"]
 mod tests;

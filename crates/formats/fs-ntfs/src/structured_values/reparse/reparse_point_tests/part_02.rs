@@ -85,10 +85,6 @@ fn test_nfs_type_constants() {
     assert_eq!(nfs_types::NFS_SPECFILE_SOCK, 0x0000_0000_4B43_4F53);
 }
 
-// ========================================
-// Roundtrip tests for from_u32 / as_u32
-// ========================================
-
 #[test]
 fn test_roundtrip_known_tags() {
     let tags = [
@@ -137,10 +133,6 @@ fn test_roundtrip_known_tags() {
         assert_eq!(tag, parsed, "Roundtrip failed for {tag:?}");
     }
 }
-
-// ========================================
-// NtfsReparsePoint struct method tests
-// ========================================
 
 /// Parses a reparse point through its real `from_bytes` constructor.
 /// `tag` is the 4-byte tag; `data` is the reparse data after the
@@ -217,10 +209,6 @@ fn test_reparse_point_guid_absent_for_microsoft() {
     assert!(rp.guid().is_none());
     assert_eq!(rp.data().len(), 32);
 }
-
-// ========================================
-// NtfsSymbolicLink::from_reparse_point tests
-// ========================================
 
 /// Builds symbolic link reparse data: 12-byte header + path buffer.
 /// Substitute name is placed at offset 0, print name after it.
@@ -412,10 +400,6 @@ fn test_symbolic_link_exact_fit_boundary() {
     assert_eq!(sym.print_name().unwrap(), "BB");
 }
 
-// ========================================
-// NtfsMountPoint::from_reparse_point tests
-// ========================================
-
 /// Builds mount point reparse data: 8-byte header + path buffer.
 fn mount_point_data(substitute: &[u8], print: &[u8]) -> Vec<u8> {
     let mut data = Vec::new();
@@ -567,10 +551,6 @@ fn test_mount_point_print_beyond_buffer() {
     ));
 }
 
-// ========================================
-// NtfsAppExecLink raw-bytes accessors
-// ========================================
-
 #[test]
 fn test_app_exec_link_raw_bytes_accessors() {
     let mut data = Vec::new();
@@ -613,10 +593,6 @@ fn test_app_exec_link_minimum_header_size() {
             if reason.contains("fewer than 3")
     ));
 }
-
-// ========================================
-// split_utf16le_null_terminated termination
-// ========================================
 
 #[test]
 fn test_split_utf16le_long_buffer_terminates() {

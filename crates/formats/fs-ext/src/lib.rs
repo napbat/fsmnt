@@ -29,6 +29,7 @@ mod htree;
 mod inline_xattr;
 mod mmp;
 pub mod orphan;
+mod positioned_file;
 mod posix_acl;
 mod superblock;
 mod time;
@@ -71,6 +72,7 @@ pub use orphan::{
     LegacyOrphanEntry, OrphanDisposition, OrphanFileEntry, OrphanPlan, OrphanPosition,
     OrphanReplay, OrphanSourceKind, OrphanStop, OrphanStopReason, OrphanWarning, OrphanWarningKind,
 };
+pub use positioned_file::ExtPositionedFile;
 pub use posix_acl::PosixAclEntry;
 pub use quota::{QuotaIter, QuotaKind, QuotaRecord};
 pub use superblock::{ExtSuperblockError, ExtSuperblockForensics};

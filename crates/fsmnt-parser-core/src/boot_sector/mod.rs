@@ -160,10 +160,6 @@ fn probe_btrfs_volume(buf: &[u8]) -> bool {
     buf.get(offset..).is_some_and(is_btrfs_primary_superblock)
 }
 
-// ============================================================================
-// Common Structures (shared across filesystem types)
-// ============================================================================
-
 /// Jump instruction and OEM identifier at the start of every boot sector
 ///
 /// Offset 0x00-0x0A (11 bytes)
@@ -332,10 +328,6 @@ impl DosBpb {
     }
 }
 
-// ============================================================================
-// FAT12/FAT16 Extended BIOS Parameter Block
-// ============================================================================
-
 /// DOS 4.0 Extended BIOS Parameter Block for FAT12/FAT16 (26 bytes)
 ///
 /// Offset 0x24-0x3D
@@ -403,10 +395,6 @@ impl Fat16Ebpb {
         s.trim_end_matches([' ', '\0'])
     }
 }
-
-// ============================================================================
-// FAT32 Extended BIOS Parameter Block
-// ============================================================================
 
 /// DOS 7.1 Extended BIOS Parameter Block for FAT32 (54 bytes)
 ///
@@ -566,10 +554,6 @@ impl Fat32FsInfo {
     }
 }
 
-// ============================================================================
-// NTFS Extended BIOS Parameter Block
-// ============================================================================
-
 /// NTFS Extended BIOS Parameter Block (48 bytes)
 ///
 /// Offset 0x24-0x53
@@ -653,10 +637,6 @@ impl NtfsEbpb {
         }
     }
 }
-
-// ============================================================================
-// exFAT Boot Sector
-// ============================================================================
 
 /// exFAT Main Boot Region (first 512 bytes)
 ///
@@ -830,10 +810,6 @@ impl ExFatBootSector {
 
 mod detection;
 pub use detection::*;
-
-// ============================================================================
-// Unit Tests
-// ============================================================================
 
 #[cfg(test)]
 #[path = "../boot_sector_tests/mod.rs"]

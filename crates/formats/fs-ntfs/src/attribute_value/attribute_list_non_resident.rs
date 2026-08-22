@@ -105,6 +105,10 @@ impl<'n, 'f> NtfsAttributeListNonResidentAttributeValue<'n, 'f> {
         self.stream_state.stream_position()
     }
 
+    pub(super) const fn initialized_size(&self) -> u64 {
+        self.initialized_size
+    }
+
     /// Returns the next Data Run from the current attribute, or
     /// `None` when all data runs of the current attribute have been
     /// consumed.

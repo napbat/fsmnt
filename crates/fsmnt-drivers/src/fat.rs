@@ -82,8 +82,16 @@ pub struct FatFilesystem<T: Read + Seek> {
     fat: Fat,
     /// How the volume was opened, when that departed from the normal path.
     notices: Vec<String>,
-    /// Most recently opened data stream, including cluster traversal state.
-    files: PathCache<FatFileValue>,
+    /// Most recently resolved target and its lazily populated stream/metadata.
+    resolved: PathCache<CachedFatTarget>,
+}
+
+struct CachedFatTarget {
+    first_cluster: Option<u32>,
+    is_directory: bool,
+    size: u64,
+    data: Option<FatFileValue>,
+    metadata: Option<FsMetadata>,
 }
 
 impl<T: Read + Seek> FatFilesystem<T> {
@@ -107,7 +115,7 @@ impl<T: Read + Seek> FatFilesystem<T> {
             reader,
             fat,
             notices: Vec::new(),
-            files: PathCache::new(),
+            resolved: PathCache::new(),
         })
     }
 
@@ -147,11 +155,8 @@ impl<T: Read + Seek> FatFilesystem<T> {
             return EntryAttrs::default();
         };
 
-        // FAT lookups are case-insensitive; `Fat::open` already matched
-        // this name, so an uppercase comparison finds the same entry.
-        let filename_upper = filename.to_uppercase();
         while let Some(entry) = entries.try_next(&mut self.reader).unwrap_or(None) {
-            if entry.name().to_uppercase() == filename_upper {
+            if entry.name_matches(filename) {
                 return attrs_of(&entry);
             }
         }
@@ -159,21 +164,50 @@ impl<T: Read + Seek> FatFilesystem<T> {
         EntryAttrs::default()
     }
 
-    /// Opens `path` as the bounded active file handle.
-    fn cache_file(&mut self, path: &str) -> FsResult<()> {
-        if self.files.get(path).is_some() {
-            return Ok(());
+    fn resolve(&mut self, path: &str) -> FsResult<(bool, u64)> {
+        if let Some(cached) = self.resolved.get(path) {
+            return Ok((cached.is_directory, cached.size));
         }
         let normalized = normalize_path(path);
         let file = self
             .fat
             .open(&mut self.reader, &normalized)
             .map_err(|e| map_fat_error(e, path))?;
-        if file.is_directory() {
+        let cached = CachedFatTarget {
+            first_cluster: file.first_cluster(),
+            is_directory: file.is_directory(),
+            size: u64::from(file.file_size()),
+            data: None,
+            metadata: None,
+        };
+        let result = (cached.is_directory, cached.size);
+        self.resolved.insert(path, cached);
+        Ok(result)
+    }
+
+    /// Opens `path` as the bounded active file handle.
+    fn cache_file(&mut self, path: &str) -> FsResult<()> {
+        let (is_directory, size) = self.resolve(path)?;
+        if is_directory {
             return Err(FsError::NotAFile(path.to_string()));
         }
-        let value = file.data().map_err(|e| map_fat_error(e, path))?;
-        self.files.insert(path, value);
+        if self
+            .resolved
+            .get(path)
+            .is_some_and(|cached| cached.data.is_some())
+        {
+            return Ok(());
+        }
+        let first_cluster = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.first_cluster);
+        let data = FatFileValue::new(&self.fat, first_cluster, size);
+        let cached = self
+            .resolved
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("FAT path cache was not populated".to_string()))?;
+        cached.data = Some(data);
         Ok(())
     }
 }
@@ -182,8 +216,9 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
         self.cache_file(path)?;
         let file = self
-            .files
+            .resolved
             .get_mut(path)
+            .and_then(|cached| cached.data.as_mut())
             .ok_or_else(|| FsError::Filesystem("FAT file cache was not populated".to_string()))?;
         let length = <FatFileValue as FsReadSeek<T>>::len(file);
         file.rewind();
@@ -197,8 +232,9 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
         self.cache_file(path)?;
         let file = self
-            .files
+            .resolved
             .get_mut(path)
+            .and_then(|cached| cached.data.as_mut())
             .ok_or_else(|| FsError::Filesystem("FAT file cache was not populated".to_string()))?;
         read_at_through(file, &mut self.reader, offset, buffer, |e| {
             map_fat_error(e, path)
@@ -206,55 +242,34 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
     }
 
     fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-        let normalized = normalize_path(path);
-        found(
-            self.fat
-                .open(&mut self.reader, &normalized)
-                .map_err(|e| map_fat_error(e, path)),
-        )
+        found(self.resolve(path))
     }
 
     fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
-        let normalized = normalize_path(path);
-        found_and(
-            self.fat
-                .open(&mut self.reader, &normalized)
-                .map_err(|e| map_fat_error(e, path)),
-            |file| file.is_directory(),
-        )
+        found_and(self.resolve(path), |(is_directory, _)| is_directory)
     }
 
     fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
-        let normalized = normalize_path(path);
-        found_and(
-            self.fat
-                .open(&mut self.reader, &normalized)
-                .map_err(|e| map_fat_error(e, path)),
-            |file| !file.is_directory(),
-        )
+        found_and(self.resolve(path), |(is_directory, _)| !is_directory)
     }
 
     fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
+        let (is_dir, size) = self.resolve(path)?;
+        if let Some(metadata) = self
+            .resolved
+            .get(path)
+            .and_then(|cached| cached.metadata.clone())
+        {
+            return Ok(metadata);
+        }
         let normalized = normalize_path(path);
-
-        let file = self
-            .fat
-            .open(&mut self.reader, &normalized)
-            .map_err(|e| map_fat_error(e, path))?;
-
-        let is_dir = file.is_directory();
-        let size = if is_dir {
-            0
-        } else {
-            u64::from(file.file_size())
-        };
 
         // A FatFile carries only kind and size; the timestamps and DOS
         // attributes live in the parent directory's entry.
         let attrs = self.entry_attrs(&normalized);
 
-        Ok(FsMetadata {
-            size,
+        let metadata = FsMetadata {
+            size: if is_dir { 0 } else { size },
             is_dir,
             created: attrs.created,
             modified: attrs.modified,
@@ -262,7 +277,11 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
             readonly: attrs.readonly,
             hidden: attrs.hidden,
             system: attrs.system,
-        })
+        };
+        if let Some(cached) = self.resolved.get_mut(path) {
+            cached.metadata = Some(metadata.clone());
+        }
+        Ok(metadata)
     }
 
     fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
@@ -281,7 +300,7 @@ impl<T: Read + Seek + Send> TargetFilesystem for FatFilesystem<T> {
         let parent = if normalized.is_empty() || normalized == "/" {
             PathBuf::from("/")
         } else {
-            PathBuf::from(&normalized)
+            PathBuf::from(normalized.as_ref())
         };
 
         let mut entries = Vec::new();

@@ -28,6 +28,16 @@ const LONG_NAME_MARKER: u8 = 0xff;
 /// Maximum QNX6 filename length in bytes.
 const LONG_NAME_MAX: u16 = 510;
 
+enum DirectoryRecordName<'record> {
+    Short(&'record [u8]),
+    Long { index: u32, stored_checksum: u32 },
+}
+
+struct DirectoryRecord<'record> {
+    inode: u32,
+    name: DirectoryRecordName<'record>,
+}
+
 /// A directory name and the inode to which it points.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Qnx6DirectoryEntry {
@@ -48,6 +58,12 @@ impl Qnx6DirectoryEntry {
     #[must_use]
     pub fn name(&self) -> &[u8] {
         &self.name
+    }
+
+    /// Consume the entry and return its filename allocation.
+    #[must_use]
+    pub fn into_name(self) -> Vec<u8> {
+        self.name
     }
 
     /// Index in the long-filename metadata file, for a non-inline name.
@@ -276,12 +292,36 @@ impl<R: Read + Seek> Qnx6<R> {
     /// Returns an error if `directory` is not a directory, the name is not
     /// present, or directory/inode data cannot be read.
     pub fn lookup(&mut self, directory: &Qnx6Inode, name: &[u8]) -> Result<Qnx6Inode> {
-        let entry = self
-            .read_directory(directory)?
-            .into_iter()
-            .find(|entry| entry.name() == name)
-            .ok_or(Qnx6Error::NotFound)?;
-        self.inode(entry.inode())
+        let count = Self::directory_entry_count(directory)?;
+        let descriptor = *directory.tree();
+        for index in 0..count {
+            let offset = index
+                .checked_mul(DIRECTORY_ENTRY_SIZE)
+                .ok_or(Qnx6Error::Overflow("directory entry offset"))?;
+            let mut record = [0_u8; DIRECTORY_ENTRY_BYTES];
+            self.read_tree_exact(&descriptor, offset, &mut record)?;
+            let Some(parsed) = self.parse_directory_record(&record, offset)? else {
+                continue;
+            };
+            let matches = match parsed.name {
+                DirectoryRecordName::Short(candidate) => candidate == name,
+                DirectoryRecordName::Long { index, .. } => {
+                    let (long_name_tree, name_offset, length) = self.long_name_location(index)?;
+                    let mut candidate = [0_u8; 510];
+                    self.read_metadata_exact(
+                        &long_name_tree,
+                        "long-filename",
+                        name_offset,
+                        &mut candidate[..length],
+                    )?;
+                    candidate[..length] == *name
+                }
+            };
+            if matches {
+                return self.inode(parsed.inode);
+            }
+        }
+        Err(Qnx6Error::NotFound)
     }
 
     /// Read all live name records in a directory, including `.` and `..`.
@@ -291,16 +331,7 @@ impl<R: Read + Seek> Qnx6<R> {
     /// Returns an error when the inode is not a directory or when any fixed
     /// record, long-name block, pointer, or source read is invalid.
     pub fn read_directory(&mut self, inode: &Qnx6Inode) -> Result<Vec<Qnx6DirectoryEntry>> {
-        if !inode.file_type().is_directory() {
-            return Err(Qnx6Error::NotADirectory(inode.number()));
-        }
-        if !inode.size().is_multiple_of(DIRECTORY_ENTRY_SIZE) {
-            return Err(Qnx6Error::InvalidDirectoryEntry {
-                offset: inode.size() - inode.size() % DIRECTORY_ENTRY_SIZE,
-                reason: "directory size is not a multiple of 32 bytes",
-            });
-        }
-        let count = inode.size() / DIRECTORY_ENTRY_SIZE;
+        let count = Self::directory_entry_count(inode)?;
         let capacity =
             usize::try_from(count).map_err(|_| Qnx6Error::ObjectTooLarge(inode.size()))?;
         let mut entries = Vec::new();
@@ -368,6 +399,50 @@ impl<R: Read + Seek> Qnx6<R> {
         record: &[u8; DIRECTORY_ENTRY_BYTES],
         offset: u64,
     ) -> Result<Option<Qnx6DirectoryEntry>> {
+        let Some(parsed) = self.parse_directory_record(record, offset)? else {
+            return Ok(None);
+        };
+        match parsed.name {
+            DirectoryRecordName::Short(name) => Ok(Some(Qnx6DirectoryEntry {
+                inode: parsed.inode,
+                name: name.to_vec(),
+                long_name_index: None,
+                long_name_checksum_valid: None,
+            })),
+            DirectoryRecordName::Long {
+                index,
+                stored_checksum,
+            } => {
+                let name = self.read_long_name(index)?;
+                let checksum_valid = long_name_checksum(&name) == stored_checksum;
+                Ok(Some(Qnx6DirectoryEntry {
+                    inode: parsed.inode,
+                    name,
+                    long_name_index: Some(index),
+                    long_name_checksum_valid: Some(checksum_valid),
+                }))
+            }
+        }
+    }
+
+    fn directory_entry_count(inode: &Qnx6Inode) -> Result<u64> {
+        if !inode.file_type().is_directory() {
+            return Err(Qnx6Error::NotADirectory(inode.number()));
+        }
+        if !inode.size().is_multiple_of(DIRECTORY_ENTRY_SIZE) {
+            return Err(Qnx6Error::InvalidDirectoryEntry {
+                offset: inode.size() - inode.size() % DIRECTORY_ENTRY_SIZE,
+                reason: "directory size is not a multiple of 32 bytes",
+            });
+        }
+        Ok(inode.size() / DIRECTORY_ENTRY_SIZE)
+    }
+
+    fn parse_directory_record<'record>(
+        &self,
+        record: &'record [u8; DIRECTORY_ENTRY_BYTES],
+        offset: u64,
+    ) -> Result<Option<DirectoryRecord<'record>>> {
         let order = self.superblock.byte_order();
         let inode = order.read_u32(record, 0);
         let size = record[4];
@@ -380,34 +455,31 @@ impl<R: Read + Seek> Qnx6<R> {
                 reason: "inode number exceeds the superblock inode count",
             });
         }
-        if size <= SHORT_NAME_MAX {
+        let name = if size <= SHORT_NAME_MAX {
             let end = 5 + usize::from(size);
-            return Ok(Some(Qnx6DirectoryEntry {
-                inode,
-                name: record[5..end].to_vec(),
-                long_name_index: None,
-                long_name_checksum_valid: None,
-            }));
-        }
-        if size != LONG_NAME_MARKER {
+            DirectoryRecordName::Short(&record[5..end])
+        } else if size == LONG_NAME_MARKER {
+            DirectoryRecordName::Long {
+                index: order.read_u32(record, 8),
+                stored_checksum: order.read_u32(record, 12),
+            }
+        } else {
             return Err(Qnx6Error::InvalidDirectoryEntry {
                 offset,
                 reason: "name length is neither inline nor the long-name marker",
             });
-        }
-        let index = order.read_u32(record, 8);
-        let stored_checksum = order.read_u32(record, 12);
-        let name = self.read_long_name(index)?;
-        let checksum_valid = long_name_checksum(&name) == stored_checksum;
-        Ok(Some(Qnx6DirectoryEntry {
-            inode,
-            name,
-            long_name_index: Some(index),
-            long_name_checksum_valid: Some(checksum_valid),
-        }))
+        };
+        Ok(Some(DirectoryRecord { inode, name }))
     }
 
     fn read_long_name(&mut self, index: u32) -> Result<Vec<u8>> {
+        let (descriptor, offset, length) = self.long_name_location(index)?;
+        let mut name = vec![0_u8; length];
+        self.read_metadata_exact(&descriptor, "long-filename", offset, &mut name)?;
+        Ok(name)
+    }
+
+    fn long_name_location(&mut self, index: u32) -> Result<(TreeDescriptor, u64, usize)> {
         let block_size = u64::from(self.superblock.block_size());
         let offset = u64::from(index)
             .checked_mul(block_size)
@@ -419,9 +491,7 @@ impl<R: Read + Seek> Qnx6<R> {
         if length > LONG_NAME_MAX || u64::from(length) + 2 > block_size {
             return Err(Qnx6Error::InvalidLongName { index, length });
         }
-        let mut name = vec![0_u8; usize::from(length)];
-        self.read_metadata_exact(&descriptor, "long-filename", offset + 2, &mut name)?;
-        Ok(name)
+        Ok((descriptor, offset + 2, usize::from(length)))
     }
 
     fn read_metadata_exact(

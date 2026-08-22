@@ -31,7 +31,8 @@ impl FatFileValue {
     /// Creates a new `FatFileValue` for reading file data.
     ///
     /// If `first_cluster` is `None`, the file is empty and has no data to read.
-    pub(crate) fn new(fat: &Fat, first_cluster: Option<u32>, data_size: u64) -> Self {
+    #[must_use]
+    pub fn new(fat: &Fat, first_cluster: Option<u32>, data_size: u64) -> Self {
         let geometry = fat.file_geometry();
         Self {
             geometry,
