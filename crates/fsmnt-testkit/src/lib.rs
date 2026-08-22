@@ -9,6 +9,113 @@ use std::path::{Path, PathBuf};
 /// Synthetic QNX6 Power-Safe images shared by parser and driver tests.
 pub mod qnx6;
 
+/// Cumulative operations performed through a [`CountingReader`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IoStats {
+    read_calls: u64,
+    bytes_read: u64,
+    seek_calls: u64,
+}
+
+impl IoStats {
+    /// Number of calls made to the underlying reader.
+    #[must_use]
+    pub const fn read_calls(self) -> u64 {
+        self.read_calls
+    }
+
+    /// Total bytes returned by successful reads.
+    #[must_use]
+    pub const fn bytes_read(self) -> u64 {
+        self.bytes_read
+    }
+
+    /// Number of calls made to the underlying seek implementation.
+    #[must_use]
+    pub const fn seek_calls(self) -> u64 {
+        self.seek_calls
+    }
+}
+
+/// Reader wrapper that records I/O operations and transferred bytes.
+///
+/// Parser tests and benchmarks use this to make changes in device traffic
+/// deterministic even when wall-clock timing is noisy.
+pub struct CountingReader<R> {
+    inner: R,
+    stats: IoStats,
+}
+
+impl<R> CountingReader<R> {
+    /// Wrap `inner` with zeroed operation counters.
+    pub const fn new(inner: R) -> Self {
+        Self {
+            inner,
+            stats: IoStats {
+                read_calls: 0,
+                bytes_read: 0,
+                seek_calls: 0,
+            },
+        }
+    }
+
+    /// Current cumulative operation counts.
+    #[must_use]
+    pub const fn stats(&self) -> IoStats {
+        self.stats
+    }
+
+    /// Reset every operation count to zero.
+    pub fn reset_stats(&mut self) {
+        self.stats = IoStats::default();
+    }
+
+    /// Borrow the wrapped reader.
+    #[must_use]
+    pub const fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    /// Mutably borrow the wrapped reader.
+    pub const fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Consume the wrapper and return the underlying reader.
+    #[must_use]
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R> fsmnt_parser_core::io::Read for CountingReader<R>
+where
+    R: fsmnt_parser_core::io::Read,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> fsmnt_parser_core::io::Result<usize> {
+        self.stats.read_calls = self.stats.read_calls.saturating_add(1);
+        let read = self.inner.read(buffer)?;
+        self.stats.bytes_read = self
+            .stats
+            .bytes_read
+            .saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        Ok(read)
+    }
+}
+
+impl<R> fsmnt_parser_core::io::Seek for CountingReader<R>
+where
+    R: fsmnt_parser_core::io::Seek,
+{
+    fn seek(
+        &mut self,
+        position: fsmnt_parser_core::io::SeekFrom,
+    ) -> fsmnt_parser_core::io::Result<u64> {
+        self.stats.seek_calls = self.stats.seek_calls.saturating_add(1);
+        self.inner.seek(position)
+    }
+}
+
 /// Reader wrapper that mutates each successful read before returning it.
 ///
 /// The callback receives the physical stream offset and only the initialized

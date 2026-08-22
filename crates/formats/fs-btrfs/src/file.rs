@@ -175,6 +175,9 @@ impl<R: Read + Seek> Btrfs<R> {
                     window.length,
                 )
             }
+            ExtentKind::Regular if extent.compression == Compression::None => {
+                self.read_uncompressed_extent_range(extent, window, output, verify_checksums)
+            }
             ExtentKind::Regular => {
                 let (data, source_offset) =
                     self.read_regular_extent_range(extent, window, verify_checksums)?;
@@ -188,6 +191,40 @@ impl<R: Read + Seek> Btrfs<R> {
             }
             ExtentKind::Preallocated => Ok(()),
         }
+    }
+
+    fn read_uncompressed_extent_range(
+        &mut self,
+        extent: &FileExtent,
+        window: ExtentWindow,
+        output: &mut [u8],
+        verify_checksums: bool,
+    ) -> Result<()> {
+        let (logical, length, source_offset) = uncompressed_read_window(
+            extent,
+            window.extent_offset,
+            window.length,
+            self.superblock().sector_size(),
+        )?;
+        if source_offset == 0 && length == window.length {
+            let destination_end = window
+                .destination_start
+                .checked_add(window.length)
+                .ok_or(BtrfsError::IntegerOverflow)?;
+            let destination = output
+                .get_mut(window.destination_start..destination_end)
+                .ok_or(BtrfsError::InvalidFileExtentRange)?;
+            return self.read_extent_bytes_into(logical, destination, verify_checksums);
+        }
+
+        let data = self.read_extent_bytes(logical, length, verify_checksums)?;
+        copy_window(
+            output,
+            window.destination_start,
+            &data,
+            source_offset,
+            window.length,
+        )
     }
 
     fn read_regular_extent_range(
@@ -247,27 +284,35 @@ impl<R: Read + Seek> Btrfs<R> {
         length: usize,
         verify_checksums: bool,
     ) -> Result<Vec<u8>> {
+        let reported_size =
+            u64::try_from(length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
+        let mut data = zeroed_buffer(length, reported_size)?;
+        self.read_extent_bytes_into(logical, &mut data, verify_checksums)?;
+        Ok(data)
+    }
+
+    fn read_extent_bytes_into(
+        &mut self,
+        logical: u64,
+        data: &mut [u8],
+        verify_checksums: bool,
+    ) -> Result<()> {
         let replica_count = if verify_checksums {
             self.data_replica_count(logical)?
         } else {
             1
         };
-        let reported_size =
-            u64::try_from(length).map_err(|_| BtrfsError::FileTooLarge { size: u64::MAX })?;
-        let mut data = zeroed_buffer(length, reported_size)?;
         let mut last_error = None;
         for replica in 0..replica_count {
-            if let Err(error) =
-                self.read_data_logical_exact_from_replica(logical, &mut data, replica)
-            {
+            if let Err(error) = self.read_data_logical_exact_from_replica(logical, data, replica) {
                 last_error = Some(error);
                 continue;
             }
             if !verify_checksums {
-                return Ok(data);
+                return Ok(());
             }
-            match self.verify_data_checksums(logical, &data) {
-                Ok(()) => return Ok(data),
+            match self.verify_data_checksums(logical, data) {
+                Ok(()) => return Ok(()),
                 Err(error @ BtrfsError::InvalidChecksum { .. }) => {
                     last_error = Some(error);
                 }

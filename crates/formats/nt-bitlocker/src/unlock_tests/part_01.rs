@@ -106,7 +106,7 @@ fn make_test_volume(
         decryptor: Decryptor::Xts(AesXtsDecryptor::new(key.to_vec()).unwrap()),
         sector_size: 512,
         position: 0,
-        buf: Zeroizing::new(vec![0u8; 512 * MAX_CHUNK_SECTORS]),
+        buf: Zeroizing::new(Vec::new()),
         buf_start_sector: None,
         buf_valid_sectors: 0,
         chunk_sectors: MIN_CHUNK_SECTORS,
@@ -131,6 +131,19 @@ fn read_partial_sector() {
     let n = vol.read(&mut buf).unwrap();
     assert_eq!(n, 16);
     assert_eq!(buf, [0xCD; 16]);
+}
+
+#[test]
+fn decryption_buffer_grows_only_to_the_initial_read_ahead() {
+    let sector = &[0x5au8; 512];
+    let mut volume = make_test_volume(&[sector; MIN_CHUNK_SECTORS + 1]);
+    assert!(volume.buf.is_empty());
+
+    let mut output = [0_u8; 1];
+    volume.read_exact(&mut output).unwrap();
+    assert_eq!(output, [0x5a]);
+    assert_eq!(volume.buf.len(), MIN_CHUNK_SECTORS * 512);
+    assert!(volume.buf.len() < MAX_CHUNK_SECTORS * 512);
 }
 
 #[test]
@@ -248,7 +261,7 @@ fn make_partial_volume(
         decryptor: Decryptor::Xts(AesXtsDecryptor::new(key.to_vec()).unwrap()),
         sector_size: 512,
         position: 0,
-        buf: Zeroizing::new(vec![0u8; 512 * MAX_CHUNK_SECTORS]),
+        buf: Zeroizing::new(Vec::new()),
         buf_start_sector: None,
         buf_valid_sectors: 0,
         chunk_sectors: MIN_CHUNK_SECTORS,

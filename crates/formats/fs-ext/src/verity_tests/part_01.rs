@@ -14,7 +14,7 @@ fn hash_padded(
     if start < buf.len() {
         block[..end - start].copy_from_slice(&buf[start..end]);
     }
-    hash_block(alg, salt, &block)
+    hash_block(alg, salt, &block).as_slice().to_vec()
 }
 
 /// Build a complete in-memory Merkle tree over `data` and return
@@ -54,7 +54,7 @@ fn build_tree(data: &[u8], block_size: usize, salt: &[u8]) -> (VerityDescriptor,
     let top = levels.last().expect("top level");
     let mut top_block = alloc::vec![0u8; block_size];
     top_block[..top.len()].copy_from_slice(top);
-    let root = hash_block(alg, salt, &top_block);
+    let root = hash_block(alg, salt, &top_block).as_slice().to_vec();
 
     // Flatten levels top-first, each level padded to whole blocks.
     let mut tree = Vec::new();
@@ -81,17 +81,19 @@ fn build_tree(data: &[u8], block_size: usize, salt: &[u8]) -> (VerityDescriptor,
 struct MemReader {
     tree_offset: u64,
     tree: Vec<u8>,
+    reads: usize,
 }
 
 impl TreeBlockReader for MemReader {
-    fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+    fn read_exact_at(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
+        self.reads += 1;
         let rel = usize::try_from(offset - self.tree_offset ).expect("the test fixture value fits in usize");
-        let mut out = alloc::vec![0u8; len];
-        let end = (rel + len).min(self.tree.len());
+        out.fill(0);
+        let end = (rel + out.len()).min(self.tree.len());
         if rel < self.tree.len() {
             out[..end - rel].copy_from_slice(&self.tree[rel..end]);
         }
-        Ok(out)
+        Ok(())
     }
 }
 
@@ -114,6 +116,7 @@ fn single_block_tree_verifies() {
     let mut reader = MemReader {
         tree_offset: verifier.tree_offset,
         tree,
+        reads: 0,
     };
     let block = padded_block(&data, 0, block_size);
     verifier.verify_data_block(&mut reader, 0, &block).unwrap();
@@ -137,6 +140,7 @@ fn multi_level_tree_verifies_all_blocks() {
     let mut reader = MemReader {
         tree_offset: verifier.tree_offset,
         tree,
+        reads: 0,
     };
     for b in 0..40 {
         let block = padded_block(&data, b, block_size);
@@ -144,6 +148,9 @@ fn multi_level_tree_verifies_all_blocks() {
             .verify_data_block(&mut reader, (b * block_size) as u64, &block)
             .unwrap();
     }
+    assert_eq!(reader.reads, 3, "two leaf blocks plus one root block");
+    assert_eq!(verifier.cache.len(), 2, "one bounded slot per tree level");
+    assert!(verifier.cache.iter().all(Option::is_some));
 }
 
 #[test]
@@ -155,6 +162,7 @@ fn tampered_data_block_is_rejected() {
     let mut reader = MemReader {
         tree_offset: verifier.tree_offset,
         tree,
+        reads: 0,
     };
     let mut block = padded_block(&data, 1, block_size);
     block[0] ^= 0xFF;
@@ -183,6 +191,7 @@ fn tampered_tree_block_is_rejected() {
     let mut reader = MemReader {
         tree_offset: verifier.tree_offset,
         tree,
+        reads: 0,
     };
     // Block 39's leaf hash lives in the final leaf tree block.
     let block = padded_block(&data, 39, block_size);

@@ -53,8 +53,9 @@ pub struct UnlockedVolume<R> {
     pub(crate) sector_size: u16,
     /// Logical cursor position in decrypted view (0 = start of volume data).
     position: u64,
-    /// Pre-allocated multi-sector read buffer.  Holds up to
-    /// [`MAX_CHUNK_SECTORS`] sectors of decrypted data.
+    /// Lazily grown multi-sector read buffer. Holds up to
+    /// [`MAX_CHUNK_SECTORS`] sectors of decrypted data and retains capacity
+    /// after sequential read-ahead expands it.
     buf: Zeroizing<Vec<u8>>,
     /// First logical sector number currently in `buf`, or `None` if empty.
     buf_start_sector: Option<u64>,
@@ -123,6 +124,15 @@ impl<R: Read + Seek> UnlockedVolume<R> {
             self.buf_valid_sectors = 0;
             return Ok(());
         }
+        let required_bytes = count.checked_mul(ss_usize).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "decryption buffer size overflow",
+            )
+        })?;
+        if self.buf.len() < required_bytes {
+            self.buf.resize(required_bytes, 0);
+        }
 
         // Check if any sectors in this chunk are in the backup region.
         // If so, we must read them individually (they're at a different
@@ -131,11 +141,15 @@ impl<R: Read + Seek> UnlockedVolume<R> {
         let count_u64 = u64::try_from(count).unwrap_or(u64::MAX);
         let all_contiguous = !first_is_backup || start_sector + count_u64 <= nb_backup;
 
-        if all_contiguous && !first_is_backup {
+        if all_contiguous {
             // Fast path: one seek + one read for the whole chunk.
-            let disk_offset = start_sector * ss;
+            let disk_offset = if first_is_backup {
+                backup_addr + start_sector * ss
+            } else {
+                start_sector * ss
+            };
             self.reader.seek(SeekFrom::Start(disk_offset))?;
-            self.reader.read_exact(&mut self.buf[..count * ss_usize])?;
+            self.reader.read_exact(&mut self.buf[..required_bytes])?;
         } else {
             // Slow path: per-sector reads (only for backup region boundary).
             for i in 0..count {
@@ -319,7 +333,6 @@ impl<R: Read + Seek> BitLockerVolume<R> {
                 match build_decryptor(enc_method, &fvek) {
                     Ok(decryptor) => {
                         let sector_size = self.metadata().bytes_per_sector();
-                        let buf_size = usize::from(sector_size) * MAX_CHUNK_SECTORS;
                         let (reader, metadata) = self.into_parts();
                         Ok(UnlockedVolume {
                             reader,
@@ -327,7 +340,7 @@ impl<R: Read + Seek> BitLockerVolume<R> {
                             decryptor,
                             sector_size,
                             position: 0,
-                            buf: Zeroizing::new(vec![0u8; buf_size]),
+                            buf: Zeroizing::new(Vec::new()),
                             buf_start_sector: None,
                             buf_valid_sectors: 0,
                             chunk_sectors: MIN_CHUNK_SECTORS,

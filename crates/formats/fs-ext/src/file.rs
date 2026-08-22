@@ -367,11 +367,10 @@ struct VerityTreeReader<'a, R: Read + Seek> {
 
 #[cfg(feature = "verity")]
 impl<R: Read + Seek> crate::verity::TreeBlockReader for VerityTreeReader<'_, R> {
-    fn read_at(&mut self, offset: u64, len: usize) -> Result<alloc::vec::Vec<u8>> {
+    fn read_exact_at(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
         let block_size = u64::from(self.ext.block_size);
-        let mut out = alloc::vec![0u8; len];
         let mut done = 0usize;
-        while done < len {
+        while done < out.len() {
             let cur = offset
                 .checked_add(u64_from_usize(done)?)
                 .ok_or_else(|| ExtError::from(IoError::invalid_input()))?;
@@ -379,7 +378,7 @@ impl<R: Read + Seek> crate::verity::TreeBlockReader for VerityTreeReader<'_, R> 
                 block: cur / block_size,
             })?;
             let in_block = usize_from_u64(cur % block_size)?;
-            let chunk = (usize_from_u64(block_size)? - in_block).min(len - done);
+            let chunk = (usize_from_u64(block_size)? - in_block).min(out.len() - done);
             let physical = if self.i_flags.contains(InodeFlags::EXTENTS_FL) {
                 resolve_extent(
                     self.ext,
@@ -412,7 +411,7 @@ impl<R: Read + Seek> crate::verity::TreeBlockReader for VerityTreeReader<'_, R> 
             }
             done += chunk;
         }
-        Ok(out)
+        Ok(())
     }
 }
 

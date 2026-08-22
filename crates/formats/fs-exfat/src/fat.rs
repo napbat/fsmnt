@@ -1,6 +1,7 @@
 use crate::error::{ExFatError, Result};
 use crate::exfat::ExFat;
 use crate::io::{Read, Seek, SeekFrom};
+use fsmnt_parser_core::io::BlockCache;
 
 /// exFAT FAT entry special values (full 32-bit, unlike FAT32's 28-bit).
 const FAT_ENTRY_FREE: u32 = 0x0000_0000;
@@ -38,6 +39,29 @@ impl ExFat {
         fs.read_exact(&mut buf)?;
         let value = u32::from_le_bytes(buf);
 
+        self.classify_next_cluster(cluster, value)
+    }
+
+    pub(crate) fn next_cluster_cached<T>(
+        &self,
+        fs: &mut T,
+        cluster: u32,
+        cache: &mut BlockCache,
+    ) -> Result<Option<u32>>
+    where
+        T: Read + Seek,
+    {
+        if cluster < 2 || cluster > self.cluster_count().saturating_add(1) {
+            return Err(ExFatError::InvalidCluster { cluster });
+        }
+
+        let entry_offset = self.fat_offset() + u64::from(cluster) * 4;
+        let mut bytes = [0_u8; 4];
+        cache.read_exact_at(fs, entry_offset, &mut bytes)?;
+        self.classify_next_cluster(cluster, u32::from_le_bytes(bytes))
+    }
+
+    fn classify_next_cluster(&self, cluster: u32, value: u32) -> Result<Option<u32>> {
         match value {
             FAT_ENTRY_EOC_MIN..=u32::MAX => Ok(None),
             FAT_ENTRY_BAD => Err(ExFatError::BadCluster { cluster }),
@@ -70,16 +94,26 @@ pub struct ExFatClusterIterator<'e> {
     exfat: &'e ExFat,
     current_cluster: Option<u32>,
     clusters_traversed: u32,
+    fat_cache: BlockCache,
 }
 
 impl<'e> ExFatClusterIterator<'e> {
     /// Creates a new iterator starting at `start_cluster`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the platform's `usize` cannot represent the validated
+    /// exFAT sector size.
     #[must_use]
     pub fn new(exfat: &'e ExFat, start_cluster: u32) -> Self {
         Self {
             exfat,
             current_cluster: Some(start_cluster),
             clusters_traversed: 0,
+            fat_cache: BlockCache::new(
+                usize::try_from(exfat.bytes_per_sector())
+                    .expect("a supported exFAT sector size fits usize"),
+            ),
         }
     }
 
@@ -103,7 +137,10 @@ impl<'e> ExFatClusterIterator<'e> {
             }));
         }
 
-        match self.exfat.next_cluster(fs, cluster) {
+        match self
+            .exfat
+            .next_cluster_cached(fs, cluster, &mut self.fat_cache)
+        {
             Ok(None) => self.current_cluster = None,
             Ok(Some(next)) => self.current_cluster = Some(next),
             Err(e) => {
@@ -121,6 +158,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::*;
     use alloc::vec;
+    use fsmnt_testkit::{CountingReader, Cursor};
 
     // ---------------------------------------------------------------
     // next_cluster tests
@@ -138,6 +176,27 @@ mod tests {
         assert_eq!(exfat.next_cluster(&mut cursor, 2).unwrap(), Some(3));
         assert_eq!(exfat.next_cluster(&mut cursor, 3).unwrap(), Some(4));
         assert_eq!(exfat.next_cluster(&mut cursor, 4).unwrap(), None);
+    }
+
+    #[test]
+    fn cluster_iterator_reuses_one_fat_sector() {
+        let mut image = make_image();
+        set_fat_entry(&mut image, 2, 3);
+        set_fat_entry(&mut image, 3, 4);
+        set_fat_entry(&mut image, 4, 0xffff_ffff);
+        let mut reader = CountingReader::new(Cursor::new(image));
+        let exfat = ExFat::new(&mut reader).expect("valid exFAT image");
+        reader.reset_stats();
+
+        let mut iter = exfat.cluster_iter(2);
+        assert_eq!(iter.next(&mut reader).transpose().unwrap(), Some(2));
+        assert_eq!(iter.next(&mut reader).transpose().unwrap(), Some(3));
+        assert_eq!(iter.next(&mut reader).transpose().unwrap(), Some(4));
+        assert!(iter.next(&mut reader).is_none());
+        let stats = reader.stats();
+        assert_eq!(stats.read_calls(), 1);
+        assert_eq!(stats.seek_calls(), 1);
+        assert_eq!(stats.bytes_read(), 512);
     }
 
     #[test]

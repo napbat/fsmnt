@@ -2,6 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use bitflags::bitflags;
+use fsmnt_parser_core::io::BlockCache;
 use zerocopy::{FromBytes, Immutable, KnownLayout, LittleEndian, U16, U32, Unaligned};
 
 use crate::error::{FatError, Result};
@@ -528,6 +529,8 @@ pub struct FatDirEntries<'n> {
     /// Absolute byte offset where the current buffer starts on disk.
     /// Used to compute positions for error reporting.
     base_offset: u64,
+    /// Most recently used FAT sector for adjacent chain entries.
+    fat_cache: BlockCache,
 }
 
 impl<'n> FatDirEntries<'n> {
@@ -547,6 +550,7 @@ impl<'n> FatDirEntries<'n> {
             lfn_collecting: false,
             clusters_traversed: 0,
             base_offset: 0, // overwritten by fill_buffer() before any entry is parsed
+            fat_cache: BlockCache::new(usize::from(fat.sector_size())),
         }
     }
 
@@ -565,6 +569,7 @@ impl<'n> FatDirEntries<'n> {
             lfn_collecting: false,
             clusters_traversed: 0,
             base_offset: 0, // overwritten by fill_buffer() before any entry is parsed
+            fat_cache: BlockCache::new(usize::from(fat.sector_size())),
         }
     }
 
@@ -780,7 +785,9 @@ impl<'n> FatDirEntries<'n> {
                 fs.read_exact(&mut self.buffer)?;
 
                 // Move to the next cluster and increment traversal counter
-                *current_cluster = self.fat.next_cluster(fs, cluster)?;
+                *current_cluster =
+                    self.fat
+                        .next_cluster_cached(fs, cluster, &mut self.fat_cache)?;
                 self.clusters_traversed += 1;
             }
         }

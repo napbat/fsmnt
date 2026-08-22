@@ -24,11 +24,16 @@ chrono = ["dep:chrono"]
 time = ["dep:time"]
 
 [dev-dependencies]
+divan = { workspace = true }
 fsmnt-testkit = { workspace = true }
 # Placeholder crate so `#[mutants::skip]` annotations compile under
 # cargo-mutants. See crates/fs-ext/docs/mutation-testing.md for how the
 # annotation is interpreted.
 mutants = { workspace = true }
+
+[[bench]]
+name = "extent"
+harness = false
 
 [lints]
 workspace = true

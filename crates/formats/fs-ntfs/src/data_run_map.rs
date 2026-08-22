@@ -88,16 +88,12 @@ impl DataRunMap {
     ///
     /// Returns `None` if `offset` is outside all segments.
     pub(crate) fn resolve_position(&self, offset: u64) -> Option<(NtfsPosition, u64)> {
-        for segment in &self.segments {
-            let seg_end = segment.virtual_offset + segment.size;
-            if offset >= segment.virtual_offset && offset < seg_end {
-                let offset_in_seg = offset - segment.virtual_offset;
-                let remaining = segment.size - offset_in_seg;
-                let pos = segment.position + offset_in_seg;
-                return Some((pos, remaining));
-            }
-        }
-        None
+        let segment = self.segment_containing(offset)?;
+        let offset_in_segment = offset - segment.virtual_offset;
+        Some((
+            segment.position + offset_in_segment,
+            segment.size - offset_in_segment,
+        ))
     }
 
     /// Resolves a virtual byte offset to a segment index and the byte offset
@@ -106,23 +102,18 @@ impl DataRunMap {
     /// Used by `NtfsMftEntries::seek_to_record` to position the sequential
     /// iterator at an arbitrary record.
     pub(crate) fn resolve_index(&self, offset: u64) -> Option<(usize, u64)> {
-        for (i, segment) in self.segments.iter().enumerate() {
-            if offset < segment.virtual_offset + segment.size {
-                return Some((i, offset - segment.virtual_offset));
-            }
-        }
-        None
+        let index = self.segment_index_containing(offset)?;
+        Some((index, offset - self.segments[index].virtual_offset))
     }
 
     /// Finds the next non-sparse virtual offset at or after `offset`.
     ///
     /// Used by `NtfsUsnRecords` to skip sparse holes in the `$J` stream.
     pub(crate) fn next_non_sparse_offset(&self, offset: u64) -> Option<u64> {
-        for segment in &self.segments {
-            let seg_end = segment.virtual_offset + segment.size;
-            if seg_end <= offset {
-                continue;
-            }
+        let first = self.segments.partition_point(|segment| {
+            segment.virtual_offset.saturating_add(segment.size) <= offset
+        });
+        for segment in &self.segments[first..] {
             // This segment overlaps or follows offset.
             if segment.position.value().is_none() {
                 // Sparse — skip.
@@ -134,6 +125,20 @@ impl DataRunMap {
             return Some(offset.max(segment.virtual_offset));
         }
         None
+    }
+
+    fn segment_index_containing(&self, offset: u64) -> Option<usize> {
+        let index = self
+            .segments
+            .partition_point(|segment| segment.virtual_offset <= offset)
+            .checked_sub(1)?;
+        let segment = &self.segments[index];
+        (offset < segment.virtual_offset.saturating_add(segment.size)).then_some(index)
+    }
+
+    fn segment_containing(&self, offset: u64) -> Option<&DataRunSegment> {
+        self.segment_index_containing(offset)
+            .and_then(|index| self.segments.get(index))
     }
 
     /// Reads `buf.len()` bytes starting at virtual byte `offset`.
@@ -159,16 +164,22 @@ impl DataRunMap {
             return Err(IoError::unexpected_eof().into());
         }
 
-        let first_position = self
-            .resolve_position(offset)
-            .map_or(NtfsPosition::none(), |(pos, _)| pos);
+        let mut segment_index = self
+            .segment_index_containing(offset)
+            .ok_or(NtfsError::from(IoError::unexpected_eof()))?;
+        let first_segment = &self.segments[segment_index];
+        let first_position = first_segment.position + (offset - first_segment.virtual_offset);
 
         let mut bytes_filled = 0u64;
         while bytes_filled < total {
             let current_offset = offset + bytes_filled;
-            let (pos, remaining) = self
-                .resolve_position(current_offset)
+            let segment = self
+                .segments
+                .get(segment_index)
                 .ok_or(NtfsError::from(IoError::unexpected_eof()))?;
+            let offset_in_segment = current_offset - segment.virtual_offset;
+            let pos = segment.position + offset_in_segment;
+            let remaining = segment.size - offset_in_segment;
 
             let to_read = usize::try_from((total - bytes_filled).min(remaining))
                 .expect("the read length is bounded by the destination slice");
@@ -184,6 +195,7 @@ impl DataRunMap {
             }
 
             bytes_filled += u64::try_from(to_read).expect("a slice length fits u64");
+            segment_index += 1;
         }
 
         Ok(first_position)
@@ -195,13 +207,10 @@ impl DataRunMap {
     /// Used by `NtfsUsnRecords` for corruption recovery (skip to next segment
     /// boundary on encountering zero or invalid record lengths).
     pub(crate) fn segment_end(&self, offset: u64) -> u64 {
-        for segment in &self.segments {
-            let seg_end = segment.virtual_offset + segment.size;
-            if offset >= segment.virtual_offset && offset < seg_end {
-                return seg_end;
-            }
-        }
-        self.total_size()
+        self.segment_containing(offset).map_or_else(
+            || self.total_size(),
+            |segment| segment.virtual_offset.saturating_add(segment.size),
+        )
     }
 
     /// Builds a `DataRunMap` directly from `(position, size)` pairs.

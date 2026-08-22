@@ -21,7 +21,6 @@
 
 #![cfg(feature = "verity")]
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use sha2::{Digest, Sha256, Sha512};
@@ -257,7 +256,19 @@ impl VerityDescriptor {
 /// is prepended, padded up to `roundup(salt_size, hash_alg->block_size)`
 /// (the internal block size — 64 for SHA-256, 128 for SHA-512), then the
 /// block bytes are appended. With an empty salt this is just `H(block)`.
-fn hash_block(algorithm: VerityHashAlgorithm, salt: &[u8], block: &[u8]) -> Vec<u8> {
+#[derive(Clone, Copy)]
+struct HashValue {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl HashValue {
+    const fn as_slice(&self) -> &[u8] {
+        self.bytes.split_at(self.len).0
+    }
+}
+
+fn hash_block(algorithm: VerityHashAlgorithm, salt: &[u8], block: &[u8]) -> HashValue {
     // fs/verity/hash_algs.c: hashstate is the salt padded to the
     // algorithm's internal block size; padding bytes are zero.
     let salt_block = match algorithm {
@@ -269,22 +280,27 @@ fn hash_block(algorithm: VerityHashAlgorithm, salt: &[u8], block: &[u8]) -> Vec<
     } else {
         salt.len().div_ceil(salt_block) * salt_block
     };
-    let mut padded_salt = Vec::with_capacity(padded);
-    padded_salt.extend_from_slice(salt);
-    padded_salt.resize(padded, 0);
+    let mut padded_salt = [0_u8; 128];
+    padded_salt[..salt.len()].copy_from_slice(salt);
 
     match algorithm {
         VerityHashAlgorithm::Sha256 => {
             let mut hasher = Sha256::new();
-            hasher.update(&padded_salt);
+            hasher.update(&padded_salt[..padded]);
             hasher.update(block);
-            hasher.finalize().to_vec()
+            let digest = hasher.finalize();
+            let mut bytes = [0_u8; 64];
+            bytes[..32].copy_from_slice(&digest);
+            HashValue { bytes, len: 32 }
         }
         VerityHashAlgorithm::Sha512 => {
             let mut hasher = Sha512::new();
-            hasher.update(&padded_salt);
+            hasher.update(&padded_salt[..padded]);
             hasher.update(block);
-            hasher.finalize().to_vec()
+            let digest = hasher.finalize();
+            let mut bytes = [0_u8; 64];
+            bytes.copy_from_slice(&digest);
+            HashValue { bytes, len: 64 }
         }
     }
 }
@@ -388,8 +404,16 @@ pub(crate) struct VerityVerifier {
     params: MerkleTreeParams,
     /// First byte of the Merkle tree within the inode's data stream.
     tree_offset: u64,
-    /// Cache keyed by `(level, block_index)` of verified tree blocks.
-    cache: BTreeMap<(usize, u64), Vec<u8>>,
+    /// Last tree block used at each level.
+    ///
+    /// Sequential reads reuse each block for all of its child hashes while
+    /// memory remains bounded by `tree_depth * block_size` for large files.
+    cache: Vec<Option<CachedTreeBlock>>,
+}
+
+struct CachedTreeBlock {
+    index: Option<u64>,
+    bytes: Vec<u8>,
 }
 
 /// Reads raw tree blocks for [`VerityVerifier::verify_data_block`].
@@ -397,8 +421,8 @@ pub(crate) struct VerityVerifier {
 /// Implemented over an [`ExtFile`](crate::file::ExtFile) so the
 /// verifier stays decoupled from block resolution.
 pub(crate) trait TreeBlockReader {
-    /// Read `len` bytes at byte `offset` within the inode data stream.
-    fn read_at(&mut self, offset: u64, len: usize) -> Result<Vec<u8>>;
+    /// Fill `buffer` from byte `offset` within the inode data stream.
+    fn read_exact_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()>;
 }
 
 impl VerityVerifier {
@@ -419,12 +443,14 @@ impl VerityVerifier {
         // fs/ext4/verity.c ext4_verity_metadata_pos: tree starts at the
         // 64 KiB-aligned offset past the protected data.
         let tree_offset = i_size.div_ceil(VERITY_METADATA_ALIGN) * VERITY_METADATA_ALIGN;
+        let mut cache = Vec::with_capacity(params.num_levels());
+        cache.resize_with(params.num_levels(), || None);
         Ok(Self {
             inode,
             descriptor,
             params,
             tree_offset,
-            cache: BTreeMap::new(),
+            cache,
         })
     }
 
@@ -443,11 +469,14 @@ impl VerityVerifier {
     ) -> Result<()> {
         let block_index = file_offset / self.params.block_size;
         let alg = self.descriptor.algorithm;
-        let salt = self.descriptor.salt.clone();
+        let salt_len = self.descriptor.salt.len();
+        let mut salt = [0_u8; MAX_SALT_SIZE];
+        salt[..salt_len].copy_from_slice(&self.descriptor.salt);
+        let salt = &salt[..salt_len];
 
         // fs/verity/verify.c verify_data_block: hash the data block,
         // then walk up checking each level's stored hash.
-        let mut want = hash_block(alg, &salt, block);
+        let mut want = hash_block(alg, salt, block);
         let mut index = block_index;
 
         for level in 0..self.params.num_levels() {
@@ -458,9 +487,10 @@ impl VerityVerifier {
                     reason: "Merkle hash slot exceeds addressable memory",
                 }
             })?;
+            let digest_len = self.params.digest_len;
             let tree_block = self.tree_block(reader, level, tree_block_index)?;
-            let off = slot * self.params.digest_len;
-            let stored = &tree_block[off..off + self.params.digest_len];
+            let off = slot * digest_len;
+            let stored = &tree_block[off..off + digest_len];
             if stored != want.as_slice() {
                 return Err(ExtError::VerityHashMismatch {
                     inode: self.inode,
@@ -468,7 +498,7 @@ impl VerityVerifier {
                 });
             }
             // The parent of this tree block is verified one level up.
-            want = hash_block(alg, &salt, &tree_block);
+            want = hash_block(alg, salt, tree_block);
             index = tree_block_index;
         }
 
@@ -492,10 +522,7 @@ impl VerityVerifier {
         reader: &mut R,
         level: usize,
         index: u64,
-    ) -> Result<Vec<u8>> {
-        if let Some(cached) = self.cache.get(&(level, index)) {
-            return Ok(cached.clone());
-        }
+    ) -> Result<&[u8]> {
         let level_block =
             self.params
                 .level_start
@@ -505,17 +532,31 @@ impl VerityVerifier {
                     reason: "tree level index out of range",
                 })?;
         let byte_offset = self.tree_offset + (level_block + index) * self.params.block_size;
-        let block = reader.read_at(
-            byte_offset,
-            usize::try_from(self.params.block_size).map_err(|_| {
-                ExtError::InvalidVerityDescriptor {
-                    inode: self.inode,
-                    reason: "verity block size exceeds addressable memory",
-                }
-            })?,
-        )?;
-        self.cache.insert((level, index), block.clone());
-        Ok(block)
+        let block_size = usize::try_from(self.params.block_size).map_err(|_| {
+            ExtError::InvalidVerityDescriptor {
+                inode: self.inode,
+                reason: "verity block size exceeds addressable memory",
+            }
+        })?;
+        let cached = self
+            .cache
+            .get_mut(level)
+            .ok_or(ExtError::InvalidVerityDescriptor {
+                inode: self.inode,
+                reason: "tree level cache index out of range",
+            })?
+            .get_or_insert_with(|| CachedTreeBlock {
+                index: None,
+                bytes: alloc::vec![0_u8; block_size],
+            });
+        if cached.index != Some(index) {
+            // Clear the key before I/O so a partial read can never be treated
+            // as a valid cache hit after the caller retries.
+            cached.index = None;
+            reader.read_exact_at(byte_offset, &mut cached.bytes)?;
+            cached.index = Some(index);
+        }
+        Ok(&cached.bytes)
     }
 }
 

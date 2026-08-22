@@ -1,4 +1,4 @@
-use fsmnt_parser_core::io::FsReadSeek;
+use fsmnt_parser_core::io::{BlockCache, FsReadSeek};
 
 use crate::error::{FatError, Result};
 use crate::fat::Fat;
@@ -23,6 +23,8 @@ pub struct FatFileValue<'n> {
     data_size: u64,
     /// Number of clusters traversed since last rewind (for loop detection)
     clusters_traversed: u32,
+    /// Most recently used FAT sector for adjacent chain entries.
+    fat_cache: BlockCache,
 }
 
 impl<'n> FatFileValue<'n> {
@@ -38,6 +40,7 @@ impl<'n> FatFileValue<'n> {
             stream_position: 0,
             data_size,
             clusters_traversed: 0,
+            fat_cache: BlockCache::new(usize::from(fat.sector_size())),
         }
     }
 
@@ -87,7 +90,10 @@ impl<'n> FatFileValue<'n> {
                 return Err(FatError::ClusterChainLoop { max_clusters });
             }
 
-            if let Some(next) = self.fat.next_cluster(fs, current)? {
+            if let Some(next) = self
+                .fat
+                .next_cluster_cached(fs, current, &mut self.fat_cache)?
+            {
                 self.current_cluster = Some(next);
                 self.position_in_cluster = 0;
                 self.clusters_traversed += 1;
@@ -276,7 +282,7 @@ mod tests {
     use crate::file::FatFile;
     use alloc::vec;
     use alloc::vec::Vec;
-    use fsmnt_testkit::Cursor;
+    use fsmnt_testkit::{CountingReader, Cursor};
 
     /// Build a FAT16 image with a single file spanning 3 clusters
     /// (clusters 2 → 3 → 4) so multi-cluster traversal is exercised.
@@ -378,6 +384,25 @@ mod tests {
             got.extend_from_slice(&buf[..n]);
         }
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn adjacent_chain_entries_share_one_fat_sector_read() {
+        let (image, expected) = build_fat16_image_with_three_cluster_file();
+        let mut reader = CountingReader::new(Cursor::new(image));
+        let fat = Fat::new(&mut reader).expect("valid image");
+        let file = FatFile::new(&fat, Some(2), false, 1200);
+        let mut data = file.data().expect("data");
+        reader.reset_stats();
+
+        let mut output = vec![0_u8; expected.len()];
+        data.read_exact(&mut reader, &mut output)
+            .expect("full file");
+        assert_eq!(output, expected);
+        let stats = reader.stats();
+        assert_eq!(stats.read_calls(), 4, "three data reads and one FAT sector");
+        assert_eq!(stats.seek_calls(), 4);
+        assert_eq!(stats.bytes_read(), 1200 + 512);
     }
 
     #[test]

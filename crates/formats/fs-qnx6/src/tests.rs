@@ -1,10 +1,10 @@
 //! End-to-end parser coverage over the shared synthetic QNX6 image.
 
-use fsmnt_testkit::Cursor;
 use fsmnt_testkit::qnx6::{
     self, BLOCK_SIZE, FixtureByteOrder, HELLO_DATA, INDIRECT_FILE_SIZE, INNER_DATA, LONG_DATA,
     LONG_NAME, PRIMARY_SUPERBLOCK_OFFSET, SECONDARY_SUPERBLOCK_OFFSET, SPARSE_FILE_SIZE, VOLUME_ID,
 };
+use fsmnt_testkit::{CountingReader, Cursor};
 
 use crate::{ByteOrder, Qnx6, Qnx6Error, SuperblockCopy};
 
@@ -96,6 +96,42 @@ fn walks_an_indirect_pointer_level() {
             "data block {block} came from the wrong pointer"
         );
     }
+}
+
+#[test]
+fn sequential_reads_cache_the_indirect_pointer_block() {
+    let reader = CountingReader::new(Cursor::new(qnx6::image(FixtureByteOrder::Little, 1, 2)));
+    let mut volume = Qnx6::new(reader).expect("open synthetic QNX6");
+    let inode = volume
+        .resolve_path(b"indirect.bin")
+        .expect("indirect inode");
+    volume.reader_mut().reset_stats();
+
+    let data = volume.read_file(&inode).expect("indirect data");
+    assert_eq!(data.len(), INDIRECT_FILE_SIZE);
+    let stats = volume.reader().stats();
+    assert_eq!(
+        stats.read_calls(),
+        18,
+        "17 data blocks plus one pointer block"
+    );
+    assert_eq!(
+        stats.bytes_read(),
+        u64::try_from(INDIRECT_FILE_SIZE + BLOCK_SIZE).expect("fixture byte count fits u64")
+    );
+
+    volume.reader_mut().reset_stats();
+    let mut range = [0_u8; 8];
+    volume
+        .read_file_range(&inode, BLOCK_SIZE as u64 - 3, &mut range)
+        .expect("cached cross-block read");
+    let cached_stats = volume.reader().stats();
+    assert_eq!(
+        cached_stats.read_calls(),
+        2,
+        "only the two data blocks remain"
+    );
+    assert_eq!(cached_stats.bytes_read(), 8);
 }
 
 #[test]

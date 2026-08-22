@@ -17,5 +17,8 @@ mod std_compat;
 mod attached;
 pub use attached::Attached;
 
+mod block_cache;
+pub use block_cache::BlockCache;
+
 mod traits;
 pub use traits::FsReadSeek;

@@ -141,7 +141,8 @@ impl File {
     /// Used for a sealed volume, whose file extents come from the
     /// file-extent tree (`apfs_fext_tree_oid`) rather than catalog
     /// `FILE_EXTENT` records.
-    pub(crate) fn from_extents(size: u64, mut extents: Vec<FileExtent>) -> Self {
+    #[must_use]
+    pub fn from_extents(size: u64, mut extents: Vec<FileExtent>) -> Self {
         extents.sort_by_key(|extent| extent.logical_addr);
         Self { size, extents }
     }
@@ -182,9 +183,20 @@ impl File {
             .len()
             .min(usize::try_from(self.size - offset).unwrap_or(usize::MAX));
         let mut done = 0usize;
+        let mut extent_index = extent_index_at_or_after(&self.extents, offset);
         while keep_reading(done, to_read) {
             let pos = offset + done as u64;
-            let chunk = if let Some(extent) = self.extents.iter().find(|e| e.contains(pos)) {
+            while let Some(extent) = self.extents.get(extent_index)
+                && extent.logical_addr <= pos
+                && !extent.contains(pos)
+            {
+                extent_index += 1;
+            }
+            let chunk = if let Some(extent) = self
+                .extents
+                .get(extent_index)
+                .filter(|extent| extent.contains(pos))
+            {
                 let within = pos - extent.logical_addr;
                 let extent_remaining = extent.length - within;
                 let chunk =
@@ -202,7 +214,10 @@ impl File {
                 chunk
             } else {
                 // A hole: zero-fill up to the next extent or the read end.
-                let next = next_extent_start_after(&self.extents, pos, self.size);
+                let next = self
+                    .extents
+                    .get(extent_index)
+                    .map_or(self.size, |extent| extent.logical_addr);
                 let chunk = (to_read - done).min(usize::try_from(next - pos).unwrap_or(usize::MAX));
                 buf[done..done + chunk].fill(0);
                 chunk
@@ -246,21 +261,15 @@ fn keep_reading(done: usize, to_read: usize) -> bool {
     done < to_read
 }
 
-/// Returns the smallest extent start strictly after `pos`, or `fallback`.
+/// Finds the extent containing `pos`, or the first extent after it.
 ///
-/// Extracted so the equivalent `> → >=` mutant on `start > pos` can be
-/// suppressed without hiding the other operator mutants in `read_at`: the
-/// hole branch only runs when no extent contains `pos`, so no extent can
-/// have `logical_addr == pos`, and the two predicates are observationally
-/// identical.
+/// The caller advances from this point monotonically, making a ranged read
+/// `O(log n + k)` for `n` total extents and `k` extents crossed.
 #[cfg_attr(test, mutants::skip)]
-fn next_extent_start_after(extents: &[FileExtent], pos: u64, fallback: u64) -> u64 {
+fn extent_index_at_or_after(extents: &[FileExtent], pos: u64) -> usize {
     extents
-        .iter()
-        .map(|extent| extent.logical_addr)
-        .filter(|&start| start > pos)
-        .min()
-        .unwrap_or(fallback)
+        .partition_point(|extent| extent.logical_addr <= pos)
+        .saturating_sub(1)
 }
 
 /// Advances [`File::read_at`]'s byte cursor by `chunk` (which is `> 0`).

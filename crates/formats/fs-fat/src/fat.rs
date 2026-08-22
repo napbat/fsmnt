@@ -9,6 +9,7 @@ use crate::io::{Read, Seek};
 use fsmnt_parser_core::boot_sector::{
     BOOT_SECTOR_SIZE, BOOT_SIGNATURE, DosBpb, Fat16BootSector, Fat32BootSector,
 };
+use fsmnt_parser_core::io::BlockCache;
 use zerocopy::FromBytes;
 
 /// A type of FAT filesystem.
@@ -477,6 +478,68 @@ impl Fat {
             FatType::Fat12 => self.next_cluster_fat12(fs, cluster),
             FatType::Fat16 => self.next_cluster_fat16(fs, cluster),
             FatType::Fat32 => self.next_cluster_fat32(fs, cluster),
+        }
+    }
+
+    pub(crate) fn next_cluster_cached<T>(
+        &self,
+        fs: &mut T,
+        cluster: u32,
+        cache: &mut BlockCache,
+    ) -> Result<Option<u32>>
+    where
+        T: Read + Seek,
+    {
+        if cluster < 2 || cluster > self.total_clusters + 1 {
+            return Err(FatError::InvalidCluster { cluster });
+        }
+
+        let (fat_offset, entry_len) = match self.fat_type {
+            FatType::Fat12 => (u64::from(cluster + cluster / 2), 2),
+            FatType::Fat16 => (u64::from(cluster) * 2, 2),
+            FatType::Fat32 => (u64::from(cluster) * 4, 4),
+        };
+        let byte_offset =
+            u64::from(self.fat_start_sector) * u64::from(self.sector_size) + fat_offset;
+        let mut bytes = [0_u8; 4];
+        cache.read_exact_at(fs, byte_offset, &mut bytes[..entry_len])?;
+
+        match self.fat_type {
+            FatType::Fat12 => {
+                let entry = u16::from_le_bytes([bytes[0], bytes[1]]);
+                let value = if cluster & 1 == 1 {
+                    entry >> 4
+                } else {
+                    entry & 0x0fff
+                };
+                if value >= 0x0ff8 {
+                    Ok(None)
+                } else if value == 0x0ff7 {
+                    Err(FatError::BadCluster { cluster })
+                } else {
+                    Ok(Some(u32::from(value)))
+                }
+            }
+            FatType::Fat16 => {
+                let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if value >= 0xfff8 {
+                    Ok(None)
+                } else if value == 0xfff7 {
+                    Err(FatError::BadCluster { cluster })
+                } else {
+                    Ok(Some(u32::from(value)))
+                }
+            }
+            FatType::Fat32 => {
+                let value = u32::from_le_bytes(bytes) & 0x0fff_ffff;
+                if value >= 0x0fff_fff8 {
+                    Ok(None)
+                } else if value == 0x0fff_fff7 {
+                    Err(FatError::BadCluster { cluster })
+                } else {
+                    Ok(Some(value))
+                }
+            }
         }
     }
 

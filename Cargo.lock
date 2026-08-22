@@ -578,6 +578,7 @@ version = "0.3.0"
 dependencies = [
  "bitflags",
  "chrono",
+ "divan",
  "fsmnt-parser-core",
  "fsmnt-testkit",
  "mutants",

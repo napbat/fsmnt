@@ -2,12 +2,13 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use fsmnt_parser_core::io::BlockCache;
 
 use crate::inode::QNX6_INODE_SIZE;
 use crate::io::{Read, Seek, SeekFrom};
 use crate::superblock::{
-    QNX6_BOOT_AREA_SIZE, QNX6_DATA_AREA_OFFSET, QNX6_SUPERBLOCK_AREA_SIZE, QNX6_SUPERBLOCK_SIZE,
-    QNX6_UNUSED_BLOCK,
+    QNX6_BOOT_AREA_SIZE, QNX6_DATA_AREA_OFFSET, QNX6_MAX_LEVELS, QNX6_SUPERBLOCK_AREA_SIZE,
+    QNX6_SUPERBLOCK_SIZE, QNX6_UNUSED_BLOCK,
 };
 use crate::tree::TreeDescriptor;
 use crate::{QNX6_ROOT_INODE, Qnx6Error, Qnx6Inode, Qnx6Superblock, Result, SuperblockCopy};
@@ -68,6 +69,7 @@ impl Qnx6DirectoryEntry {
 /// A mounted read-only view of the newest valid QNX6 snapshot.
 pub struct Qnx6<R: Read + Seek> {
     reader: R,
+    pointer_cache: Vec<BlockCache>,
     superblock: Qnx6Superblock,
     active_copy: SuperblockCopy,
     primary_valid: bool,
@@ -126,8 +128,14 @@ impl<R: Read + Seek> Qnx6<R> {
             (None, None) => return Err(Qnx6Error::NoValidSuperblock),
         };
 
+        let block_size = usize::try_from(superblock.block_size())
+            .map_err(|_| Qnx6Error::Overflow("pointer block size"))?;
+        let pointer_cache = (0..QNX6_MAX_LEVELS)
+            .map(|_| BlockCache::new(block_size))
+            .collect();
         let mut filesystem = Self {
             reader,
+            pointer_cache,
             superblock,
             active_copy,
             primary_valid,
@@ -520,7 +528,7 @@ impl<R: Read + Seek> Qnx6<R> {
         let mut block = pointers[direct_index];
         let mut remainder = logical_block % span;
         let mut current_span = span;
-        for _ in 0..levels {
+        for depth in 0..levels {
             if block == QNX6_UNUSED_BLOCK {
                 return Ok(None);
             }
@@ -528,24 +536,30 @@ impl<R: Read + Seek> Qnx6<R> {
             current_span /= pointers_per_block;
             let index = remainder / current_span;
             remainder %= current_span;
-            let pointer_offset = self
-                .physical_block_offset(block)?
-                .checked_add(
-                    index
-                        .checked_mul(4)
-                        .ok_or(Qnx6Error::Overflow("indirect pointer offset"))?,
-                )
-                .ok_or(Qnx6Error::Overflow("indirect pointer offset"))?;
-            self.reader.seek(SeekFrom::Start(pointer_offset))?;
-            let mut bytes = [0_u8; 4];
-            self.reader.read_exact(&mut bytes)?;
-            block = self.superblock.byte_order().read_u32(&bytes, 0);
+            block = self.read_indirect_pointer(usize::from(depth), block, index)?;
         }
         if block == QNX6_UNUSED_BLOCK {
             return Ok(None);
         }
         self.validate_block(block)?;
         Ok(Some(block))
+    }
+
+    fn read_indirect_pointer(&mut self, depth: usize, block: u32, index: u64) -> Result<u32> {
+        let physical = self.physical_block_offset(block)?;
+        let pointer_offset = usize::try_from(
+            index
+                .checked_mul(4)
+                .ok_or(Qnx6Error::Overflow("indirect pointer offset"))?,
+        )
+        .map_err(|_| Qnx6Error::Overflow("indirect pointer offset"))?;
+        let order = self.superblock.byte_order();
+        let cached = self
+            .pointer_cache
+            .get_mut(depth)
+            .ok_or(Qnx6Error::Overflow("pointer cache depth"))?;
+        let bytes = cached.read_block(&mut self.reader, physical)?;
+        Ok(order.read_u32(bytes, pointer_offset))
     }
 
     fn validate_block(&self, block: u32) -> Result<()> {
