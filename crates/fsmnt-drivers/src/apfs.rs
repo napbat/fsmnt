@@ -151,6 +151,11 @@ fn metadata_of(inode: &Inode, size: u64) -> FsMetadata {
     }
 }
 
+struct CachedFile {
+    path: String,
+    file: File,
+}
+
 /// One volume of a raw APFS container exposed as a [`TargetFilesystem`].
 pub struct ApfsFilesystem<R: Read + Seek + Send> {
     reader: R,
@@ -158,6 +163,8 @@ pub struct ApfsFilesystem<R: Read + Seek + Send> {
     volume_uuid: [u8; 16],
     block_size: u32,
     total_size: u64,
+    /// Most recently opened regular file, bounded to one mount read stream.
+    cached_file: Option<CachedFile>,
 }
 
 impl<R: Read + Seek + Send> ApfsFilesystem<R> {
@@ -211,6 +218,7 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
             volume_uuid,
             block_size,
             total_size,
+            cached_file: None,
         })
     }
 
@@ -242,6 +250,56 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
                 .size),
             None => Ok(0),
         }
+    }
+
+    /// Opens and caches the regular file at `path`.
+    ///
+    /// A mount backend normally issues many positioned reads for one open
+    /// file. Retaining only the most recent handle avoids repeating path,
+    /// inode, xattr, and extent-tree walks while keeping cache memory bounded.
+    fn cache_regular_file(&mut self, path: &str) -> FsResult<()> {
+        if self
+            .cached_file
+            .as_ref()
+            .is_some_and(|cached| cached.path == path)
+        {
+            return Ok(());
+        }
+
+        let obj_id = self.navigate(path)?;
+        let inode = self
+            .volume
+            .inode(&mut self.reader, obj_id)
+            .map_err(|e| map_apfs_error(e, path))?
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
+        if inode.file_type() != FileType::Regular {
+            return Err(FsError::NotAFile(path.to_string()));
+        }
+        if Xattr::contains_name(
+            self.volume.catalog(),
+            &mut self.reader,
+            obj_id,
+            DECMPFS_XATTR,
+        )
+        .map_err(|e| map_apfs_error(e, path))?
+        {
+            return Err(FsError::Filesystem(format!(
+                "'{path}' uses decmpfs transparent compression, which is not supported"
+            )));
+        }
+        let size = Self::data_stream_size(&inode)?;
+        let file = File::open(
+            self.volume.catalog(),
+            &mut self.reader,
+            inode.private_id,
+            size,
+        )
+        .map_err(|e| map_apfs_error(e, path))?;
+        self.cached_file = Some(CachedFile {
+            path: path.to_string(),
+            file,
+        });
+        Ok(())
     }
 
     /// Convert an APFS [`DirEntry`] to an [`FsEntry`].
@@ -282,65 +340,22 @@ impl<R: Read + Seek + Send> ApfsFilesystem<R> {
 
 impl<R: Read + Seek + Send> TargetFilesystem for ApfsFilesystem<R> {
     fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-        let obj_id = self.navigate(path)?;
-        let inode = self
-            .volume
-            .inode(&mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?
-            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
-        // Gate on regular files: a directory or symlink must not leak its
-        // backing bytes through the file reader.
-        if inode.file_type() != FileType::Regular {
-            return Err(FsError::NotAFile(path.to_string()));
-        }
-        // A decmpfs-compressed file's logical content lives in the xattr,
-        // not the (usually empty) data stream — fail loudly rather than
-        // return a misleading empty or partial buffer.
-        let xattrs = Xattr::list(self.volume.catalog(), &mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?;
-        if xattrs.iter().any(|x| x.name == DECMPFS_XATTR) {
-            return Err(FsError::Filesystem(format!(
-                "'{path}' uses decmpfs transparent compression, which is not supported"
-            )));
-        }
-        let size = Self::data_stream_size(&inode)?;
-        let file = File::open(
-            self.volume.catalog(),
-            &mut self.reader,
-            inode.private_id,
-            size,
-        )
-        .map_err(|e| map_apfs_error(e, path))?;
-        file.read_all(&mut self.reader, self.block_size)
+        self.cache_regular_file(path)?;
+        self.cached_file
+            .as_ref()
+            .ok_or_else(|| FsError::Filesystem("APFS file cache was not populated".to_string()))?
+            .file
+            .read_all(&mut self.reader, self.block_size)
             .map_err(|e| map_apfs_error(e, path))
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let obj_id = self.navigate(path)?;
-        let inode = self
-            .volume
-            .inode(&mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?
-            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
-        if inode.file_type() != FileType::Regular {
-            return Err(FsError::NotAFile(path.to_string()));
-        }
-        let xattrs = Xattr::list(self.volume.catalog(), &mut self.reader, obj_id)
-            .map_err(|e| map_apfs_error(e, path))?;
-        if xattrs.iter().any(|x| x.name == DECMPFS_XATTR) {
-            return Err(FsError::Filesystem(format!(
-                "'{path}' uses decmpfs transparent compression, which is not supported"
-            )));
-        }
-        let size = Self::data_stream_size(&inode)?;
-        let file = File::open(
-            self.volume.catalog(),
-            &mut self.reader,
-            inode.private_id,
-            size,
-        )
-        .map_err(|e| map_apfs_error(e, path))?;
-        file.read_at(&mut self.reader, self.block_size, offset, buffer)
+        self.cache_regular_file(path)?;
+        self.cached_file
+            .as_ref()
+            .ok_or_else(|| FsError::Filesystem("APFS file cache was not populated".to_string()))?
+            .file
+            .read_at(&mut self.reader, self.block_size, offset, buffer)
             .map_err(|e| map_apfs_error(e, path))
     }
 

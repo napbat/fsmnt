@@ -3,6 +3,48 @@
 use fsmnt_core::{FsError, FsResult};
 use fsmnt_parser_core::io::FsReadSeek;
 
+/// Bounded cache for the most recently resolved path.
+///
+/// Mount backends issue adjacent reads against one path, so a single entry
+/// captures the common case without retaining metadata for every file ever
+/// touched. The path allocation is reused when the active file changes.
+pub(crate) struct PathCache<T> {
+    path: String,
+    value: Option<T>,
+}
+
+impl<T> PathCache<T> {
+    /// Creates an empty cache.
+    pub(crate) const fn new() -> Self {
+        Self {
+            path: String::new(),
+            value: None,
+        }
+    }
+
+    /// Returns the cached value when `path` is the most recent successful
+    /// resolution.
+    pub(crate) fn get(&self, path: &str) -> Option<&T> {
+        self.value.as_ref().filter(|_| self.path == path)
+    }
+
+    /// Returns the cached value mutably when `path` is the active entry.
+    pub(crate) fn get_mut(&mut self, path: &str) -> Option<&mut T> {
+        if self.path == path {
+            self.value.as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// Replaces the cached entry while retaining reusable path capacity.
+    pub(crate) fn insert(&mut self, path: &str, value: T) {
+        self.path.clear();
+        self.path.push_str(path);
+        self.value = Some(value);
+    }
+}
+
 /// Convert a lookup result into the `TargetFilesystem::try_exists` contract.
 pub(crate) fn found<T>(result: FsResult<T>) -> FsResult<bool> {
     match result {
@@ -135,6 +177,22 @@ mod tests {
             found::<()>(Err(FsError::NotAFile("/directory".to_string()))),
             Err(FsError::NotAFile(_))
         ));
+    }
+
+    #[test]
+    fn path_cache_is_bounded_and_reuses_path_storage() {
+        let mut cache = PathCache::new();
+        cache.insert("/a/longer/path", 7_u32);
+        let allocation = cache.path.as_ptr();
+        assert_eq!(cache.get("/a/longer/path"), Some(&7));
+        assert_eq!(cache.get("/other"), None);
+
+        cache.insert("/short", 9);
+        assert_eq!(cache.get("/a/longer/path"), None);
+        assert_eq!(cache.get("/short"), Some(&9));
+        *cache.get_mut("/short").expect("cached value") = 11;
+        assert_eq!(cache.get("/short"), Some(&11));
+        assert_eq!(cache.path.as_ptr(), allocation);
     }
 
     #[test]

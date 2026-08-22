@@ -17,7 +17,7 @@ use fsmnt_core::{
 use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use tracing::debug;
 
-use crate::adapter::{found, read_at_through};
+use crate::adapter::{PathCache, found, read_at_through};
 use crate::boot_backup;
 use crate::identity;
 use fsmnt_parser_core::iter::FsTryIterator;
@@ -37,6 +37,8 @@ pub struct NtfsFilesystem<T: Read + Seek> {
     ntfs: Ntfs,
     /// How the volume was opened, when that departed from the normal path.
     notices: Vec<String>,
+    /// Most recently resolved file record for adjacent mount reads.
+    resolved: PathCache<u64>,
 }
 
 impl<T: Read + Seek> NtfsFilesystem<T> {
@@ -68,6 +70,7 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
             reader,
             ntfs,
             notices: Vec::new(),
+            resolved: PathCache::new(),
         })
     }
 
@@ -83,6 +86,9 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
     /// Returning a record number rather than an `NtfsFile` keeps the
     /// borrow of `self.reader` from escaping the helper.
     fn navigate_to_record(&mut self, path: &str) -> FsResult<u64> {
+        if let Some(record) = self.resolved.get(path) {
+            return Ok(*record);
+        }
         let normalized = normalize_path(path);
 
         let root = self
@@ -90,53 +96,42 @@ impl<T: Read + Seek> NtfsFilesystem<T> {
             .root_directory(&mut self.reader)
             .map_err(|e| FsError::Filesystem(format!("failed to get root directory: {e}")))?;
 
-        if normalized.is_empty() {
-            return Ok(root.file_record_number());
-        }
-
-        let components: Vec<String> = normalized
+        let mut record = root.file_record_number();
+        for target_name in normalized
             .split('/')
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .collect();
+            .filter(|component| !component.is_empty())
+        {
+            let dir_file = self
+                .ntfs
+                .file(&mut self.reader, record)
+                .map_err(|e| FsError::Filesystem(format!("failed to get directory: {e}")))?;
 
-        self.navigate_from_record(root.file_record_number(), &components)
-    }
+            let index = dir_file
+                .directory_index(&mut self.reader)
+                .map_err(|e| FsError::NotADirectory(format!("not a directory: {e}")))?;
 
-    /// Walk `components` starting from the directory at `dir_record`.
-    fn navigate_from_record(&mut self, dir_record: u64, components: &[String]) -> FsResult<u64> {
-        let Some(target_name) = components.first() else {
-            return Ok(dir_record);
-        };
-        let remaining = &components[1..];
+            // The B-tree is ordered by the volume's up-case table, so lookups
+            // must go through NTFS's own comparison rather than Rust's.
+            let mut finder = index.finder();
+            let maybe_entry = NtfsFileNameIndex::find_case_insensitive(
+                &mut finder,
+                &self.ntfs,
+                &mut self.reader,
+                target_name,
+            );
 
-        let dir_file = self
-            .ntfs
-            .file(&mut self.reader, dir_record)
-            .map_err(|e| FsError::Filesystem(format!("failed to get directory: {e}")))?;
-
-        let index = dir_file
-            .directory_index(&mut self.reader)
-            .map_err(|e| FsError::NotADirectory(format!("not a directory: {e}")))?;
-
-        // The B-tree is ordered by the volume's up-case table, so lookups
-        // must go through NTFS's own comparison rather than Rust's.
-        let mut finder = index.finder();
-        let maybe_entry = NtfsFileNameIndex::find_case_insensitive(
-            &mut finder,
-            &self.ntfs,
-            &mut self.reader,
-            target_name,
-        );
-
-        match maybe_entry {
-            Some(Ok(entry)) => {
-                let file_record = entry.file_reference().file_record_number();
-                self.navigate_from_record(file_record, remaining)
+            match maybe_entry {
+                Some(Ok(entry)) => {
+                    record = entry.file_reference().file_record_number();
+                }
+                Some(Err(e)) => {
+                    return Err(FsError::Filesystem(format!("error finding entry: {e}")));
+                }
+                None => return Err(FsError::NotFound(target_name.to_string())),
             }
-            Some(Err(e)) => Err(FsError::Filesystem(format!("error finding entry: {e}"))),
-            None => Err(FsError::NotFound(target_name.clone())),
         }
+        self.resolved.insert(path, record);
+        Ok(record)
     }
 
     /// Whether the record at `path` is a directory, or `None` when the

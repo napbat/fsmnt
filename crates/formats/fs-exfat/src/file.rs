@@ -11,6 +11,113 @@ use crate::exfat::ExFat;
 use crate::io::{Read, Seek, SeekFrom};
 use fsmnt_parser_core::FsReadSeek;
 
+#[derive(Debug, Clone, Copy)]
+struct ClusterRun {
+    /// Exclusive logical cluster index at the end of this run.
+    logical_end: u32,
+    /// First physical cluster in this run.
+    physical_start: u32,
+}
+
+#[derive(Debug, Clone)]
+enum ClusterChain {
+    /// One physical cluster number per logical cluster.
+    Dense(Vec<u32>),
+    /// Physically consecutive clusters grouped into runs.
+    Runs(Vec<ClusterRun>),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FileGeometry {
+    size: u32,
+    count: u32,
+    heap_offset: u64,
+}
+
+impl FileGeometry {
+    fn from_exfat(exfat: &ExFat) -> Self {
+        Self {
+            size: exfat.cluster_size(),
+            count: exfat.cluster_count(),
+            heap_offset: exfat.cluster_heap_offset(),
+        }
+    }
+
+    fn cluster_offset(self, cluster: u32) -> Result<u64> {
+        if cluster < 2 || cluster > self.count.saturating_add(1) {
+            return Err(ExFatError::InvalidCluster { cluster });
+        }
+        Ok(self.heap_offset + u64::from(cluster - 2) * u64::from(self.size))
+    }
+}
+
+impl ClusterChain {
+    fn from_dense(clusters: Vec<u32>) -> Self {
+        let Some((&first, rest)) = clusters.split_first() else {
+            return Self::Dense(clusters);
+        };
+
+        let dense_bytes = clusters.len().saturating_mul(core::mem::size_of::<u32>());
+        let max_compact_runs = dense_bytes
+            .saturating_sub(1)
+            .checked_div(core::mem::size_of::<ClusterRun>())
+            .unwrap_or(0);
+        if max_compact_runs == 0 {
+            return Self::Dense(clusters);
+        }
+
+        let mut runs = Vec::new();
+        let mut physical_start = first;
+        let mut previous = first;
+        for (index, &cluster) in rest.iter().enumerate() {
+            if previous.checked_add(1) != Some(cluster) {
+                if runs.len() == max_compact_runs {
+                    return Self::Dense(clusters);
+                }
+                runs.push(ClusterRun {
+                    logical_end: u32::try_from(index + 1)
+                        .expect("an exFAT cluster chain contains at most u32::MAX clusters"),
+                    physical_start,
+                });
+                physical_start = cluster;
+            }
+            previous = cluster;
+        }
+        if runs.len() == max_compact_runs {
+            return Self::Dense(clusters);
+        }
+        runs.push(ClusterRun {
+            logical_end: u32::try_from(clusters.len())
+                .expect("an exFAT cluster chain contains at most u32::MAX clusters"),
+            physical_start,
+        });
+        Self::Runs(runs)
+    }
+
+    fn cluster_at(&self, logical_index: u32, cached_run: &mut usize) -> Option<u32> {
+        match self {
+            Self::Dense(clusters) => clusters.get(usize::try_from(logical_index).ok()?).copied(),
+            Self::Runs(runs) => {
+                let mut run_index = (*cached_run).min(runs.len().saturating_sub(1));
+                let cached_start = run_index
+                    .checked_sub(1)
+                    .map_or(0, |previous| runs[previous].logical_end);
+                let cached = runs.get(run_index)?;
+                if logical_index < cached_start || logical_index >= cached.logical_end {
+                    run_index = runs.partition_point(|run| run.logical_end <= logical_index);
+                }
+                let run = runs.get(run_index)?;
+                let logical_start = run_index
+                    .checked_sub(1)
+                    .map_or(0, |previous| runs[previous].logical_end);
+                *cached_run = run_index;
+                run.physical_start
+                    .checked_add(logical_index - logical_start)
+            }
+        }
+    }
+}
+
 /// Read-only handle to an exFAT file's data stream.
 ///
 /// Created via [`ExFat::open_file`] or from an [`ExFatEntrySet`].
@@ -24,18 +131,20 @@ use fsmnt_parser_core::FsReadSeek;
 /// - **Contiguous** (`NoFatChain` flag): clusters are laid out
 ///   sequentially from `first_cluster`. No FAT lookups needed.
 #[derive(Debug, Clone)]
-pub struct ExFatFile<'e> {
-    exfat: &'e ExFat,
+pub struct ExFatFile {
+    geometry: FileGeometry,
     first_cluster: u32,
     data_length: u64,
     position: u64,
     contiguous: bool,
     /// Pre-resolved cluster chain (FAT-chained mode only).
     /// Empty when `contiguous` is true.
-    cluster_chain: Vec<u32>,
+    cluster_chain: ClusterChain,
+    /// Last compact run used by a sequential or nearby read.
+    cached_run: usize,
 }
 
-impl<'e> ExFatFile<'e> {
+impl ExFatFile {
     /// Creates a file handle from its stream metadata.
     ///
     /// For FAT-chained files, resolves the full cluster chain
@@ -47,7 +156,7 @@ impl<'e> ExFatFile<'e> {
     /// Returns an error if the FAT chain cannot be read, contains an
     /// invalid cluster, or is shorter than `data_length` requires.
     pub fn new<T>(
-        exfat: &'e ExFat,
+        exfat: &ExFat,
         fs: &mut T,
         first_cluster: u32,
         data_length: u64,
@@ -57,59 +166,78 @@ impl<'e> ExFatFile<'e> {
         T: Read + Seek,
     {
         let cluster_chain = if contiguous || data_length == 0 {
-            Vec::new()
+            ClusterChain::Dense(Vec::new())
         } else {
+            let cluster_size = u64::from(exfat.cluster_size());
+            let clusters_needed = data_length.saturating_add(cluster_size - 1) / cluster_size;
+            if clusters_needed > u64::from(exfat.cluster_count()) {
+                return Err(ExFatError::InvalidEntrySet {
+                    reason: "declared data length exceeds the volume's cluster count",
+                    byte_offset: 0,
+                });
+            }
+            let capacity =
+                usize::try_from(clusters_needed).map_err(|_| ExFatError::InvalidEntrySet {
+                    reason: "cluster chain exceeds addressable memory",
+                    byte_offset: 0,
+                })?;
             let mut chain = Vec::new();
+            chain
+                .try_reserve_exact(capacity)
+                .map_err(|_| ExFatError::InvalidEntrySet {
+                    reason: "cluster chain is too large to cache",
+                    byte_offset: 0,
+                })?;
             let mut iter = exfat.cluster_iter(first_cluster);
+            let mut chain_length = 0u64;
             while let Some(result) = iter.next(fs) {
-                chain.push(result?);
+                let cluster = result?;
+                if chain_length < clusters_needed {
+                    chain.push(cluster);
+                }
+                chain_length += 1;
             }
 
             // Validate chain covers the declared data length
-            let cluster_size = u64::from(exfat.cluster_size());
-            let clusters_needed = data_length.saturating_add(cluster_size - 1) / cluster_size;
-            if u64::try_from(chain.len()).unwrap_or(u64::MAX) < clusters_needed {
+            if chain_length < clusters_needed {
                 return Err(ExFatError::InvalidEntrySet {
                     reason: "FAT chain too short for declared data length",
                     byte_offset: 0,
                 });
             }
 
-            chain
+            ClusterChain::from_dense(chain)
         };
 
         Ok(Self {
-            exfat,
+            geometry: FileGeometry::from_exfat(exfat),
             first_cluster,
             data_length,
             position: 0,
             contiguous,
             cluster_chain,
+            cached_run: 0,
         })
     }
 
     /// Returns the cluster number containing the given byte offset.
-    fn cluster_at_offset(&self, offset: u64) -> Result<u32> {
-        let cluster_size = u64::from(self.exfat.cluster_size());
+    fn cluster_at_offset(&mut self, offset: u64) -> Result<u32> {
+        let cluster_size = u64::from(self.geometry.size);
         let cluster_index =
-            usize::try_from(offset / cluster_size).map_err(|_| ExFatError::InvalidEntrySet {
+            u32::try_from(offset / cluster_size).map_err(|_| ExFatError::InvalidEntrySet {
                 reason: "file offset exceeds addressable memory",
                 byte_offset: offset,
             })?;
 
         if self.contiguous {
-            let idx = u32::try_from(cluster_index).map_err(|_| ExFatError::InvalidCluster {
-                cluster: self.first_cluster,
-            })?;
             let cluster = self
                 .first_cluster
-                .checked_add(idx)
+                .checked_add(cluster_index)
                 .ok_or(ExFatError::InvalidCluster { cluster: u32::MAX })?;
             Ok(cluster)
         } else {
             self.cluster_chain
-                .get(cluster_index)
-                .copied()
+                .cluster_at(cluster_index, &mut self.cached_run)
                 .ok_or(ExFatError::InvalidCluster {
                     cluster: self.first_cluster,
                 })
@@ -135,7 +263,7 @@ impl<'e> ExFatFile<'e> {
     }
 }
 
-impl<R: Read + Seek> FsReadSeek<R> for ExFatFile<'_> {
+impl<R: Read + Seek> FsReadSeek<R> for ExFatFile {
     type Error = ExFatError;
 
     fn read(&mut self, fs: &mut R, buf: &mut [u8]) -> core::result::Result<usize, ExFatError> {
@@ -146,7 +274,7 @@ impl<R: Read + Seek> FsReadSeek<R> for ExFatFile<'_> {
         let remaining = usize::try_from(self.data_length - self.position).unwrap_or(usize::MAX);
         let to_read = remaining.min(buf.len());
 
-        let cluster_size = u64::from(self.exfat.cluster_size());
+        let cluster_size = u64::from(self.geometry.size);
         let mut bytes_read = 0usize;
 
         while bytes_read < to_read {
@@ -161,7 +289,7 @@ impl<R: Read + Seek> FsReadSeek<R> for ExFatFile<'_> {
                 })?;
             let chunk = (to_read - bytes_read).min(cluster_remaining);
 
-            let disk_offset = self.exfat.cluster_offset(cluster)? + offset_in_cluster;
+            let disk_offset = self.geometry.cluster_offset(cluster)? + offset_in_cluster;
             fs.seek(SeekFrom::Start(disk_offset))?;
             fs.read_exact(&mut buf[bytes_read..bytes_read + chunk])?;
 
@@ -305,6 +433,44 @@ mod tests {
         assert!(buf[512..1024].iter().all(|&b| b == 0xBB));
         // Last 176 from cluster 3
         assert!(buf[1024..1200].iter().all(|&b| b == 0xCC));
+        assert!(matches!(file.cluster_chain, ClusterChain::Dense(_)));
+    }
+
+    #[test]
+    fn consecutive_fat_clusters_use_compact_run_storage() {
+        let mut image = make_image();
+        set_fat_entry(&mut image, 2, 0xFFFF_FFFF);
+        for cluster in 5..10 {
+            set_fat_entry(&mut image, cluster, cluster + 1);
+        }
+        set_fat_entry(&mut image, 10, 0xFFFF_FFFF);
+
+        for cluster in 5..=10 {
+            let offset = cluster_heap_offset(cluster);
+            image[offset..offset + BPS]
+                .fill(u8::try_from(cluster).expect("the test cluster number fits in one byte"));
+        }
+
+        let mut cursor = Cursor::new(image);
+        let exfat = ExFat::new(&mut cursor).unwrap();
+        let mut file = ExFatFile::new(
+            &exfat,
+            &mut cursor,
+            5,
+            u64::try_from(6 * BPS).expect("the test length fits u64"),
+            false,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &file.cluster_chain,
+            ClusterChain::Runs(runs) if runs.len() == 1
+        ));
+        file.seek(&mut cursor, SeekFrom::Start(4 * 512 + 7))
+            .unwrap();
+        let mut output = [0u8; 4];
+        file.read(&mut cursor, &mut output).unwrap();
+        assert_eq!(output, [9; 4]);
     }
 
     #[test]

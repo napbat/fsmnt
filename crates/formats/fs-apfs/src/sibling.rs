@@ -39,12 +39,12 @@ impl SiblingLink {
         inode_id: u64,
     ) -> Result<Vec<Self>> {
         let mut links = Vec::new();
-        for record in catalog.records_for(reader, inode_id)? {
-            if record.key_header.kind != JObjType::SiblingLink {
-                continue;
+        catalog.visit_records_for(reader, inode_id, |header, key, value| {
+            if header.kind == JObjType::SiblingLink {
+                links.push(parse_sibling_link(key, value)?);
             }
-            links.push(parse_sibling_link(&record.key, &record.value)?);
-        }
+            Ok(())
+        })?;
         Ok(links)
     }
 }

@@ -10,6 +10,7 @@
 
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use core::ops::ControlFlow;
 
 use crate::btree::{BtreeNode, descend};
 use crate::checkpoint::read_block;
@@ -277,6 +278,64 @@ impl Catalog {
         self.collect(reader, &|header| header.obj_id == obj_id, Some(obj_id))
     }
 
+    /// Visits records belonging to `obj_id` without cloning their key and
+    /// value bytes into an intermediate collection.
+    pub(crate) fn visit_records_for<T, F>(
+        &self,
+        reader: &mut T,
+        obj_id: u64,
+        mut visitor: F,
+    ) -> Result<()>
+    where
+        T: Read + Seek,
+        F: FnMut(JKey, &[u8], &[u8]) -> Result<()>,
+    {
+        let root = self.resolve_node(reader, self.root_oid.0)?;
+        let _ = self.walk(
+            reader,
+            &root,
+            &|header| header.obj_id == obj_id,
+            Some(obj_id),
+            0,
+            &mut |header, key, value| {
+                visitor(header, key, value)?;
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Tests records belonging to `obj_id`, stopping at the first match.
+    pub(crate) fn any_record_for<T, F>(
+        &self,
+        reader: &mut T,
+        obj_id: u64,
+        mut predicate: F,
+    ) -> Result<bool>
+    where
+        T: Read + Seek,
+        F: FnMut(JKey, &[u8], &[u8]) -> Result<bool>,
+    {
+        let root = self.resolve_node(reader, self.root_oid.0)?;
+        let mut matched = false;
+        let _ = self.walk(
+            reader,
+            &root,
+            &|header| header.obj_id == obj_id,
+            Some(obj_id),
+            0,
+            &mut |header, key, value| {
+                matched = predicate(header, key, value)?;
+                Ok(if matched {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                })
+            },
+        )?;
+        Ok(matched)
+    }
+
     /// Returns every catalog record of the given record type, tree-wide.
     ///
     /// Used to enumerate trees keyed by something other than an object id —
@@ -334,21 +393,32 @@ impl Catalog {
     ) -> Result<Vec<CatalogRecord>> {
         let root = self.resolve_node(reader, self.root_oid.0)?;
         let mut records = Vec::new();
-        self.walk(reader, &root, keep, bound, 0, &mut records)?;
+        let _ = self.walk(reader, &root, keep, bound, 0, &mut |header, key, value| {
+            records.push(CatalogRecord {
+                key_header: header,
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(records)
     }
 
     /// Recursively collects matching records from `node` and its children,
     /// pruning subtrees that cannot hold `bound` when it is set.
-    fn walk<T: Read + Seek>(
+    fn walk<T, F>(
         &self,
         reader: &mut T,
         node: &BtreeNode,
         keep: &dyn Fn(&JKey) -> bool,
         bound: Option<u64>,
         depth: u32,
-        records: &mut Vec<CatalogRecord>,
-    ) -> Result<()> {
+        visitor: &mut F,
+    ) -> Result<ControlFlow<()>>
+    where
+        T: Read + Seek,
+        F: FnMut(JKey, &[u8], &[u8]) -> Result<ControlFlow<()>>,
+    {
         if depth >= MAX_CATALOG_DEPTH {
             return Err(ApfsError::Malformed {
                 structure: "fstree",
@@ -361,12 +431,10 @@ impl Catalog {
             let entry = node.entry(index, 0, 0)?;
             if node.is_leaf() {
                 let header = JKey::parse(entry.key)?;
-                if keep(&header) {
-                    records.push(CatalogRecord {
-                        key_header: header,
-                        key: entry.key.to_vec(),
-                        value: entry.value.unwrap_or(&[]).to_vec(),
-                    });
+                if keep(&header)
+                    && visitor(header, entry.key, entry.value.unwrap_or(&[]))?.is_break()
+                {
+                    return Ok(ControlFlow::Break(()));
                 }
                 continue;
             }
@@ -397,9 +465,14 @@ impl Catalog {
                 child[0], child[1], child[2], child[3], child[4], child[5], child[6], child[7],
             ]);
             let child_node = self.resolve_node(reader, child_oid)?;
-            self.walk(reader, &child_node, keep, bound, depth + 1, records)?;
+            if self
+                .walk(reader, &child_node, keep, bound, depth + 1, visitor)?
+                .is_break()
+            {
+                return Ok(ControlFlow::Break(()));
+            }
         }
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 }
 

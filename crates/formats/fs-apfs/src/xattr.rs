@@ -73,13 +73,35 @@ impl Xattr {
         obj_id: u64,
     ) -> Result<Vec<Self>> {
         let mut xattrs = Vec::new();
-        for record in catalog.records_for(reader, obj_id)? {
-            if record.key_header.kind != JObjType::Xattr {
-                continue;
+        catalog.visit_records_for(reader, obj_id, |header, key, value| {
+            if header.kind == JObjType::Xattr {
+                xattrs.push(parse_xattr(key, value)?);
             }
-            xattrs.push(parse_xattr(&record.key, &record.value)?);
-        }
+            Ok(())
+        })?;
         Ok(xattrs)
+    }
+
+    /// Tests whether object `obj_id` has an extended attribute named `name`.
+    ///
+    /// This avoids allocating parsed values for unrelated attributes and
+    /// stops the catalog walk as soon as the name is found.
+    ///
+    /// # Errors
+    ///
+    /// Propagates catalog-walk and malformed-key errors.
+    pub fn contains_name<T: Read + Seek>(
+        catalog: &Catalog,
+        reader: &mut T,
+        obj_id: u64,
+        name: &str,
+    ) -> Result<bool> {
+        catalog.any_record_for(reader, obj_id, |header, key, _value| {
+            if header.kind != JObjType::Xattr {
+                return Ok(false);
+            }
+            Ok(parse_xattr_name(key)? == name.as_bytes())
+        })
     }
 
     /// Reads the attribute's full value.
@@ -121,26 +143,7 @@ fn has_both_storage_flags(flags: XattrFlags) -> bool {
 
 /// Parses an `XATTR` record into an [`Xattr`].
 pub(crate) fn parse_xattr(key: &[u8], value: &[u8]) -> Result<Xattr> {
-    // Key: j_key_t header, then a 2-byte name length and the name.
-    let name_len_bytes = key
-        .get(J_KEY_SIZE..J_KEY_SIZE + 2)
-        .ok_or(ApfsError::Truncated {
-            structure: "j_xattr_key_t",
-            expected: J_KEY_SIZE + 2,
-            actual: key.len(),
-        })?;
-    let name_len = usize::from(u16::from_le_bytes([name_len_bytes[0], name_len_bytes[1]]));
-    let name_raw =
-        key.get(J_KEY_SIZE + 2..J_KEY_SIZE + 2 + name_len)
-            .ok_or(ApfsError::Malformed {
-                structure: "j_xattr_key_t",
-                reason: "name extends past the record key",
-            })?;
-    let name_end = name_raw
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(name_raw.len());
-    let name = String::from_utf8_lossy(&name_raw[..name_end]).into_owned();
+    let name = String::from_utf8_lossy(parse_xattr_name(key)?).into_owned();
 
     // Value: flags, xdata_len, then the embedded data or a j_xattr_dstream_t.
     if value.len() < J_XATTR_VAL_HEADER_SIZE {
@@ -196,6 +199,29 @@ pub(crate) fn parse_xattr(key: &[u8], value: &[u8]) -> Result<Xattr> {
         flags,
         value: parsed,
     })
+}
+
+fn parse_xattr_name(key: &[u8]) -> Result<&[u8]> {
+    // Key: j_key_t header, then a 2-byte name length and the name.
+    let name_len_bytes = key
+        .get(J_KEY_SIZE..J_KEY_SIZE + 2)
+        .ok_or(ApfsError::Truncated {
+            structure: "j_xattr_key_t",
+            expected: J_KEY_SIZE + 2,
+            actual: key.len(),
+        })?;
+    let name_len = usize::from(u16::from_le_bytes([name_len_bytes[0], name_len_bytes[1]]));
+    let name_raw =
+        key.get(J_KEY_SIZE + 2..J_KEY_SIZE + 2 + name_len)
+            .ok_or(ApfsError::Malformed {
+                structure: "j_xattr_key_t",
+                reason: "name extends past the record key",
+            })?;
+    let name_end = name_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(name_raw.len());
+    Ok(&name_raw[..name_end])
 }
 
 #[cfg(test)]
@@ -439,6 +465,8 @@ mod tests {
         let xattrs = Xattr::list(&catalog, &mut reader, 8).unwrap();
         assert_eq!(xattrs.len(), 2);
         assert_eq!(xattrs[0].name, "com.apple.quarantine");
+        assert!(Xattr::contains_name(&catalog, &mut reader, 8, "com.apple.quarantine").unwrap());
+        assert!(!Xattr::contains_name(&catalog, &mut reader, 8, "missing").unwrap());
         let data = xattrs[0]
             .read(
                 &catalog,

@@ -5,6 +5,9 @@ mod bench_data;
 use bench_data::{mixed, random_ish, zeros};
 use divan::counter::BytesCount;
 
+#[global_allocator]
+static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
+
 fn main() {
     divan::main();
 }
@@ -63,28 +66,31 @@ mod xpress {
     #[divan::bench(args = SIZES)]
     fn compress_zeros(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = zeros(len);
+        let mut compressor = nt_compression::xpress::Compressor::new();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::xpress::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::xpress::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 
     #[divan::bench(args = SIZES)]
     fn compress_mixed(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = mixed(len);
+        let mut compressor = nt_compression::xpress::Compressor::new();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::xpress::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::xpress::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 
     #[divan::bench(args = SIZES)]
     fn compress_random_ish(bencher: divan::Bencher<'_, '_>, len: usize) {
         let input = random_ish(len);
+        let mut compressor = nt_compression::xpress::Compressor::new();
         bencher
             .counter(BytesCount::new(len))
             .with_inputs(|| vec![0u8; nt_compression::xpress::compress_bound(len)])
-            .bench_local_refs(|out| nt_compression::xpress::compress(&input, out).unwrap());
+            .bench_local_refs(|out| compressor.compress(&input, out).unwrap());
     }
 }
 

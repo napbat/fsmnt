@@ -31,10 +31,36 @@ use crate::error::{FscryptError, Result};
 /// AES-256). `iv` is the 16-byte CBC IV. Returns the plaintext, same
 /// length as the ciphertext (padding bytes are caller's responsibility
 /// to strip). Rejects ciphertext shorter than one AES block.
+#[cfg(test)]
 pub fn decrypt_cs3<C>(key: &[u8], iv: &[u8; 16], ct: &[u8]) -> Result<alloc::vec::Vec<u8>>
 where
     C: BlockDecrypt + KeyInit + BlockSizeUser<BlockSize = U16> + KeySizeUser,
 {
+    let mut out = alloc::vec::Vec::with_capacity(ct.len());
+    decrypt_cs3_into::<C>(key, iv, ct, &mut out)?;
+    Ok(out)
+}
+
+/// Decrypt `ct` with AES-CBC-CTS (CS3) into reusable storage.
+///
+/// The output buffer is cleared before use and retains its allocation between
+/// calls. It contains the plaintext on success and is empty when input or key
+/// validation fails.
+///
+/// # Errors
+///
+/// Returns [`FscryptError::InvalidPolicy`] when `ct` is shorter than one AES
+/// block or `key` does not match the selected cipher's key size.
+pub(crate) fn decrypt_cs3_into<C>(
+    key: &[u8],
+    iv: &[u8; 16],
+    ct: &[u8],
+    out: &mut alloc::vec::Vec<u8>,
+) -> Result<()>
+where
+    C: BlockDecrypt + KeyInit + BlockSizeUser<BlockSize = U16> + KeySizeUser,
+{
+    out.clear();
     if ct.len() < 16 {
         return Err(FscryptError::InvalidPolicy {
             inode: 0,
@@ -45,53 +71,41 @@ where
         inode: 0,
         reason: "AES-CBC-CTS key length does not match the cipher",
     })?;
-    let mut out = alloc::vec![0u8; ct.len()];
+    out.extend_from_slice(ct);
 
     let n = ct.len();
     if n == 16 {
         // Single block: degenerate to plain CBC.
-        let mut block = [0u8; 16];
-        block.copy_from_slice(ct);
-        cipher.decrypt_block(GenericArray::from_mut_slice(&mut block));
-        for i in 0..16 {
-            out[i] = block[i] ^ iv[i];
-        }
-        return Ok(out);
+        cbc_decrypt_full_in_place(&cipher, iv, out);
+        return Ok(());
     }
     if n.is_multiple_of(16) {
         // Even multiple of 16, > 16: undo the CS3 last-two-block swap,
-        // then plain CBC decrypt.
-        let mut buf = ct.to_vec();
-        let tail = buf.len() - 32;
+        // then plain CBC decrypt in the caller's reusable buffer.
+        let tail = out.len() - 32;
         // Swap the two trailing 16-byte blocks back to standard CBC order.
         for i in 0..16 {
-            buf.swap(tail + i, tail + 16 + i);
+            out.swap(tail + i, tail + 16 + i);
         }
-        cbc_decrypt_full(&cipher, iv, &buf, &mut out);
-        return Ok(out);
+        cbc_decrypt_full_in_place(&cipher, iv, out);
+        return Ok(());
     }
-    decrypt_cs3_partial(&cipher, iv, ct, &mut out);
-    Ok(out)
+    decrypt_cs3_partial(&cipher, iv, ct, out);
+    Ok(())
 }
 
-fn cbc_decrypt_full<C>(cipher: &C, iv: &[u8; 16], ct: &[u8], pt: &mut [u8])
+fn cbc_decrypt_full_in_place<C>(cipher: &C, iv: &[u8; 16], buffer: &mut [u8])
 where
     C: BlockDecrypt + BlockSizeUser<BlockSize = U16>,
 {
     let mut prev = *iv;
-    for (ct_blk, pt_blk) in ct
-        .as_chunks::<16>()
-        .0
-        .iter()
-        .zip(pt.as_chunks_mut::<16>().0)
-    {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(ct_blk);
-        cipher.decrypt_block(GenericArray::from_mut_slice(&mut block));
+    for block in buffer.as_chunks_mut::<16>().0 {
+        let ciphertext = *block;
+        cipher.decrypt_block(GenericArray::from_mut_slice(block));
         for i in 0..16 {
-            pt_blk[i] = block[i] ^ prev[i];
+            block[i] ^= prev[i];
         }
-        prev.copy_from_slice(ct_blk);
+        prev = ciphertext;
     }
 }
 
@@ -286,5 +300,18 @@ mod tests {
         let iv = [0u8; 16];
         assert!(decrypt_cs3::<Aes256>(&[0u8; 16], &iv, &[0u8; 16]).is_err());
         assert!(decrypt_cs3::<Aes128>(&[0u8; 32], &iv, &[0u8; 16]).is_err());
+    }
+
+    #[test]
+    fn decrypt_into_reuses_capacity_for_full_block_ciphertext() {
+        let (key, iv) = key256_and_iv();
+        let ct = hex(REFERENCE_CT_FULL_HEX);
+        let mut out = alloc::vec::Vec::with_capacity(ct.len());
+        let allocation = out.as_ptr();
+
+        decrypt_cs3_into::<Aes256>(&key, &iv, &ct, &mut out).unwrap();
+
+        assert_eq!(out, REFERENCE_PT_FULL);
+        assert_eq!(out.as_ptr(), allocation);
     }
 }

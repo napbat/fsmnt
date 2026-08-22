@@ -97,9 +97,13 @@ impl DirEntry {
     /// Returns [`ApfsError::Malformed`] or [`ApfsError::Truncated`] when the
     /// record is not a well-formed `DIR_REC`.
     pub fn from_record(record: &CatalogRecord, hashed: bool) -> Result<Self> {
-        let (name, name_hash) = parse_drec_name(&record.key, hashed)?;
-        let (file_id, date_added, flags) = parse_drec_value(&record.value)?;
-        let xfields = record.value.get(J_DREC_VAL_SIZE..).unwrap_or(&[]).to_vec();
+        Self::from_parts(&record.key, &record.value, hashed)
+    }
+
+    fn from_parts(key: &[u8], value: &[u8], hashed: bool) -> Result<Self> {
+        let (name, name_hash) = parse_drec_name(key, hashed)?;
+        let (file_id, date_added, flags) = parse_drec_value(value)?;
+        let xfields = value.get(J_DREC_VAL_SIZE..).unwrap_or(&[]).to_vec();
         Ok(Self {
             name,
             file_id,
@@ -232,12 +236,13 @@ impl<'a> Directory<'a> {
     /// Propagates catalog-walk and parsing errors.
     pub fn entries<T: Read + Seek>(&self, reader: &mut T) -> Result<Vec<DirEntry>> {
         let mut entries = Vec::new();
-        for record in self.catalog.records_for(reader, self.dir_id)? {
-            if record.key_header.kind != JObjType::DirRec {
-                continue;
-            }
-            entries.push(DirEntry::from_record(&record, self.cmp.hashed)?);
-        }
+        self.catalog
+            .visit_records_for(reader, self.dir_id, |header, key, value| {
+                if header.kind == JObjType::DirRec {
+                    entries.push(DirEntry::from_parts(key, value, self.cmp.hashed)?);
+                }
+                Ok(())
+            })?;
         Ok(entries)
     }
 

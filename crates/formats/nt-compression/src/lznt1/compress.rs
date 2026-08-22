@@ -4,8 +4,6 @@
 //! a chunk-local hash chain, and encodes with LZNT1's position-dependent
 //! variable-width match format.
 
-use alloc::vec;
-
 use crate::{Error, Result};
 
 use super::{CHUNK_SIGNATURE, CHUNK_SIZE, bit_widths};
@@ -31,6 +29,7 @@ pub fn compress_bound(input_len: usize) -> usize {
 pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
     let mut in_pos = 0;
     let mut out_pos = 0;
+    let mut compressed = [0u8; CHUNK_SIZE];
 
     while in_pos < input.len() {
         let chunk_end = (in_pos + CHUNK_SIZE).min(input.len());
@@ -38,8 +37,7 @@ pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
 
         // Try to compress the chunk.
         // Worst case for compressed data: same size as uncompressed.
-        let mut compressed = vec![0u8; chunk_data.len()];
-        match compress_chunk(chunk_data, &mut compressed) {
+        match compress_chunk(chunk_data, &mut compressed[..chunk_data.len()]) {
             Some(compressed_len) if compressed_len < chunk_data.len() => {
                 write_chunk_header(output, &mut out_pos, compressed_len, true)?;
                 write_bytes(output, &mut out_pos, &compressed[..compressed_len])?;

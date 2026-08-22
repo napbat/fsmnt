@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use fs_exfat::{
-    ExFat, ExFatDirItem, ExFatEntrySet, ExFatError, ExFatFileAttributes, ExFatTimestamp,
+    ExFat, ExFatDirItem, ExFatEntrySet, ExFatError, ExFatFile, ExFatFileAttributes, ExFatTimestamp,
 };
 use fsmnt_core::{
     FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, TargetFilesystem, normalize_path,
@@ -22,7 +22,7 @@ use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::FsReadSeek;
 use tracing::debug;
 
-use crate::adapter::{found, read_at_through, read_up_to};
+use crate::adapter::{PathCache, found, read_at_through, read_up_to};
 use crate::boot_backup;
 use crate::identity;
 
@@ -68,6 +68,8 @@ pub struct ExFatFilesystem<T: Read + Seek> {
     exfat: ExFat,
     /// How the volume was opened, when that departed from the normal path.
     notices: Vec<String>,
+    /// Most recently opened data stream, including its resolved FAT chain.
+    files: PathCache<ExFatFile>,
 }
 
 impl<T: Read + Seek> ExFatFilesystem<T> {
@@ -98,6 +100,7 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
             reader,
             exfat,
             notices: Vec::new(),
+            files: PathCache::new(),
         })
     }
 
@@ -133,26 +136,41 @@ impl<T: Read + Seek> ExFatFilesystem<T> {
             Some(_) => Err(FsError::NotADirectory(path.to_string())),
         }
     }
-}
 
-impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
-    fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
+    /// Opens `path` as the bounded active file handle.
+    fn cache_file(&mut self, path: &str) -> FsResult<()> {
+        if self.files.get(path).is_some() {
+            return Ok(());
+        }
         let Some(entry) = self.entry_at(path)? else {
             return Err(FsError::NotAFile(path.to_string()));
         };
         if entry.is_directory() {
             return Err(FsError::NotAFile(path.to_string()));
         }
-
-        let length = entry.data_length();
-        let mut file = fs_exfat::ExFatFile::new(
+        let file = ExFatFile::new(
             &self.exfat,
             &mut self.reader,
             entry.first_cluster(),
-            length,
+            entry.data_length(),
             entry.no_fat_chain(),
         )
         .map_err(|e| map_exfat_error(e, path))?;
+        self.files.insert(path, file);
+        Ok(())
+    }
+}
+
+impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
+    fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
+        self.cache_file(path)?;
+        let file = self
+            .files
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("exFAT file cache was not populated".to_string()))?;
+        let length = file.len();
+        file.seek(&mut self.reader, std::io::SeekFrom::Start(0))
+            .map_err(|e| map_exfat_error(e, path))?;
 
         read_up_to(length, |buffer| {
             file.read(&mut self.reader, buffer)
@@ -161,21 +179,12 @@ impl<T: Read + Seek + Send> TargetFilesystem for ExFatFilesystem<T> {
     }
 
     fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let Some(entry) = self.entry_at(path)? else {
-            return Err(FsError::NotAFile(path.to_string()));
-        };
-        if entry.is_directory() {
-            return Err(FsError::NotAFile(path.to_string()));
-        }
-        let mut file = fs_exfat::ExFatFile::new(
-            &self.exfat,
-            &mut self.reader,
-            entry.first_cluster(),
-            entry.data_length(),
-            entry.no_fat_chain(),
-        )
-        .map_err(|e| map_exfat_error(e, path))?;
-        read_at_through(&mut file, &mut self.reader, offset, buffer, |e| {
+        self.cache_file(path)?;
+        let file = self
+            .files
+            .get_mut(path)
+            .ok_or_else(|| FsError::Filesystem("exFAT file cache was not populated".to_string()))?;
+        read_at_through(file, &mut self.reader, offset, buffer, |e| {
             map_exfat_error(e, path)
         })
     }
@@ -305,6 +314,7 @@ impl FilesystemDriver for ExFatDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fsmnt_testkit::CountingReader;
     use std::io::Cursor;
 
     #[test]
@@ -417,6 +427,29 @@ mod tests {
     fn reads_a_file_in_the_root() {
         let mut fs = open_image();
         assert_eq!(fs.read("/hello.txt").expect("read"), image::HELLO_TEXT);
+    }
+
+    #[test]
+    fn adjacent_positioned_reads_reuse_the_open_file_and_chain() {
+        let reader = CountingReader::new(Cursor::new(image::build()));
+        let mut fs = ExFatFilesystem::new(reader).expect("synthetic exFAT volume must open");
+        fs.reader.reset_stats();
+
+        let mut first = [0u8; 5];
+        fs.read_at("/hello.txt", 0, &mut first).expect("first read");
+        let opening = fs.reader.stats();
+
+        fs.reader.reset_stats();
+        let mut second = [0u8; 5];
+        fs.read_at("/hello.txt", 5, &mut second)
+            .expect("cached read");
+        let cached = fs.reader.stats();
+
+        assert_eq!(&first, b"Hello");
+        assert_eq!(&second, b", exF");
+        assert!(opening.read_calls() > cached.read_calls());
+        assert_eq!(cached.read_calls(), 1, "only the requested data is read");
+        assert_eq!(cached.seek_calls(), 1, "only the data seek remains");
     }
 
     #[test]

@@ -126,12 +126,12 @@ impl File {
         size: u64,
     ) -> Result<Self> {
         let mut extents = Vec::new();
-        for record in catalog.records_for(reader, obj_id)? {
-            if record.key_header.kind != JObjType::FileExtent {
-                continue;
+        catalog.visit_records_for(reader, obj_id, |header, key, value| {
+            if header.kind == JObjType::FileExtent {
+                extents.push(parse_file_extent(key, value)?);
             }
-            extents.push(parse_file_extent(&record.key, &record.value)?);
-        }
+            Ok(())
+        })?;
         extents.sort_by_key(|extent| extent.logical_addr);
         Ok(Self { size, extents })
     }

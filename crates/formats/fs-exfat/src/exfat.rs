@@ -548,7 +548,7 @@ impl ExFat {
     ///
     /// Returns any path-resolution error from [`ExFat::open`], an I/O
     /// error while resolving a FAT chain, or an invalid-chain error.
-    pub fn open_file<T>(&self, fs: &mut T, path: &str) -> Result<crate::file::ExFatFile<'_>>
+    pub fn open_file<T>(&self, fs: &mut T, path: &str) -> Result<crate::file::ExFatFile>
     where
         T: Read + Seek,
     {

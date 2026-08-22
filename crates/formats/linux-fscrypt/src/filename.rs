@@ -155,16 +155,13 @@ impl FilenameCipher {
         let iv = self.iv.xts_tweak(0);
         match &self.inner {
             FilenameCipherInner::AesCts256(k) => {
-                let pt = cts::decrypt_cs3::<Aes256>(&**k, &iv, on_disk)?;
-                out.extend_from_slice(&pt);
+                cts::decrypt_cs3_into::<Aes256>(&**k, &iv, on_disk, out)?;
             }
             FilenameCipherInner::AesCts128(k) => {
-                let pt = cts::decrypt_cs3::<Aes128>(&**k, &iv, on_disk)?;
-                out.extend_from_slice(&pt);
+                cts::decrypt_cs3_into::<Aes128>(&**k, &iv, on_disk, out)?;
             }
             FilenameCipherInner::Sm4Cts(k) => {
-                let pt = cts::decrypt_cs3::<Sm4>(&**k, &iv, on_disk)?;
-                out.extend_from_slice(&pt);
+                cts::decrypt_cs3_into::<Sm4>(&**k, &iv, on_disk, out)?;
             }
             FilenameCipherInner::Adiantum(cipher) => {
                 out.extend_from_slice(on_disk);
@@ -354,5 +351,33 @@ mod tests {
         let ct = hex(REFERENCE_NAME_CT_HEX);
         let pt = decrypt_name(&key, &ct).unwrap();
         assert_eq!(pt.as_slice(), b"hello.txt");
+    }
+
+    #[test]
+    fn decrypt_name_into_reuses_the_callers_allocation() {
+        use crate::types::{FSCRYPT_MODE_AES_256_CTS, FscryptKeyIdentifier};
+
+        let policy = FscryptPolicy {
+            kind: FscryptPolicyKind::V2,
+            contents_mode: crate::types::FSCRYPT_MODE_AES_256_XTS,
+            filenames_mode: FSCRYPT_MODE_AES_256_CTS,
+            flags: 0x02,
+            log2_data_unit_size: 0,
+            key_descriptor: None,
+            key_identifier: Some(FscryptKeyIdentifier([0u8; 16])),
+            nonce: [0u8; 16],
+        };
+        let cipher =
+            FilenameCipher::new(&policy, &[0u8; 32], IvDerivation::PerFileBlockIndex).unwrap();
+        let ciphertext = hex(REFERENCE_NAME_CT_HEX);
+        let mut plaintext = alloc::vec::Vec::with_capacity(ciphertext.len());
+        let allocation = plaintext.as_ptr();
+
+        cipher
+            .decrypt_name_into(&ciphertext, &mut plaintext)
+            .unwrap();
+
+        assert_eq!(plaintext.as_slice(), b"hello.txt");
+        assert_eq!(plaintext.as_ptr(), allocation);
     }
 }

@@ -11,7 +11,7 @@ use fsmnt_device::{DetectedBootSector, DeviceReader, FilesystemDriver};
 use fsmnt_parser_core::io::{Read, Seek};
 use tracing::debug;
 
-use crate::adapter::{found, found_and};
+use crate::adapter::{PathCache, found, found_and};
 use crate::identity;
 
 /// Map a parser error onto the mount abstraction's semantic error variants.
@@ -64,6 +64,7 @@ fn entry_flags(inode: &Qnx6Inode) -> FsEntryFlags {
 pub struct Qnx6Filesystem<R: Read + Seek> {
     volume: Qnx6<R>,
     notices: Vec<String>,
+    resolved: PathCache<Qnx6Inode>,
 }
 
 impl<R: Read + Seek> Qnx6Filesystem<R> {
@@ -96,7 +97,11 @@ impl<R: Read + Seek> Qnx6Filesystem<R> {
             volume_id = %identity::uuid(volume.superblock().volume_id()),
             "opened a QNX6 Power-Safe volume"
         );
-        Ok(Self { volume, notices })
+        Ok(Self {
+            volume,
+            notices,
+            resolved: PathCache::new(),
+        })
     }
 
     /// Access the underlying format parser.
@@ -106,10 +111,16 @@ impl<R: Read + Seek> Qnx6Filesystem<R> {
     }
 
     fn resolve(&mut self, path: &str) -> FsResult<Qnx6Inode> {
+        if let Some(inode) = self.resolved.get(path) {
+            return Ok(inode.clone());
+        }
         let normalized = normalize_path(path);
-        self.volume
+        let inode = self
+            .volume
             .resolve_path(normalized.as_bytes())
-            .map_err(|error| map_qnx6_error(error, path))
+            .map_err(|error| map_qnx6_error(error, path))?;
+        self.resolved.insert(path, inode.clone());
+        Ok(inode)
     }
 }
 

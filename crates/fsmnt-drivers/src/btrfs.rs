@@ -17,6 +17,7 @@ use fsmnt_device::{
 };
 use tracing::debug;
 
+use crate::adapter::PathCache;
 use crate::identity;
 
 fn map_btrfs_error(error: BtrfsError, path: &str) -> FsError {
@@ -199,6 +200,7 @@ fn entry_flags(file_type: BtrfsFileType, inode: &BtrfsInode) -> FsEntryFlags {
 pub struct BtrfsFilesystem<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> {
     volume: Btrfs<R>,
     root: BtrfsEntry,
+    resolved: PathCache<BtrfsEntry>,
 }
 
 impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
@@ -315,6 +317,7 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
         Ok(Self {
             volume,
             root: entry,
+            resolved: PathCache::new(),
         })
     }
 
@@ -331,13 +334,19 @@ impl<R: fs_btrfs::io::Read + fs_btrfs::io::Seek> BtrfsFilesystem<R> {
     }
 
     fn resolve(&mut self, path: &str) -> FsResult<BtrfsEntry> {
+        if let Some(entry) = self.resolved.get(path) {
+            return Ok(*entry);
+        }
         let components = canonicalise_btrfs_path(path);
-        self.volume
+        let entry = self
+            .volume
             .resolve_path_from(
                 self.root,
                 components.iter().map(|component| component.as_bytes()),
             )
-            .map_err(|error| map_btrfs_error(error, path))
+            .map_err(|error| map_btrfs_error(error, path))?;
+        self.resolved.insert(path, entry);
+        Ok(entry)
     }
 
     fn directory_entry(

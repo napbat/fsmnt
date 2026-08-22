@@ -32,7 +32,7 @@ use fsmnt_parser_core::io::FsReadSeek;
 use fsmnt_parser_core::traverse::EntryKind;
 use tracing::debug;
 
-use crate::adapter::{found, read_at_through, read_up_to};
+use crate::adapter::{PathCache, found, read_at_through, read_up_to};
 use crate::identity;
 
 /// Root inode number for ext2/ext3/ext4.
@@ -56,9 +56,12 @@ pub struct ExtFilesystem<R: Read + Seek + Send> {
     /// How the volume was opened, when that departed from a plain open —
     /// reported through [`TargetFilesystem::notices`].
     notices: Vec<String>,
+    /// Most recently resolved path, bounded to the active mount stream.
+    resolved: PathCache<Target>,
 }
 
 /// What a path names inside the mounted volume.
+#[derive(Clone, Copy)]
 enum Target {
     /// The mount root, which salvage mode treats specially.
     Root,
@@ -73,10 +76,10 @@ enum Target {
 impl Target {
     /// The inode backing this target, or `None` for the synthetic salvage
     /// directory.
-    const fn inode(&self) -> Option<u32> {
+    const fn inode(self) -> Option<u32> {
         match self {
             Self::Root => Some(EXT4_ROOT_INO),
-            Self::Inode(inum) => Some(*inum),
+            Self::Inode(inum) => Some(inum),
             Self::SalvageRoot => None,
         }
     }
@@ -363,6 +366,7 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
             salvage: false,
             salvaged: None,
             notices,
+            resolved: PathCache::new(),
         })
     }
 
@@ -508,19 +512,27 @@ impl<R: Read + Seek + Send> ExtFilesystem<R> {
     /// is then walked normally — which is what makes a surviving directory
     /// browsable under its real names.
     fn resolve(&mut self, path: &str) -> FsResult<Target> {
+        if let Some(target) = self.resolved.get(path) {
+            return Ok(*target);
+        }
         let stack = canonicalise_ext_path(path);
         let Some((first, rest)) = stack.split_first() else {
+            self.resolved.insert(path, Target::Root);
             return Ok(Target::Root);
         };
-        if self.salvage && *first == salvage::SALVAGE_DIR {
+        let target = if self.salvage && *first == salvage::SALVAGE_DIR {
             let Some((entry, below)) = rest.split_first() else {
+                self.resolved.insert(path, Target::SalvageRoot);
                 return Ok(Target::SalvageRoot);
             };
             let inum =
                 salvage::name_inode(entry).ok_or_else(|| FsError::NotFound(path.to_string()))?;
-            return self.walk(inum, below, path).map(Target::Inode);
-        }
-        self.walk(EXT4_ROOT_INO, &stack, path).map(Target::Inode)
+            Target::Inode(self.walk(inum, below, path)?)
+        } else {
+            Target::Inode(self.walk(EXT4_ROOT_INO, &stack, path)?)
+        };
+        self.resolved.insert(path, target);
+        Ok(target)
     }
 
     /// Walk `components` down from the directory inode `start`.

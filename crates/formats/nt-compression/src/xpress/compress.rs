@@ -16,83 +16,164 @@ pub fn compress_bound(input_len: usize) -> usize {
 
 /// Compress `input` using XPRESS Plain LZ77.
 ///
+/// This convenience function creates a fresh [`Compressor`]. Call
+/// [`Compressor::compress`] when compressing multiple buffers to reuse the
+/// match finder's working memory.
+///
 /// Returns the number of bytes written to `output`.
 ///
 /// # Errors
 ///
 /// Returns an error when `output` is too small for the encoded stream.
 pub fn compress(input: &[u8], output: &mut [u8]) -> Result<usize> {
-    if input.is_empty() {
-        return Ok(0);
-    }
-
-    let mut finder = MatchFinder::standard(8192, 65535, 32);
-    let tokens = finder.tokenize(input);
-
-    encode_tokens(&tokens, output)
+    Compressor::new().compress(input, output)
 }
 
-/// Encode LZ77 tokens into XPRESS format.
+/// Reusable XPRESS compressor.
 ///
-/// Writes directly to `output` so that nibble sharing state carries
-/// across 32-item flag DWORD groups (matching the decompressor).
-fn encode_tokens(tokens: &[Token], output: &mut [u8]) -> Result<usize> {
-    let mut out_pos = 0;
-    // Nibble position in the output buffer; carries across groups.
-    let mut nibble_pos: Option<usize> = None;
+/// The hash-chain tables are allocated once and reset between calls. Tokens
+/// are encoded as the matcher emits them, so compression does not allocate a
+/// token vector proportional to the input length.
+pub struct Compressor {
+    finder: MatchFinder,
+}
 
-    for group in tokens.chunks(32) {
-        let mut flags: u32 = 0;
-
-        // Reserve 4 bytes for the flag DWORD; fill payload after.
-        let flag_pos = out_pos;
-        if out_pos + 4 > output.len() {
-            return Err(Error::OutputTooSmall {
-                expected: out_pos + 4,
-                actual: output.len(),
-            });
+impl Compressor {
+    /// Create a compressor with pre-allocated match-finder tables.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            finder: MatchFinder::standard(8192, 65535, 32),
         }
-        out_pos += 4;
+    }
 
-        for (i, token) in group.iter().enumerate() {
-            match token {
-                Token::Literal(b) => {
-                    if out_pos >= output.len() {
-                        return Err(Error::OutputTooSmall {
-                            expected: out_pos + 1,
-                            actual: output.len(),
-                        });
-                    }
-                    output[out_pos] = *b;
-                    out_pos += 1;
+    /// Compress `input` into `output`, reusing this compressor's working
+    /// memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `output` is too small for the encoded stream.
+    pub fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize> {
+        if input.is_empty() {
+            return Ok(0);
+        }
+
+        self.finder.reset();
+        let mut encoder = TokenEncoder::new(output);
+        self.finder
+            .tokenize_streaming(input, |token| encoder.push(token));
+        encoder.finish()
+    }
+}
+
+impl Default for Compressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Streaming XPRESS token encoder.
+struct TokenEncoder<'o> {
+    output: &'o mut [u8],
+    out_pos: usize,
+    // Nibble position in the output buffer; carries across groups.
+    nibble_pos: Option<usize>,
+    flag_pos: usize,
+    flags: u32,
+    group_len: usize,
+    error: Option<Error>,
+}
+
+impl<'o> TokenEncoder<'o> {
+    fn new(output: &'o mut [u8]) -> Self {
+        Self {
+            output,
+            out_pos: 0,
+            nibble_pos: None,
+            flag_pos: 0,
+            flags: 0,
+            group_len: 0,
+            error: None,
+        }
+    }
+
+    fn push(&mut self, token: Token) {
+        if self.error.is_some() {
+            return;
+        }
+        if let Err(error) = self.push_inner(token) {
+            self.error = Some(error);
+        }
+    }
+
+    fn push_inner(&mut self, token: Token) -> Result<()> {
+        if self.group_len == 0 {
+            // Reserve 4 bytes for the flag DWORD; fill payload after.
+            self.flag_pos = self.out_pos;
+            if self.out_pos + 4 > self.output.len() {
+                return Err(Error::OutputTooSmall {
+                    expected: self.out_pos + 4,
+                    actual: self.output.len(),
+                });
+            }
+            self.out_pos += 4;
+            self.flags = 0;
+        }
+
+        match token {
+            Token::Literal(b) => {
+                if self.out_pos >= self.output.len() {
+                    return Err(Error::OutputTooSmall {
+                        expected: self.out_pos + 1,
+                        actual: self.output.len(),
+                    });
                 }
-                Token::Match(m) => {
-                    flags |= 1 << (31 - i);
-                    out_pos = encode_match(
-                        output,
-                        out_pos,
-                        &mut nibble_pos,
-                        m.offset as usize,
-                        m.length as usize,
-                    )?;
-                }
+                self.output[self.out_pos] = b;
+                self.out_pos += 1;
+            }
+            Token::Match(m) => {
+                self.flags |= 1 << (31 - self.group_len);
+                self.out_pos = encode_match(
+                    self.output,
+                    self.out_pos,
+                    &mut self.nibble_pos,
+                    m.offset as usize,
+                    m.length as usize,
+                )?;
             }
         }
 
+        self.group_len += 1;
+        if self.group_len == 32 {
+            self.finish_group();
+        }
+        Ok(())
+    }
+
+    fn finish_group(&mut self) {
         // Mark unused slots as match (bit=1) so decompressors that
         // read all 32 items hit the "output full → break" path for
         // matches rather than trying to read non-existent literal
         // bytes from the stream.
-        for i in group.len()..32 {
-            flags |= 1 << (31 - i);
+        for i in self.group_len..32 {
+            self.flags |= 1 << (31 - i);
         }
 
         // Backfill the flag DWORD.
-        let flag_bytes = flags.to_le_bytes();
-        output[flag_pos..flag_pos + 4].copy_from_slice(&flag_bytes);
+        let flag_bytes = self.flags.to_le_bytes();
+        self.output[self.flag_pos..self.flag_pos + 4].copy_from_slice(&flag_bytes);
+        self.group_len = 0;
     }
 
-    Ok(out_pos)
+    fn finish(mut self) -> Result<usize> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        if self.group_len != 0 {
+            self.finish_group();
+        }
+        Ok(self.out_pos)
+    }
 }
 
 /// Write a single byte to output, returning the updated position.
