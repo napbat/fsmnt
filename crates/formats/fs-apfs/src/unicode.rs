@@ -18,6 +18,7 @@
 //! apfs-fuse `ApfsLib/Util.cpp` (`HashFilename`), `ApfsLib/Crc32.cpp`.
 
 use alloc::vec::Vec;
+use core::char::ToLowercase;
 
 use unicode_normalization::UnicodeNormalization;
 
@@ -31,8 +32,7 @@ const CRC32C_POLY: u32 = 0x82F6_3B78;
 ///
 /// Reflected, initialized to `0xFFFFFFFF`, with **no** final XOR — APFS
 /// uses the raw register value (apfs-fuse `Crc32::GetCRC`).
-fn crc32c(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
+fn crc32c_update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
         crc ^= u32::from(byte);
         for _ in 0..8 {
@@ -46,6 +46,51 @@ fn crc32c(data: &[u8]) -> u32 {
     crc
 }
 
+#[cfg(test)]
+fn crc32c(data: &[u8]) -> u32 {
+    crc32c_update(0xFFFF_FFFF, data)
+}
+
+/// Streaming normalization and optional case folding.
+struct NormalizedChars<I> {
+    chars: I,
+    lowercase: Option<ToLowercase>,
+    case_fold: bool,
+}
+
+impl<I> Iterator for NormalizedChars<I>
+where
+    I: Iterator<Item = char>,
+{
+    type Item = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(lowercase) = &mut self.lowercase {
+                if let Some(ch) = lowercase.next() {
+                    return Some(ch);
+                }
+                self.lowercase = None;
+            }
+
+            let ch = self.chars.next()?;
+            if self.case_fold {
+                self.lowercase = Some(ch.to_lowercase());
+            } else {
+                return Some(ch);
+            }
+        }
+    }
+}
+
+fn normalized_chars(name: &str, case_fold: bool) -> impl Iterator<Item = char> + '_ {
+    NormalizedChars {
+        chars: name.nfd(),
+        lowercase: None,
+        case_fold,
+    }
+}
+
 /// Normalizes `name` to NFD and, when `case_fold` is set, case-folds it,
 /// returning the resulting code-point sequence.
 ///
@@ -54,15 +99,13 @@ fn crc32c(data: &[u8]) -> u32 {
 /// always agree.
 #[must_use]
 pub fn normalize_fold(name: &str, case_fold: bool) -> Vec<char> {
-    let mut out = Vec::new();
-    for ch in name.nfd() {
-        if case_fold {
-            out.extend(ch.to_lowercase());
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    normalized_chars(name, case_fold).collect()
+}
+
+/// Compares two APFS names without materializing their normalized forms.
+#[must_use]
+pub(crate) fn names_equal(left: &str, right: &str, case_fold: bool) -> bool {
+    normalized_chars(left, case_fold).eq(normalized_chars(right, case_fold))
 }
 
 /// Computes the `name_len_and_hash` field of a `j_drec_hashed_key_t` for
@@ -73,13 +116,12 @@ pub fn normalize_fold(name: &str, case_fold: bool) -> Vec<char> {
 /// ten bits (apfs-fuse `Util.cpp:277`).
 #[must_use]
 pub fn name_hash(name: &str, case_fold: bool) -> u32 {
-    let normalized = normalize_fold(name, case_fold);
     // The CRC runs over the code points as little-endian 32-bit values.
-    let mut bytes = Vec::with_capacity(normalized.len() * 4);
-    for ch in normalized {
-        bytes.extend_from_slice(&(ch as u32).to_le_bytes());
+    let mut crc = 0xFFFF_FFFF;
+    for ch in normalized_chars(name, case_fold) {
+        crc = crc32c_update(crc, &u32::from(ch).to_le_bytes());
     }
-    let hash = crc32c(&bytes) & 0x003F_FFFF;
+    let hash = crc & 0x003F_FFFF;
     // The stored name length includes the trailing NUL.
     let masked_len = name.len() & usize::try_from(J_DREC_LEN_MASK).unwrap_or(usize::MAX);
     let name_len = u32::try_from(masked_len)
@@ -125,6 +167,13 @@ mod tests {
     fn normalize_fold_decomposes_a_precomposed_accent() {
         // U+00E9 (é) decomposes to 'e' + U+0301 (combining acute accent).
         assert_eq!(normalize_fold("\u{00E9}", false), vec!['e', '\u{0301}']);
+    }
+
+    #[test]
+    fn streaming_comparison_normalizes_and_folds_without_changing_semantics() {
+        assert!(names_equal("caf\u{00E9}", "cafe\u{0301}", false));
+        assert!(names_equal("ReadMe", "readme", true));
+        assert!(!names_equal("ReadMe", "readme", false));
     }
 
     #[test]

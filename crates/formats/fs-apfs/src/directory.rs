@@ -120,6 +120,12 @@ impl DirEntry {
 /// `hashed` selects between `j_drec_hashed_key_t` (a 4-byte
 /// `name_len_and_hash`) and the legacy `j_drec_key_t` (a 2-byte `name_len`).
 fn parse_drec_name(key: &[u8], hashed: bool) -> Result<(String, Option<u32>)> {
+    let (name, hash) = parse_drec_name_bytes(key, hashed)?;
+    Ok((String::from_utf8_lossy(name).into_owned(), hash))
+}
+
+/// Borrows the name bytes (and hash, if present) from a `DIR_REC` key.
+fn parse_drec_name_bytes(key: &[u8], hashed: bool) -> Result<(&[u8], Option<u32>)> {
     let malformed = || ApfsError::Malformed {
         structure: "j_drec_key_t",
         reason: "name extends past the record key",
@@ -142,7 +148,7 @@ fn parse_drec_name(key: &[u8], hashed: bool) -> Result<(String, Option<u32>)> {
     let without_nul = raw
         .split_last()
         .map_or(raw, |(&last, head)| if last == 0 { head } else { raw });
-    Ok((String::from_utf8_lossy(without_nul).into_owned(), hash))
+    Ok((without_nul, hash))
 }
 
 /// Parses `file_id`, `date_added`, and `flags` from a `j_drec_val_t` value.
@@ -251,42 +257,78 @@ impl<'a> Directory<'a> {
     /// On a case-sensitive, normalization-sensitive volume the match is
     /// exact byte-for-byte. On a hashed volume the query is normalized
     /// (NFD) and, when the volume is case-insensitive, case-folded; the
-    /// precomputed entry hash narrows the candidates so most lookups
-    /// normalize only one stored name. A name whose Apple-computed hash
-    /// diverges from this crate's case-folding is still found by a
-    /// hash-blind fallback comparison.
+    /// precomputed entry hash narrows the candidates so most lookups compare
+    /// only one stored name. The catalog walk stops at the matching record
+    /// and does not materialize unrelated directory entries. A name whose
+    /// Apple-computed hash diverges from this crate's case-folding is still
+    /// found by a second, hash-blind streaming comparison.
     ///
     /// # Errors
     ///
     /// Propagates catalog-walk and parsing errors.
     pub fn lookup<T: Read + Seek>(&self, reader: &mut T, name: &str) -> Result<Option<DirEntry>> {
-        let entries = self.entries(reader)?;
         if !self.cmp.hashed {
-            return Ok(entries.into_iter().find(|entry| entry.name == name));
+            let mut found = None;
+            self.catalog
+                .any_record_for(reader, self.dir_id, |header, key, value| {
+                    if header.kind != JObjType::DirRec {
+                        return Ok(false);
+                    }
+                    let (stored_name, _) = parse_drec_name_bytes(key, false)?;
+                    if String::from_utf8_lossy(stored_name).as_ref() != name {
+                        return Ok(false);
+                    }
+                    found = Some(DirEntry::from_parts(key, value, false)?);
+                    Ok(true)
+                })?;
+            return Ok(found);
         }
+
         let fold = self.cmp.case_insensitive;
-        let want = crate::unicode::normalize_fold(name, fold);
         let target_hash = extract_target_hash(crate::unicode::name_hash(name, fold));
-        // Fast path: only an entry whose stored hash matches needs the
-        // costlier normalize-and-compare.
-        for entry in &entries {
-            if entry.name_hash == Some(target_hash)
-                && crate::unicode::normalize_fold(&entry.name, fold) == want
-            {
-                return Ok(Some(entry.clone()));
-            }
+        let mut found = None;
+        self.catalog
+            .any_record_for(reader, self.dir_id, |header, key, value| {
+                if header.kind != JObjType::DirRec {
+                    return Ok(false);
+                }
+                let (stored_name, stored_hash) = parse_drec_name_bytes(key, true)?;
+                if stored_hash != Some(target_hash) {
+                    return Ok(false);
+                }
+                let stored_name = String::from_utf8_lossy(stored_name);
+                if !crate::unicode::names_equal(stored_name.as_ref(), name, fold) {
+                    return Ok(false);
+                }
+                found = Some(DirEntry::from_parts(key, value, true)?);
+                Ok(true)
+            })?;
+        if found.is_some() {
+            return Ok(found);
         }
+
         // Fallback: a name with a code point this crate folds differently
         // than Apple has a mismatching hash; find it by a hash-blind
-        // comparison rather than missing it silently.
-        for entry in entries {
-            if entry.name_hash != Some(target_hash)
-                && crate::unicode::normalize_fold(&entry.name, fold) == want
-            {
-                return Ok(Some(entry));
-            }
-        }
-        Ok(None)
+        // comparison rather than missing it silently. The uncommon fallback
+        // deliberately performs a second bounded tree walk so the common
+        // hash-hit path never normalizes unrelated names.
+        self.catalog
+            .any_record_for(reader, self.dir_id, |header, key, value| {
+                if header.kind != JObjType::DirRec {
+                    return Ok(false);
+                }
+                let (stored_name, stored_hash) = parse_drec_name_bytes(key, true)?;
+                if stored_hash == Some(target_hash) {
+                    return Ok(false);
+                }
+                let stored_name = String::from_utf8_lossy(stored_name);
+                if !crate::unicode::names_equal(stored_name.as_ref(), name, fold) {
+                    return Ok(false);
+                }
+                found = Some(DirEntry::from_parts(key, value, true)?);
+                Ok(true)
+            })?;
+        Ok(found)
     }
 }
 
@@ -518,6 +560,17 @@ mod tests {
         let found = dir.lookup(&mut reader, "notes.txt").unwrap().unwrap();
         assert_eq!(found.file_id, 21);
         assert!(dir.lookup(&mut reader, "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn lookup_stops_before_parsing_unrelated_later_entries() {
+        let (catalog, mut reader) = catalog_of(&[
+            (drec_key(2, "target"), drec_value(21, 8)),
+            (drec_key(2, "corrupt"), vec![0; J_DREC_VAL_SIZE - 1]),
+        ]);
+        let dir = Directory::new(&catalog, 2, FOLDING);
+        let found = dir.lookup(&mut reader, "target").unwrap().unwrap();
+        assert_eq!(found.file_id, 21);
     }
 
     #[test]

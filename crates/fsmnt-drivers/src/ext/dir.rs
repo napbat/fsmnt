@@ -91,7 +91,8 @@ pub(super) fn list<R: Read + Seek>(
 
     let mut entries = Vec::with_capacity(raw.len());
     for (name_bytes, entry_inum, file_type) in raw {
-        let name = String::from_utf8_lossy(&name_bytes).into_owned();
+        let name = String::from_utf8(name_bytes)
+            .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned());
         let (metadata, flags) = describe(ext, reader, entry_inum, file_type);
 
         entries.push(FsEntry {
