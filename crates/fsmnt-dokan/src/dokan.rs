@@ -35,6 +35,8 @@ use windows_sys::Win32::{
     },
 };
 
+use crate::cache::{CachedMetadata, MetadataCache};
+
 /// Signal flag set by the console control handler to request unmount.
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -323,7 +325,7 @@ fn drive_letter_root(mountpoint: &str) -> Option<String> {
 struct FileHandle {
     path: Box<str>,
     file_info: FileInfo,
-    target: Mutex<OpenedTarget>,
+    target: Mutex<Option<OpenedTarget>>,
 }
 
 impl FileHandle {
@@ -336,6 +338,7 @@ impl FileHandle {
 /// multi-threaded callbacks can safely access it.
 struct DokanFs {
     fs: Mutex<Box<dyn TargetFilesystem>>,
+    metadata: Mutex<MetadataCache>,
     filesystem_name: Box<str>,
     volume_name: Box<str>,
     total_bytes: u64,
@@ -363,6 +366,7 @@ impl DokanFs {
 
         Self {
             fs: Mutex::new(fs),
+            metadata: Mutex::new(MetadataCache::new()),
             filesystem_name,
             volume_name,
             total_bytes,
@@ -370,26 +374,72 @@ impl DokanFs {
         }
     }
 
-    /// Resolve `path` once and retain its parser state for the lifetime of the
-    /// Dokan handle.
+    /// Open `path`, reusing metadata learned from a directory listing when
+    /// possible and deferring parser state until an operation needs it.
     fn open_path(&self, path: Box<str>) -> OperationResult<CreateFileInfo<FileHandle>> {
-        let target = {
-            let mut fs = self.fs.lock().unwrap();
-            fs.open(&path)
-                .map_err(|error| open_error_status(&path, error))?
-        };
-        let is_dir = target.is_directory();
-        let file_info = meta_to_file_info(target.metadata());
+        match self.metadata.lock().unwrap().get(&path) {
+            Some(CachedMetadata::Found(metadata)) => {
+                return Ok(create_file_info(path, &metadata, None));
+            }
+            Some(CachedMetadata::Missing) => return Err(STATUS_OBJECT_NAME_NOT_FOUND),
+            None => {}
+        }
 
-        Ok(CreateFileInfo {
-            context: FileHandle {
-                path,
-                file_info,
-                target: Mutex::new(target),
-            },
-            is_dir,
-            new_file_created: false,
-        })
+        let target = self.resolve_target(&path)?;
+        let metadata = target.metadata().clone();
+        Ok(create_file_info(path, &metadata, Some(target)))
+    }
+
+    /// Resolve a target through the parser and record the immutable result.
+    fn resolve_target(&self, path: &str) -> OperationResult<OpenedTarget> {
+        let result = {
+            let mut fs = self.fs.lock().unwrap();
+            fs.open(path)
+        };
+        match result {
+            Ok(target) => {
+                self.metadata
+                    .lock()
+                    .unwrap()
+                    .insert_found(path, target.metadata().clone());
+                Ok(target)
+            }
+            Err(error) => {
+                if matches!(&error, FsError::NotFound(_)) {
+                    self.metadata.lock().unwrap().insert_missing(path);
+                }
+                Err(open_error_status(path, error))
+            }
+        }
+    }
+
+    /// Materialize parser state for a handle created from cached metadata.
+    fn ensure_target<'target>(
+        &self,
+        path: &str,
+        target: &'target mut Option<OpenedTarget>,
+    ) -> OperationResult<&'target mut OpenedTarget> {
+        if target.is_none() {
+            *target = Some(self.resolve_target(path)?);
+        }
+        target.as_mut().ok_or(STATUS_UNSUCCESSFUL)
+    }
+
+    /// Seed child metadata from the listing that already supplied it.
+    fn cache_directory_entries<'a>(
+        &self,
+        parent: &str,
+        entries: impl IntoIterator<Item = &'a fsmnt_core::FsEntry>,
+    ) {
+        let mut cache = self.metadata.lock().unwrap();
+        for entry in entries {
+            let path = if parent.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{parent}/{}", entry.name)
+            };
+            cache.insert_found(&path, entry.metadata.clone());
+        }
     }
 
     /// Enumerate the listing cached on an open directory directly into
@@ -400,7 +450,8 @@ impl DokanFs {
         filler: &mut DirectoryFiller<'_>,
     ) -> OperationResult<()> {
         let mut target = context.target.lock().unwrap();
-        let OpenedTarget::Directory(directory) = &mut *target else {
+        let OpenedTarget::Directory(directory) = self.ensure_target(&context.path, &mut target)?
+        else {
             return Err(STATUS_UNSUCCESSFUL);
         };
         let mut fs = self.fs.lock().unwrap();
@@ -414,7 +465,9 @@ impl DokanFs {
         })?;
         drop(fs);
 
-        for entry in filter_entries(entries) {
+        let visible = filter_entries(entries).collect::<Vec<_>>();
+        self.cache_directory_entries(&context.path, visible.iter().copied());
+        for entry in visible {
             let metadata = &entry.metadata;
             let data = FindData {
                 attributes: meta_to_attributes(metadata),
@@ -433,6 +486,24 @@ impl DokanFs {
             }
         }
         Ok(())
+    }
+}
+
+/// Build a Dokan handle around known metadata and optional parser state.
+fn create_file_info(
+    path: Box<str>,
+    metadata: &FsMetadata,
+    target: Option<OpenedTarget>,
+) -> CreateFileInfo<FileHandle> {
+    let is_dir = metadata.is_dir;
+    CreateFileInfo {
+        context: FileHandle {
+            path,
+            file_info: meta_to_file_info(metadata),
+            target: Mutex::new(target),
+        },
+        is_dir,
+        new_file_created: false,
     }
 }
 
@@ -551,7 +622,7 @@ impl FileSystemHandler for DokanFs {
     ) -> OperationResult<u32> {
         trace!(path = %context.path, offset, len = buffer.len(), "read");
         let mut target = context.target.lock().unwrap();
-        let OpenedTarget::File(file) = &mut *target else {
+        let OpenedTarget::File(file) = self.ensure_target(&context.path, &mut target)? else {
             return Err(STATUS_UNSUCCESSFUL);
         };
         let count = {
@@ -720,208 +791,5 @@ impl FileSystemHandler for DokanFs {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use fsmnt_core::{
-        FsEntry, FsEntryFlags, FsError, FsMetadata, FsResult, OpenedTarget, TargetFilesystem,
-    };
-
-    use dokan::status::{
-        STATUS_ACCESS_DENIED, STATUS_FILE_IS_A_DIRECTORY, STATUS_NOT_A_DIRECTORY,
-        STATUS_OBJECT_NAME_INVALID, STATUS_OBJECT_NAME_NOT_FOUND,
-    };
-
-    use super::{DokanFs, U16CString, drive_letter_root, open_error_status, to_internal_path};
-
-    #[derive(Default)]
-    struct CallCounts {
-        metadata: AtomicUsize,
-        read_dir: AtomicUsize,
-    }
-
-    struct CountingFilesystem {
-        calls: Arc<CallCounts>,
-    }
-
-    impl TargetFilesystem for CountingFilesystem {
-        fn read(&mut self, path: &str) -> FsResult<Vec<u8>> {
-            Err(FsError::NotAFile(path.to_string()))
-        }
-
-        fn try_exists(&mut self, path: &str) -> FsResult<bool> {
-            Ok(matches!(path, "file.txt" | "folder"))
-        }
-
-        fn try_is_dir(&mut self, path: &str) -> FsResult<bool> {
-            Ok(path == "folder")
-        }
-
-        fn try_is_file(&mut self, path: &str) -> FsResult<bool> {
-            Ok(path == "file.txt")
-        }
-
-        fn metadata(&mut self, path: &str) -> FsResult<FsMetadata> {
-            self.calls.metadata.fetch_add(1, Ordering::Relaxed);
-            match path {
-                "file.txt" => Ok(FsMetadata {
-                    size: 12,
-                    ..FsMetadata::default()
-                }),
-                "" | "folder" => Ok(FsMetadata {
-                    is_dir: true,
-                    ..FsMetadata::default()
-                }),
-                _ => Err(FsError::NotFound(path.to_string())),
-            }
-        }
-
-        fn read_dir(&mut self, path: &str) -> FsResult<Vec<FsEntry>> {
-            self.calls.read_dir.fetch_add(1, Ordering::Relaxed);
-            if path != "folder" {
-                return Err(FsError::NotADirectory(path.to_string()));
-            }
-            Ok(vec![
-                entry("visible.txt", FsEntryFlags::empty(), Some(1), 7),
-                entry("LongFileName.txt", FsEntryFlags::empty(), Some(2), 9),
-                entry("LONGFI~1.TXT", FsEntryFlags::SHORT_NAME, Some(2), 9),
-                entry("$MFT", FsEntryFlags::SYSTEM_FILE, Some(3), 1),
-            ])
-        }
-
-        fn total_size(&self) -> Option<u64> {
-            Some(1_024)
-        }
-
-        fn free_space(&mut self) -> Option<u64> {
-            Some(512)
-        }
-    }
-
-    fn entry(name: &str, flags: FsEntryFlags, file_id: Option<u64>, size: u64) -> FsEntry {
-        FsEntry {
-            name: name.to_string(),
-            path: PathBuf::from(name),
-            flags,
-            file_id,
-            metadata: FsMetadata {
-                size,
-                ..FsMetadata::default()
-            },
-        }
-    }
-
-    fn filesystem() -> (DokanFs, Arc<CallCounts>) {
-        let calls = Arc::new(CallCounts::default());
-        let filesystem = CountingFilesystem {
-            calls: Arc::clone(&calls),
-        };
-        let dokan = DokanFs::new(Box::new(filesystem), "NTFS".into(), "Evidence".into(), 0);
-        (dokan, calls)
-    }
-
-    #[test]
-    fn drive_letter_mountpoints_resolve_to_their_volume_root() {
-        assert_eq!(drive_letter_root("Z:").as_deref(), Some("Z:\\"));
-        assert_eq!(drive_letter_root("z:\\").as_deref(), Some("z:\\"));
-        assert_eq!(drive_letter_root("Z:/").as_deref(), Some("Z:\\"));
-    }
-
-    #[test]
-    fn directory_mountpoints_have_no_volume_root() {
-        assert_eq!(drive_letter_root(r"C:\mnt\evidence"), None);
-        assert_eq!(drive_letter_root("mnt"), None);
-        assert_eq!(drive_letter_root(""), None);
-    }
-
-    #[test]
-    fn internal_paths_are_decoded_and_normalized_in_one_pass() {
-        let path = U16CString::from_str(r"\\folder\café.txt").expect("valid path");
-        assert_eq!(&*to_internal_path(&path), "folder/café.txt");
-
-        let root = U16CString::from_str(r"\").expect("valid root");
-        assert!(to_internal_path(&root).is_empty());
-    }
-
-    #[test]
-    fn open_handles_reuse_their_resolved_metadata() {
-        let (filesystem, calls) = filesystem();
-        let opened = filesystem.open_path("file.txt".into()).expect("file opens");
-
-        assert_eq!(opened.context.file_info().file_size, 12);
-        assert_eq!(opened.context.file_info().file_size, 12);
-        assert_eq!(calls.metadata.load(Ordering::Relaxed), 1);
-
-        let root = filesystem.open_path("".into()).expect("root opens");
-        assert!(root.is_dir);
-        assert_eq!(calls.metadata.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn expected_open_failures_map_to_specific_statuses() {
-        for (error, expected) in [
-            (
-                FsError::NotFound("missing".into()),
-                STATUS_OBJECT_NAME_NOT_FOUND,
-            ),
-            (
-                FsError::NotADirectory("file/child".into()),
-                STATUS_NOT_A_DIRECTORY,
-            ),
-            (
-                FsError::NotAFile("directory".into()),
-                STATUS_FILE_IS_A_DIRECTORY,
-            ),
-            (
-                FsError::PermissionDenied("private".into()),
-                STATUS_ACCESS_DENIED,
-            ),
-            (
-                FsError::InvalidPath("../escape".into()),
-                STATUS_OBJECT_NAME_INVALID,
-            ),
-        ] {
-            assert_eq!(open_error_status("probe", error), expected);
-        }
-    }
-
-    #[test]
-    fn directory_handles_load_their_listing_once() {
-        let (filesystem, calls) = filesystem();
-        let opened = filesystem.open_path("folder".into()).expect("folder opens");
-        let mut target = opened.context.target.lock().expect("target lock");
-        let OpenedTarget::Directory(directory) = &mut *target else {
-            panic!("folder must open as a directory");
-        };
-
-        let (first_allocation, names) = {
-            let mut backend = filesystem.fs.lock().expect("filesystem lock");
-            let entries = backend
-                .opened_directory_entries(directory)
-                .expect("first listing");
-            (
-                entries.as_ptr(),
-                entries
-                    .iter()
-                    .map(|entry| entry.name.clone())
-                    .collect::<Vec<_>>(),
-            )
-        };
-        assert_eq!(
-            names,
-            ["visible.txt", "LongFileName.txt", "LONGFI~1.TXT", "$MFT"]
-        );
-
-        let second_allocation = {
-            let mut backend = filesystem.fs.lock().expect("filesystem lock");
-            backend
-                .opened_directory_entries(directory)
-                .expect("cached listing")
-                .as_ptr()
-        };
-        assert_eq!(second_allocation, first_allocation);
-        assert_eq!(calls.read_dir.load(Ordering::Relaxed), 1);
-    }
-}
+#[path = "dokan_tests.rs"]
+mod tests;

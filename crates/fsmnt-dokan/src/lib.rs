@@ -5,6 +5,9 @@
 //! dependencies are only pulled in on Windows.
 
 #[cfg(windows)]
+mod cache;
+
+#[cfg(windows)]
 mod dokan;
 
 #[cfg(windows)]
