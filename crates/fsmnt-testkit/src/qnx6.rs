@@ -57,6 +57,9 @@ const INODE_COUNT: u32 = 8;
 const UNUSED_BLOCK: u32 = u32::MAX;
 const ROOT_DIRECTORY_BLOCK: u32 = 3;
 const SUBDIRECTORY_BLOCK: u32 = 4;
+const NEWER_INODE_TABLE_FIRST_BLOCK: u32 = 33;
+const NEWER_INODE_TABLE_SECOND_BLOCK: u32 = 34;
+const NEWER_ROOT_DIRECTORY_BLOCK: u32 = 35;
 
 /// Build a complete two-snapshot QNX6 volume.
 ///
@@ -83,6 +86,57 @@ pub fn image(byte_order: FixtureByteOrder, primary_serial: u64, secondary_serial
         secondary_serial,
         &roots,
     );
+    image
+}
+
+/// Build a volume whose newer snapshot tombstones `/hello.txt` while the
+/// preceding valid snapshot still carries its name, inode, and payload.
+///
+/// This models Power-Safe deleted-entry recovery without changing the normal
+/// fixture's shared metadata trees.
+#[must_use]
+pub fn image_with_deleted_root_file(byte_order: FixtureByteOrder) -> Vec<u8> {
+    let mut image = image(byte_order, 1, 2);
+
+    let first_inode_source = block_offset(0);
+    let first_inode_target = block_offset(NEWER_INODE_TABLE_FIRST_BLOCK);
+    image.copy_within(
+        first_inode_source..first_inode_source + BLOCK_SIZE,
+        first_inode_target,
+    );
+    let second_inode_source = block_offset(1);
+    let second_inode_target = block_offset(NEWER_INODE_TABLE_SECOND_BLOCK);
+    image.copy_within(
+        second_inode_source..second_inode_source + BLOCK_SIZE,
+        second_inode_target,
+    );
+    let root_source = block_offset(ROOT_DIRECTORY_BLOCK);
+    let root_target = block_offset(NEWER_ROOT_DIRECTORY_BLOCK);
+    image.copy_within(root_source..root_source + BLOCK_SIZE, root_target);
+
+    put_u32(
+        &mut image,
+        SECONDARY_SUPERBLOCK_OFFSET + 80,
+        NEWER_INODE_TABLE_FIRST_BLOCK,
+        byte_order,
+    );
+    put_u32(
+        &mut image,
+        SECONDARY_SUPERBLOCK_OFFSET + 84,
+        NEWER_INODE_TABLE_SECOND_BLOCK,
+        byte_order,
+    );
+    put_u32(
+        &mut image,
+        first_inode_target + 36,
+        NEWER_ROOT_DIRECTORY_BLOCK,
+        byte_order,
+    );
+
+    let hello_directory_record = root_target + 2 * 32;
+    put_u32(&mut image, hello_directory_record, 0, byte_order);
+    image[first_inode_target + INODE_SIZE + 101] = 2;
+    refresh_superblock_checksum(&mut image, SECONDARY_SUPERBLOCK_OFFSET, byte_order);
     image
 }
 

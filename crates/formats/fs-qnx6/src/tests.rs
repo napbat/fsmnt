@@ -6,7 +6,7 @@ use fsmnt_testkit::qnx6::{
 };
 use fsmnt_testkit::{CountingReader, Cursor};
 
-use crate::{ByteOrder, Qnx6, Qnx6Error, SuperblockCopy};
+use crate::{ByteOrder, QNX6_SUPERBLOCK_SIZE, Qnx6, Qnx6Error, SuperblockCopy};
 
 fn open(order: FixtureByteOrder) -> Qnx6<Cursor<Vec<u8>>> {
     Qnx6::new(Cursor::new(qnx6::image(order, 1, 2))).expect("open synthetic QNX6")
@@ -62,11 +62,69 @@ fn lists_short_and_long_names_and_nested_directories() {
         .expect("long entry");
     assert_eq!(long.long_name_index(), Some(0));
     assert_eq!(long.long_name_checksum_valid(), Some(true));
+    assert!(entries.iter().all(|entry| !entry.is_deleted()));
 
     let inner = volume
         .resolve_path(b"/subdir/inner.txt")
         .expect("nested path");
     assert_eq!(volume.read_file(&inner).expect("inner data"), INNER_DATA);
+}
+
+#[test]
+fn recovers_a_name_tombstoned_in_the_newest_snapshot() {
+    for order in [FixtureByteOrder::Little, FixtureByteOrder::Big] {
+        for swap_copies in [false, true] {
+            let mut bytes = qnx6::image_with_deleted_root_file(order);
+            if swap_copies {
+                let primary = bytes
+                    [PRIMARY_SUPERBLOCK_OFFSET..PRIMARY_SUPERBLOCK_OFFSET + QNX6_SUPERBLOCK_SIZE]
+                    .to_vec();
+                let secondary = bytes[SECONDARY_SUPERBLOCK_OFFSET
+                    ..SECONDARY_SUPERBLOCK_OFFSET + QNX6_SUPERBLOCK_SIZE]
+                    .to_vec();
+                bytes[PRIMARY_SUPERBLOCK_OFFSET..PRIMARY_SUPERBLOCK_OFFSET + QNX6_SUPERBLOCK_SIZE]
+                    .copy_from_slice(&secondary);
+                bytes[SECONDARY_SUPERBLOCK_OFFSET
+                    ..SECONDARY_SUPERBLOCK_OFFSET + QNX6_SUPERBLOCK_SIZE]
+                    .copy_from_slice(&primary);
+            }
+
+            let mut volume =
+                Qnx6::new(Cursor::new(bytes)).expect("open snapshot-difference fixture");
+            let expected_copy = if swap_copies {
+                SuperblockCopy::Primary
+            } else {
+                SuperblockCopy::Secondary
+            };
+            assert_eq!(volume.active_copy(), expected_copy);
+
+            let root = volume.root_inode().expect("root inode");
+            let entries = volume.read_directory(&root).expect("root directory");
+            let hello = entries
+                .iter()
+                .find(|entry| entry.name() == b"hello.txt")
+                .expect("previous snapshot should recover hello.txt");
+            assert!(hello.is_deleted());
+            let inode = volume
+                .directory_entry_inode(hello)
+                .expect("inode from previous snapshot");
+            assert_eq!(inode.status(), 3);
+            assert_eq!(
+                volume.read_file(&inode).expect("recovered data"),
+                HELLO_DATA
+            );
+
+            let resolved = volume
+                .resolve_path(b"/hello.txt")
+                .expect("recovered name remains directly addressable");
+            assert_eq!(
+                volume
+                    .read_file(&resolved)
+                    .expect("resolved recovered data"),
+                HELLO_DATA
+            );
+        }
+    }
 }
 
 #[test]

@@ -3,8 +3,10 @@
 `fs-qnx6` is a safe, read-only parser for normal QNX6 Power-Safe
 filesystems. It supports little- and big-endian volumes, validates both
 checksummed superblocks, selects the newest valid snapshot, walks all five
-levels of the uniform pointer tree, resolves inline and long filenames, and
-performs ranged sparse-file reads.
+levels of the uniform pointer tree, resolves inline and long filenames,
+recovers exact directory tombstones from the preceding valid snapshot, and
+performs ranged sparse-file reads. Recovered names remain addressable and are
+reported as deleted to mount/forensic consumers.
 
 The default build is `no_std` with allocation support. Enable `std` for
 ordinary `std::io::Read + std::io::Seek` sources. Mount integration lives in

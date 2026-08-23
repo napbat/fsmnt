@@ -2,6 +2,7 @@
 
 use thiserror::Error;
 
+use crate::SuperblockCopy;
 use crate::io;
 #[cfg(feature = "std")]
 use fsmnt_parser_core::error::IoError;
@@ -51,6 +52,10 @@ pub enum Qnx6Error {
     /// Both checksummed copies stand up but disagree on immutable geometry.
     #[error("QNX6 superblock copies disagree on immutable volume geometry")]
     ConflictingSuperblocks,
+
+    /// An inode belongs to a snapshot copy that this volume could not open.
+    #[error("QNX6 {0:?} snapshot is unavailable")]
+    SnapshotUnavailable(SuperblockCopy),
 
     /// Checked arithmetic rejected a corrupt on-disk value.
     #[error("QNX6 offset or length overflow while calculating {0}")]

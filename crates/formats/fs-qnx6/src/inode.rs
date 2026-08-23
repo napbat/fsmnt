@@ -1,7 +1,7 @@
 //! QNX6 inode records.
 
 use crate::Result;
-use crate::superblock::ByteOrder;
+use crate::superblock::{ByteOrder, SuperblockCopy};
 use crate::tree::TreeDescriptor;
 
 /// Size of one on-disk QNX6 inode record.
@@ -52,6 +52,7 @@ impl Qnx6FileType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Qnx6Inode {
     number: u32,
+    snapshot: SuperblockCopy,
     tree: TreeDescriptor,
     uid: u32,
     gid: u32,
@@ -65,9 +66,15 @@ pub struct Qnx6Inode {
 }
 
 impl Qnx6Inode {
-    pub(crate) fn from_bytes(number: u32, bytes: &[u8], order: ByteOrder) -> Result<Self> {
+    pub(crate) fn from_bytes(
+        number: u32,
+        snapshot: SuperblockCopy,
+        bytes: &[u8],
+        order: ByteOrder,
+    ) -> Result<Self> {
         Ok(Self {
             number,
+            snapshot,
             tree: TreeDescriptor::parse(bytes, 0, 36, 100, order, "file")?,
             uid: order.read_u32(bytes, 8),
             gid: order.read_u32(bytes, 12),
@@ -85,6 +92,10 @@ impl Qnx6Inode {
     #[must_use]
     pub const fn number(&self) -> u32 {
         self.number
+    }
+
+    pub(crate) const fn snapshot(&self) -> SuperblockCopy {
+        self.snapshot
     }
 
     /// Logical byte length of the object data.

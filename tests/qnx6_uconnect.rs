@@ -7,7 +7,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use fsmnt::device::DetectedBootSector;
-use fsmnt::{ImageOpenOptions, TargetFilesystem, image_layout, open_image_with_options};
+use fsmnt::{
+    FsEntryFlags, ImageOpenOptions, TargetFilesystem, image_layout, open_image_with_options,
+};
 use sha2::{Digest, Sha256};
 
 fn fixture() -> Option<PathBuf> {
@@ -40,12 +42,12 @@ const EXPECTED_VOLUMES: [ExpectedVolume; 4] = [
         uuid: "1eee57ed-fd97-4d3f-b8b3-867a6d550bd0",
         total_bytes: 10_792_992_768,
         free_bytes: 5_945_116_672,
-        root_names: &[".boot", "app", "nav", "speech_service", "eq"],
+        root_names: &[".boot", "app", "nav", "speech_service", "eq", "service.key"],
         directories: 385,
-        files: 4_740,
-        logical_bytes: 4_778_622_776,
+        files: 4_741,
+        logical_bytes: 4_778_623_340,
         largest_file: 321_737_028,
-        content_sha256: "b7910ecd506cad4e4e1cd926f86af6254ac01f955ba76f80ffd303231413e4cf",
+        content_sha256: "f866c9549e5343ebe828ae5e9d600fbe31564e1d7211523dba5d01b83bba8950",
     },
     ExpectedVolume {
         uuid: "1b52ec41-75e4-45f7-b397-a19abdc70b2e",
@@ -233,12 +235,21 @@ fn uconnect_qnx6_volumes_match_exhaustive_content_fingerprints() {
         assert_eq!(opened.filesystem.free_space(), Some(expected.free_bytes));
         assert!(opened.filesystem.notices().is_empty());
 
-        let root_names = opened
+        let root_entries = opened
             .filesystem
             .read_dir("/")
-            .unwrap_or_else(|error| panic!("list QNX6 partition {ordinal}: {error}"))
-            .into_iter()
-            .map(|entry| entry.name)
+            .unwrap_or_else(|error| panic!("list QNX6 partition {ordinal}: {error}"));
+        if ordinal == 1 {
+            let service_key = root_entries
+                .iter()
+                .find(|entry| entry.name == "service.key")
+                .expect("partition 1 should recover its deleted root credential");
+            assert_eq!(service_key.metadata.size, 564);
+            assert!(service_key.flags.contains(FsEntryFlags::DELETED));
+        }
+        let root_names = root_entries
+            .iter()
+            .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(root_names, expected.root_names);
 

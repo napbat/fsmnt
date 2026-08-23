@@ -47,7 +47,7 @@ fn metadata_of(inode: &Qnx6Inode) -> FsMetadata {
 }
 
 /// Cross-platform entry flags inferred from a QNX6 inode.
-fn entry_flags(inode: &Qnx6Inode) -> FsEntryFlags {
+fn entry_flags(inode: &Qnx6Inode, recovered_deleted_name: bool) -> FsEntryFlags {
     let mut flags = FsEntryFlags::empty();
     if inode.file_type().is_symbolic_link() {
         flags |= FsEntryFlags::REPARSE_POINT;
@@ -55,7 +55,7 @@ fn entry_flags(inode: &Qnx6Inode) -> FsEntryFlags {
     // QNX6 status 2 marks a deleted inode. A live snapshot should not
     // normally point at one, but preserving the flag is useful on damaged
     // or forensically interesting directory trees.
-    if inode.status() == 2 {
+    if recovered_deleted_name || inode.status() == 2 {
         flags |= FsEntryFlags::DELETED;
     }
     flags
@@ -148,16 +148,16 @@ impl<R: Read + Seek> Qnx6Filesystem<R> {
             if matches!(raw.name(), b"." | b"..") {
                 continue;
             }
-            let inode_number = raw.inode();
+            let recovered_deleted_name = raw.is_deleted();
             let inode = self
                 .volume
-                .inode(inode_number)
+                .directory_entry_inode(&raw)
                 .map_err(|error| map_qnx6_error(error, path))?;
             let name = string_from_bytes(raw.into_name());
             entries.push(FsEntry {
                 path: parent.join(&name),
                 name,
-                flags: entry_flags(&inode),
+                flags: entry_flags(&inode, recovered_deleted_name),
                 file_id: Some(u64::from(inode.number())),
                 metadata: metadata_of(&inode),
             });
@@ -344,6 +344,27 @@ mod tests {
         assert_eq!(
             filesystem.read(LONG_NAME).expect("long-named file"),
             LONG_DATA
+        );
+    }
+
+    #[test]
+    fn adapter_exposes_a_root_file_deleted_from_the_newest_snapshot() {
+        let image = qnx6::image_with_deleted_root_file(FixtureByteOrder::Little);
+        let mut filesystem =
+            Qnx6Filesystem::new(std::io::Cursor::new(image)).expect("open recovery fixture");
+        let entries = filesystem.read_dir("/").expect("root listing");
+        let hello = entries
+            .iter()
+            .find(|entry| entry.name == "hello.txt")
+            .expect("deleted root file should remain visible");
+        assert!(hello.flags.contains(FsEntryFlags::DELETED));
+        assert_eq!(
+            hello.metadata.size,
+            u64::try_from(HELLO_DATA.len()).expect("fixture length fits u64")
+        );
+        assert_eq!(
+            filesystem.read("/hello.txt").expect("deleted file"),
+            HELLO_DATA
         );
     }
 

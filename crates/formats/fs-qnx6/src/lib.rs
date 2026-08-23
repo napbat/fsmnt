@@ -6,6 +6,10 @@
 //! by this crate. File data and all three metadata files use the same uniform
 //! 16-pointer tree layout.
 //!
+//! When both snapshots validate, an exact directory tombstone in the newest
+//! copy is paired with its live record in the preceding copy. The recovered
+//! name remains readable and is explicitly marked deleted.
+//!
 //! The crate is `no_std` by default. Enable `std` when opening ordinary
 //! `std::io::Read + std::io::Seek` sources.
 

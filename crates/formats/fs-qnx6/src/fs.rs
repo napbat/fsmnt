@@ -1,6 +1,7 @@
 //! Reader-backed QNX6 filesystem traversal.
 
-use alloc::vec;
+mod directory;
+
 use alloc::vec::Vec;
 use fsmnt_parser_core::io::BlockCache;
 
@@ -28,14 +29,76 @@ const LONG_NAME_MARKER: u8 = 0xff;
 /// Maximum QNX6 filename length in bytes.
 const LONG_NAME_MAX: u16 = 510;
 
+#[derive(Clone, Copy)]
 enum DirectoryRecordName<'record> {
     Short(&'record [u8]),
     Long { index: u32, stored_checksum: u32 },
 }
 
+#[derive(Clone, Copy)]
 struct DirectoryRecord<'record> {
     inode: u32,
     name: DirectoryRecordName<'record>,
+}
+
+enum OwnedDirectoryRecordName {
+    Short(Vec<u8>),
+    Long { index: u32, stored_checksum: u32 },
+}
+
+struct DirectoryTombstone {
+    offset: u64,
+    name: OwnedDirectoryRecordName,
+}
+
+impl DirectoryTombstone {
+    fn new(offset: u64, name: DirectoryRecordName<'_>) -> Result<Self> {
+        let name = match name {
+            DirectoryRecordName::Short(bytes) => {
+                let mut owned = Vec::new();
+                owned
+                    .try_reserve_exact(bytes.len())
+                    .map_err(|_| Qnx6Error::AllocationFailed)?;
+                owned.extend_from_slice(bytes);
+                OwnedDirectoryRecordName::Short(owned)
+            }
+            DirectoryRecordName::Long {
+                index,
+                stored_checksum,
+            } => OwnedDirectoryRecordName::Long {
+                index,
+                stored_checksum,
+            },
+        };
+        Ok(Self { offset, name })
+    }
+
+    fn matches(&self, offset: u64, name: DirectoryRecordName<'_>) -> bool {
+        if self.offset != offset {
+            return false;
+        }
+        match (&self.name, name) {
+            (OwnedDirectoryRecordName::Short(left), DirectoryRecordName::Short(right)) => {
+                left == right
+            }
+            (
+                OwnedDirectoryRecordName::Long {
+                    index: left_index,
+                    stored_checksum: left_checksum,
+                },
+                DirectoryRecordName::Long {
+                    index: right_index,
+                    stored_checksum: right_checksum,
+                },
+            ) => left_index == &right_index && left_checksum == &right_checksum,
+            _ => false,
+        }
+    }
+}
+
+struct DirectoryListing {
+    entries: Vec<Qnx6DirectoryEntry>,
+    tombstones: Vec<DirectoryTombstone>,
 }
 
 /// A directory name and the inode to which it points.
@@ -45,6 +108,10 @@ pub struct Qnx6DirectoryEntry {
     name: Vec<u8>,
     long_name_index: Option<u32>,
     long_name_checksum_valid: Option<bool>,
+    stored_long_name_checksum: Option<u32>,
+    record_offset: u64,
+    snapshot: SuperblockCopy,
+    deleted: bool,
 }
 
 impl Qnx6DirectoryEntry {
@@ -80,6 +147,24 @@ impl Qnx6DirectoryEntry {
     pub const fn long_name_checksum_valid(&self) -> Option<bool> {
         self.long_name_checksum_valid
     }
+
+    /// Whether this name was tombstoned in the newest snapshot and recovered
+    /// from the other valid Power-Safe snapshot.
+    #[must_use]
+    pub const fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+
+    fn matches_tombstone(&self, tombstone: &DirectoryTombstone) -> bool {
+        let name = self.long_name_index.map_or_else(
+            || DirectoryRecordName::Short(&self.name),
+            |index| DirectoryRecordName::Long {
+                index,
+                stored_checksum: self.stored_long_name_checksum.unwrap_or_default(),
+            },
+        );
+        tombstone.matches(self.record_offset, name)
+    }
 }
 
 /// A mounted read-only view of the newest valid QNX6 snapshot.
@@ -88,6 +173,7 @@ pub struct Qnx6<R: Read + Seek> {
     pointer_cache: Vec<BlockCache>,
     superblock: Qnx6Superblock,
     active_copy: SuperblockCopy,
+    alternate: Option<(SuperblockCopy, Qnx6Superblock)>,
     primary_valid: bool,
     secondary_valid: bool,
     secondary_offset: u64,
@@ -135,12 +221,19 @@ impl<R: Read + Seek> Qnx6<R> {
 
         let primary_valid = primary.is_some();
         let secondary_valid = secondary.is_some();
-        let (superblock, active_copy) = match (primary, secondary) {
-            (Some(first), Some(second)) if first.serial() >= second.serial() => {
-                (first, SuperblockCopy::Primary)
-            }
-            (Some(_) | None, Some(second)) => (second, SuperblockCopy::Secondary),
-            (Some(first), None) => (first, SuperblockCopy::Primary),
+        let (superblock, active_copy, alternate) = match (primary, secondary) {
+            (Some(first), Some(second)) if first.serial() >= second.serial() => (
+                first,
+                SuperblockCopy::Primary,
+                Some((SuperblockCopy::Secondary, second)),
+            ),
+            (Some(first), Some(second)) => (
+                second,
+                SuperblockCopy::Secondary,
+                Some((SuperblockCopy::Primary, first)),
+            ),
+            (None, Some(second)) => (second, SuperblockCopy::Secondary, None),
+            (Some(first), None) => (first, SuperblockCopy::Primary, None),
             (None, None) => return Err(Qnx6Error::NoValidSuperblock),
         };
 
@@ -154,6 +247,7 @@ impl<R: Read + Seek> Qnx6<R> {
             pointer_cache,
             superblock,
             active_copy,
+            alternate,
             primary_valid,
             secondary_valid,
             secondary_offset,
@@ -175,6 +269,24 @@ impl<R: Read + Seek> Qnx6<R> {
     #[must_use]
     pub const fn active_copy(&self) -> SuperblockCopy {
         self.active_copy
+    }
+
+    fn superblock_for(&self, snapshot: SuperblockCopy) -> Result<&Qnx6Superblock> {
+        if snapshot == self.active_copy {
+            return Ok(&self.superblock);
+        }
+        self.alternate
+            .as_ref()
+            .filter(|(copy, _)| *copy == snapshot)
+            .map(|(_, superblock)| superblock)
+            .ok_or(Qnx6Error::SnapshotUnavailable(snapshot))
+    }
+
+    fn recovery_snapshot(&self) -> Option<SuperblockCopy> {
+        let (copy, alternate) = self.alternate.as_ref()?;
+        (alternate.inode_root() != self.superblock.inode_root()
+            || alternate.long_name_root() != self.superblock.long_name_root())
+        .then_some(*copy)
     }
 
     /// Whether the first superblock copy passed magic, geometry, and CRC checks.
@@ -234,10 +346,29 @@ impl<R: Read + Seek> Qnx6<R> {
     /// Returns an error for an out-of-range number, inconsistent inode-tree
     /// length, invalid file-tree depth, block pointer, or I/O failure.
     pub fn inode(&mut self, number: u32) -> Result<Qnx6Inode> {
-        if number == 0 || number > self.superblock.num_inodes() {
+        self.inode_from_snapshot(self.active_copy, number)
+    }
+
+    /// Read the inode referenced by a directory entry from the snapshot that
+    /// supplied that entry.
+    ///
+    /// This distinction matters for deleted names recovered from the previous
+    /// valid Power-Safe snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry's snapshot is unavailable or its inode
+    /// table record, tree geometry, block pointers, or source bytes are invalid.
+    pub fn directory_entry_inode(&mut self, entry: &Qnx6DirectoryEntry) -> Result<Qnx6Inode> {
+        self.inode_from_snapshot(entry.snapshot, entry.inode)
+    }
+
+    fn inode_from_snapshot(&mut self, snapshot: SuperblockCopy, number: u32) -> Result<Qnx6Inode> {
+        let superblock = self.superblock_for(snapshot)?;
+        if number == 0 || number > superblock.num_inodes() {
             return Err(Qnx6Error::InvalidInodeNumber {
                 inode: number,
-                maximum: self.superblock.num_inodes(),
+                maximum: superblock.num_inodes(),
             });
         }
         let offset = u64::from(number - 1)
@@ -252,7 +383,8 @@ impl<R: Read + Seek> Qnx6<R> {
                     .map_err(|_| Qnx6Error::Overflow("inode record end"))?,
             )
             .ok_or(Qnx6Error::Overflow("inode record end"))?;
-        let descriptor = *self.superblock.inode_root().tree();
+        let descriptor = *superblock.inode_root().tree();
+        let order = superblock.byte_order();
         if end > descriptor.size() {
             return Err(Qnx6Error::MetadataTooShort {
                 tree: "inode",
@@ -262,94 +394,7 @@ impl<R: Read + Seek> Qnx6<R> {
         }
         let mut bytes = [0_u8; QNX6_INODE_SIZE];
         self.read_tree_exact(&descriptor, offset, &mut bytes)?;
-        Qnx6Inode::from_bytes(number, &bytes, self.superblock.byte_order())
-    }
-
-    /// Resolve a slash-separated byte path from the root inode.
-    ///
-    /// Empty components and `.` are ignored. `..` is resolved through the
-    /// directory's own entry, so root confinement follows the on-disk tree.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Qnx6Error::NotFound`] for an absent component and propagates
-    /// directory, inode, pointer, and I/O errors.
-    pub fn resolve_path(&mut self, path: &[u8]) -> Result<Qnx6Inode> {
-        let mut current = self.root_inode()?;
-        for component in path
-            .split(|byte| *byte == b'/')
-            .filter(|component| !component.is_empty() && *component != b".")
-        {
-            current = self.lookup(&current, component)?;
-        }
-        Ok(current)
-    }
-
-    /// Look up one exact, case-sensitive name in a directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `directory` is not a directory, the name is not
-    /// present, or directory/inode data cannot be read.
-    pub fn lookup(&mut self, directory: &Qnx6Inode, name: &[u8]) -> Result<Qnx6Inode> {
-        let count = Self::directory_entry_count(directory)?;
-        let descriptor = *directory.tree();
-        for index in 0..count {
-            let offset = index
-                .checked_mul(DIRECTORY_ENTRY_SIZE)
-                .ok_or(Qnx6Error::Overflow("directory entry offset"))?;
-            let mut record = [0_u8; DIRECTORY_ENTRY_BYTES];
-            self.read_tree_exact(&descriptor, offset, &mut record)?;
-            let Some(parsed) = self.parse_directory_record(&record, offset)? else {
-                continue;
-            };
-            let matches = match parsed.name {
-                DirectoryRecordName::Short(candidate) => candidate == name,
-                DirectoryRecordName::Long { index, .. } => {
-                    let (long_name_tree, name_offset, length) = self.long_name_location(index)?;
-                    let mut candidate = [0_u8; 510];
-                    self.read_metadata_exact(
-                        &long_name_tree,
-                        "long-filename",
-                        name_offset,
-                        &mut candidate[..length],
-                    )?;
-                    candidate[..length] == *name
-                }
-            };
-            if matches {
-                return self.inode(parsed.inode);
-            }
-        }
-        Err(Qnx6Error::NotFound)
-    }
-
-    /// Read all live name records in a directory, including `.` and `..`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the inode is not a directory or when any fixed
-    /// record, long-name block, pointer, or source read is invalid.
-    pub fn read_directory(&mut self, inode: &Qnx6Inode) -> Result<Vec<Qnx6DirectoryEntry>> {
-        let count = Self::directory_entry_count(inode)?;
-        let capacity =
-            usize::try_from(count).map_err(|_| Qnx6Error::ObjectTooLarge(inode.size()))?;
-        let mut entries = Vec::new();
-        entries
-            .try_reserve(capacity)
-            .map_err(|_| Qnx6Error::AllocationFailed)?;
-        let descriptor = *inode.tree();
-        for index in 0..count {
-            let offset = index
-                .checked_mul(DIRECTORY_ENTRY_SIZE)
-                .ok_or(Qnx6Error::Overflow("directory entry offset"))?;
-            let mut record = [0_u8; DIRECTORY_ENTRY_BYTES];
-            self.read_tree_exact(&descriptor, offset, &mut record)?;
-            if let Some(entry) = self.parse_directory_entry(&record, offset)? {
-                entries.push(entry);
-            }
-        }
-        Ok(entries)
+        Qnx6Inode::from_bytes(number, snapshot, &bytes, order)
     }
 
     /// Read an entire non-directory object's data.
@@ -392,124 +437,6 @@ impl<R: Read + Seek> Qnx6<R> {
             return Err(Qnx6Error::NotAFile(inode.number()));
         }
         self.read_tree_range(inode.tree(), offset, buffer)
-    }
-
-    fn parse_directory_entry(
-        &mut self,
-        record: &[u8; DIRECTORY_ENTRY_BYTES],
-        offset: u64,
-    ) -> Result<Option<Qnx6DirectoryEntry>> {
-        let Some(parsed) = self.parse_directory_record(record, offset)? else {
-            return Ok(None);
-        };
-        match parsed.name {
-            DirectoryRecordName::Short(name) => Ok(Some(Qnx6DirectoryEntry {
-                inode: parsed.inode,
-                name: name.to_vec(),
-                long_name_index: None,
-                long_name_checksum_valid: None,
-            })),
-            DirectoryRecordName::Long {
-                index,
-                stored_checksum,
-            } => {
-                let name = self.read_long_name(index)?;
-                let checksum_valid = long_name_checksum(&name) == stored_checksum;
-                Ok(Some(Qnx6DirectoryEntry {
-                    inode: parsed.inode,
-                    name,
-                    long_name_index: Some(index),
-                    long_name_checksum_valid: Some(checksum_valid),
-                }))
-            }
-        }
-    }
-
-    fn directory_entry_count(inode: &Qnx6Inode) -> Result<u64> {
-        if !inode.file_type().is_directory() {
-            return Err(Qnx6Error::NotADirectory(inode.number()));
-        }
-        if !inode.size().is_multiple_of(DIRECTORY_ENTRY_SIZE) {
-            return Err(Qnx6Error::InvalidDirectoryEntry {
-                offset: inode.size() - inode.size() % DIRECTORY_ENTRY_SIZE,
-                reason: "directory size is not a multiple of 32 bytes",
-            });
-        }
-        Ok(inode.size() / DIRECTORY_ENTRY_SIZE)
-    }
-
-    fn parse_directory_record<'record>(
-        &self,
-        record: &'record [u8; DIRECTORY_ENTRY_BYTES],
-        offset: u64,
-    ) -> Result<Option<DirectoryRecord<'record>>> {
-        let order = self.superblock.byte_order();
-        let inode = order.read_u32(record, 0);
-        let size = record[4];
-        if inode == 0 || size == 0 {
-            return Ok(None);
-        }
-        if inode > self.superblock.num_inodes() {
-            return Err(Qnx6Error::InvalidDirectoryEntry {
-                offset,
-                reason: "inode number exceeds the superblock inode count",
-            });
-        }
-        let name = if size <= SHORT_NAME_MAX {
-            let end = 5 + usize::from(size);
-            DirectoryRecordName::Short(&record[5..end])
-        } else if size == LONG_NAME_MARKER {
-            DirectoryRecordName::Long {
-                index: order.read_u32(record, 8),
-                stored_checksum: order.read_u32(record, 12),
-            }
-        } else {
-            return Err(Qnx6Error::InvalidDirectoryEntry {
-                offset,
-                reason: "name length is neither inline nor the long-name marker",
-            });
-        };
-        Ok(Some(DirectoryRecord { inode, name }))
-    }
-
-    fn read_long_name(&mut self, index: u32) -> Result<Vec<u8>> {
-        let (descriptor, offset, length) = self.long_name_location(index)?;
-        let mut name = vec![0_u8; length];
-        self.read_metadata_exact(&descriptor, "long-filename", offset, &mut name)?;
-        Ok(name)
-    }
-
-    fn long_name_location(&mut self, index: u32) -> Result<(TreeDescriptor, u64, usize)> {
-        let block_size = u64::from(self.superblock.block_size());
-        let offset = u64::from(index)
-            .checked_mul(block_size)
-            .ok_or(Qnx6Error::Overflow("long-filename offset"))?;
-        let descriptor = *self.superblock.long_name_root().tree();
-        let mut length_bytes = [0_u8; 2];
-        self.read_metadata_exact(&descriptor, "long-filename", offset, &mut length_bytes)?;
-        let length = self.superblock.byte_order().read_u16(&length_bytes, 0);
-        if length > LONG_NAME_MAX || u64::from(length) + 2 > block_size {
-            return Err(Qnx6Error::InvalidLongName { index, length });
-        }
-        Ok((descriptor, offset + 2, usize::from(length)))
-    }
-
-    fn read_metadata_exact(
-        &mut self,
-        descriptor: &TreeDescriptor,
-        tree: &'static str,
-        offset: u64,
-        buffer: &mut [u8],
-    ) -> Result<()> {
-        let length =
-            u64::try_from(buffer.len()).map_err(|_| Qnx6Error::ObjectTooLarge(u64::MAX))?;
-        let end = offset
-            .checked_add(length)
-            .ok_or(Qnx6Error::Overflow("metadata read end"))?;
-        if end > descriptor.size() {
-            return Err(Qnx6Error::MetadataTooShort { tree, offset, end });
-        }
-        self.read_tree_exact(descriptor, offset, buffer)
     }
 
     fn read_tree_exact(
@@ -656,17 +583,4 @@ fn read_superblock<R: Read + Seek>(reader: &mut R, offset: u64) -> Result<Qnx6Su
     let mut bytes = [0_u8; QNX6_SUPERBLOCK_SIZE];
     reader.read_exact(&mut bytes)?;
     Qnx6Superblock::from_bytes(&bytes)
-}
-
-/// Checksum used by QNX6 long-name directory records.
-fn long_name_checksum(name: &[u8]) -> u32 {
-    let mut checksum = 0_u32;
-    for &byte in name {
-        let low_bit = checksum & 1;
-        checksum = (checksum >> 1).wrapping_add(u32::from(byte));
-        if low_bit != 0 {
-            checksum ^= 0x8000_0000;
-        }
-    }
-    checksum
 }

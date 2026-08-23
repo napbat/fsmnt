@@ -87,6 +87,14 @@ mod tests {
     }
 
     #[test]
+    fn keeps_recovered_deleted_entries() {
+        let entries = vec![entry("recovered.key", FsEntryFlags::DELETED, Some(3))];
+        let visible = filter_entries(&entries).collect::<Vec<_>>();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].name, "recovered.key");
+    }
+
+    #[test]
     fn hides_short_name_duplicate_of_long_name() {
         let entries = vec![
             entry("LongFileName.txt", FsEntryFlags::empty(), Some(7)),

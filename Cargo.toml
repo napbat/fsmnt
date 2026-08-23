@@ -8,7 +8,7 @@ resolver = "3"
 members = ["crates/fsmnt-*", "crates/formats/*"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 repository = "https://github.com/napbat/fsmnt"
 # Inherited by the vendored crates under crates/formats/, which declare
