@@ -344,6 +344,8 @@ pub fn build_content_cipher(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::types::{FscryptKeyIdentifier, FscryptPolicyKind};
 
