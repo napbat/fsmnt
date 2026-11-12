@@ -632,7 +632,7 @@ fn a_zero_stride_is_refused_rather_than_looping() {
 #[test]
 fn empty_media_produces_no_hits() {
     let hits = scan_media(&mut Cursor::new(Vec::new()), 0, ScanOptions::new()).expect("empty scan");
-    assert!(hits.is_empty());
+    assert_eq!(hits, [] as [crate::scan::hit::ScanHit; 0]);
 }
 
 #[test]

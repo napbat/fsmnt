@@ -715,7 +715,7 @@ mod tests {
         let list = parse_datum_list(&buf, 0, 0, NtfsPosition::none()).unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].role(), 0x0001);
-        assert!(list[0].payload().is_empty());
+        assert_eq!(list[0].payload(), []);
         assert_eq!(list[1].role(), 0x0002);
     }
 
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(raw.len(), EFSX_HEADER_LEN);
         let parsed = parse_datum(&raw, 0, 0, NtfsPosition::none()).unwrap();
         assert_eq!(parsed.role(), ROLE_FILE_IV);
-        assert!(parsed.payload().is_empty());
+        assert_eq!(parsed.payload(), []);
     }
 
     #[test]

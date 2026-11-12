@@ -400,7 +400,7 @@ mod tests {
         // The Display impl renders the active flag names; the
         // Ok(Default::default()) mutant would produce an empty string.
         assert_eq!(rendered, "INDEXABLE | ALWAYS_RESIDENT");
-        assert!(!rendered.is_empty());
+        assert_ne!(rendered, "");
     }
 
     #[test]

@@ -272,7 +272,7 @@ mod tests {
         let hash = entry.data().unwrap().unwrap().hash();
 
         let entries = ntfs_secure_sdh_entries(&secure_file, &mut testfs1, hash).unwrap();
-        assert!(!entries.is_empty());
+        assert_ne!(entries, [] as [crate::indexes::NtfsSecurityHashData; 0]);
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
         let secure_file = ntfs.file(&mut testfs1, SECURE_FILE_RECORD_NUMBER).unwrap();
 
         let entries = ntfs_secure_sdh_entries(&secure_file, &mut testfs1, 0xDEAD_BEEF).unwrap();
-        assert!(entries.is_empty());
+        assert_eq!(entries, [] as [crate::indexes::NtfsSecurityHashData; 0]);
     }
 
     #[test]

@@ -458,7 +458,10 @@ mod tests {
             Xid(1),
         );
         let mut reader = Cursor::new(image);
-        assert!(Snapshot::list(&tree, &mut reader).unwrap().is_empty());
+        assert_eq!(
+            Snapshot::list(&tree, &mut reader).unwrap(),
+            [] as [Snapshot; 0]
+        );
     }
 
     #[test]

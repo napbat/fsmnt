@@ -311,9 +311,9 @@ mod tests {
     #[test]
     fn orphan_plan_default_is_empty() {
         let plan = OrphanPlan::default();
-        assert!(plan.legacy.is_empty());
-        assert!(plan.orphan_file.is_empty());
-        assert!(plan.warnings.is_empty());
+        assert_eq!(plan.legacy, [] as [LegacyOrphanEntry; 0]);
+        assert_eq!(plan.orphan_file, [] as [OrphanFileEntry; 0]);
+        assert_eq!(plan.warnings, [] as [OrphanWarning; 0]);
         assert!(plan.stop.is_none());
     }
 

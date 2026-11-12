@@ -378,7 +378,7 @@ mod tests {
         let b = vec![0u8; NRL_ENTRIES_OFFSET];
         let list = ReapList::parse(&b).unwrap();
         assert_eq!(list.next, 0);
-        assert!(list.entries.is_empty());
+        assert_eq!(list.entries, [] as [ReapListEntry; 0]);
     }
 
     #[test]

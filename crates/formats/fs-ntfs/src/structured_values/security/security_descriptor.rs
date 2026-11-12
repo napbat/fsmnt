@@ -513,7 +513,7 @@ mod tests {
         // The genuine output is non-empty; the mutated body
         // (`Ok(Default::default())`) would produce an empty string.
         assert_eq!(s, "DACL_PRESENT | SELF_RELATIVE");
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
         assert_ne!(s, String::default());
     }
 }

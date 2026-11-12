@@ -394,7 +394,7 @@ fn test_lx_symlink_empty_path() {
     let rp = make_reparse_point(reparse_tags::LX_SYMLINK, &data);
     let lx = rp.as_lx_symlink().unwrap();
     assert_eq!(lx.target_path().unwrap(), "");
-    assert!(lx.target_path_bytes().is_empty());
+    assert_eq!(lx.target_path_bytes(), []);
 }
 
 #[test]
@@ -608,7 +608,7 @@ fn test_split_utf16le_no_trailing_null() {
 #[test]
 fn test_split_utf16le_empty() {
     let parts = split_utf16le_null_terminated(&[]).unwrap();
-    assert!(parts.is_empty());
+    assert_eq!(parts, [] as [&[u8]; 0]);
 }
 
 #[test]
@@ -617,7 +617,7 @@ fn test_split_utf16le_single_null() {
     let data = [0x00, 0x00];
     let parts = split_utf16le_null_terminated(&data).unwrap();
     assert_eq!(parts.len(), 1);
-    assert!(parts[0].is_empty());
+    assert_eq!(parts[0], []);
 }
 
 #[test]
@@ -682,7 +682,7 @@ fn test_nfs_symbolic_link_empty_target() {
 
     assert!(matches!(nfs, NtfsNfsReparsePoint::SymbolicLink { .. }));
     assert_eq!(nfs.target_path().unwrap().unwrap(), "");
-    assert!(nfs.target_path_bytes().unwrap().is_empty());
+    assert_eq!(nfs.target_path_bytes().unwrap(), []);
 }
 
 #[test]

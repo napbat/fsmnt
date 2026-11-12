@@ -690,7 +690,7 @@ mod tests {
     #[test]
     fn volume_with_no_snapshots_lists_none() {
         let (vol, mut reader) = volume_with_snapshots(&[]);
-        assert!(vol.snapshots(&mut reader).unwrap().is_empty());
+        assert_eq!(vol.snapshots(&mut reader).unwrap(), [] as [Snapshot; 0]);
         assert!(matches!(
             vol.open_snapshot_by_name(&mut reader, "any"),
             Err(ApfsError::NotFound { .. })
@@ -850,7 +850,7 @@ mod tests {
         // The `b == 0` check must stop at the NUL — if it were `!=`,
         // `position` would return `Some(0)` and the result would be
         // empty.
-        assert!(!target.is_empty());
+        assert_ne!(target, "");
         assert!(!target.contains('\0'));
     }
 

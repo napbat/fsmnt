@@ -233,7 +233,7 @@ fn uconnect_qnx6_volumes_match_exhaustive_content_fingerprints() {
         );
         assert_eq!(opened.filesystem.total_size(), Some(expected.total_bytes));
         assert_eq!(opened.filesystem.free_space(), Some(expected.free_bytes));
-        assert!(opened.filesystem.notices().is_empty());
+        assert_eq!(opened.filesystem.notices(), [] as [String; 0]);
 
         let root_entries = opened
             .filesystem

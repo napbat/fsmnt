@@ -303,7 +303,10 @@ mod tests {
     #[test]
     fn a_file_with_no_siblings_lists_empty() {
         let (cat, mut reader) = catalog(&[link_record(30, 600, 2, "first")]);
-        assert!(SiblingLink::list(&cat, &mut reader, 99).unwrap().is_empty());
+        assert_eq!(
+            SiblingLink::list(&cat, &mut reader, 99).unwrap(),
+            [] as [SiblingLink; 0]
+        );
     }
 
     #[test]

@@ -552,7 +552,7 @@ mod tests {
         b[OBJ_PHYS_SIZE + 16..OBJ_PHYS_SIZE + 20].copy_from_slice(&1u32.to_le_bytes());
         b[OBJ_PHYS_SIZE + 20..OBJ_PHYS_SIZE + 24].copy_from_slice(&1u32.to_le_bytes());
         let list = FusionWbcList::parse(&b).unwrap();
-        assert!(list.entries.is_empty());
+        assert_eq!(list.entries, [] as [FusionWbcEntry; 0]);
     }
 
     #[test]
@@ -562,7 +562,7 @@ mod tests {
         // less-than and rules out an equality or less-than-or-equal flip.
         let b = vec![0u8; FUSION_WBC_LIST_ENTRIES_OFFSET];
         let list = FusionWbcList::parse(&b).unwrap();
-        assert!(list.entries.is_empty());
+        assert_eq!(list.entries, [] as [FusionWbcEntry; 0]);
     }
 
     #[test]

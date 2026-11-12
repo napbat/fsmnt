@@ -384,7 +384,7 @@ fn test_symbolic_link_header_only_accepted() {
     let sym = rp.as_symbolic_link().unwrap();
     assert_eq!(sym.substitute_name().unwrap(), "");
     assert_eq!(sym.print_name().unwrap(), "");
-    assert!(sym.substitute_name_bytes().is_empty());
+    assert_eq!(sym.substitute_name_bytes(), []);
 }
 
 #[test]
@@ -468,7 +468,7 @@ fn test_mount_point_header_only_accepted() {
     let mp = rp.as_mount_point().unwrap();
     assert_eq!(mp.substitute_name().unwrap(), "");
     assert_eq!(mp.print_name().unwrap(), "");
-    assert!(mp.substitute_name_bytes().is_empty());
+    assert_eq!(mp.substitute_name_bytes(), []);
 }
 
 #[test]

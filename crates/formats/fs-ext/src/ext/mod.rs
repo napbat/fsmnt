@@ -619,7 +619,6 @@ impl Ext {
     }
 
     /// Per-group descriptor checksum validation states.
-    #[must_use]
     pub fn group_checksums(&self) -> impl ExactSizeIterator<Item = ChecksumState> + '_ {
         self.group_descs.iter().map(|gd| gd.checksum)
     }

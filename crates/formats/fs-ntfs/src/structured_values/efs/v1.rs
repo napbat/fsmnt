@@ -706,7 +706,7 @@ mod tests {
         // thumbprint with no names.
         let cert = alloc::vec![0u8; CERT_HEADER_LEN];
         let parsed = EfsCertificateData::parse(&cert, NtfsPosition::none()).unwrap();
-        assert!(parsed.thumbprint().is_empty());
+        assert_eq!(parsed.thumbprint(), []);
         assert_eq!(parsed.container_name(), None);
         assert_eq!(parsed.provider_name(), None);
         assert_eq!(parsed.display_name(), None);

@@ -286,7 +286,7 @@ mod tests {
         let exactly_min = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05];
         let sid = NtfsSid::from_bytes(&exactly_min, NtfsPosition::none()).unwrap();
         assert_eq!(sid.byte_size(), 8);
-        assert!(sid.sub_authorities().is_empty());
+        assert_eq!(sid.sub_authorities(), []);
 
         // One byte short (7) must be rejected.
         let one_short = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];

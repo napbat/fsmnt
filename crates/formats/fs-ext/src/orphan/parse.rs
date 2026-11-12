@@ -259,7 +259,7 @@ mod tests {
         let ext = crate::Ext::open_lenient(&mut fs).expect("lenient");
         let mut plan = OrphanPlan::default();
         walk_legacy_chain(&ext, &mut fs, 0, &mut plan).expect("no-op walk");
-        assert!(plan.legacy.is_empty());
+        assert_eq!(plan.legacy, [] as [LegacyOrphanEntry; 0]);
         assert!(plan.stop.is_none());
     }
 
@@ -272,7 +272,7 @@ mod tests {
         // so scan_orphan_file returns early.
         let mut plan = OrphanPlan::default();
         scan_orphan_file(&ext, &mut fs, &mut plan).expect("no-op");
-        assert!(plan.orphan_file.is_empty());
+        assert_eq!(plan.orphan_file, [] as [OrphanFileEntry; 0]);
         assert!(plan.stop.is_none());
     }
 
@@ -377,6 +377,6 @@ mod tests {
             disposition: OrphanDisposition::Unlinked,
         });
         detect_duplicates(&mut plan);
-        assert!(plan.warnings.is_empty());
+        assert_eq!(plan.warnings, [] as [OrphanWarning; 0]);
     }
 }

@@ -394,7 +394,7 @@ mod tests {
         // data_size == allocated_size -> no slack (start >= end).
         let buf = build_index_root(4096, 16, 48, 48, 0x00);
         let root = NtfsIndexRoot::new(&buf, NtfsPosition::new(0x100)).unwrap();
-        assert!(root.slack_data().is_empty());
+        assert_eq!(root.slack_data(), []);
     }
 
     #[test]

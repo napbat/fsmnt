@@ -414,7 +414,7 @@ mod tests {
 
         let entry = &entries[0];
         assert_eq!(entry.name(), b"NOVALUE");
-        assert!(entry.value().is_empty());
+        assert_eq!(entry.value(), []);
         assert_eq!(entry.value_length(), 0);
     }
 

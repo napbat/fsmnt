@@ -65,7 +65,7 @@ fn test_usn_reason_display() {
     let reason = UsnReason::FILE_CREATE;
     let rendered = reason.to_string();
     assert_eq!(rendered, "FILE_CREATE");
-    assert!(!rendered.is_empty());
+    assert_ne!(rendered, "");
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn test_usn_source_info_display() {
     let info = UsnSourceInfo::DATA_MANAGEMENT;
     let rendered = info.to_string();
     assert_eq!(rendered, "DATA_MANAGEMENT");
-    assert!(!rendered.is_empty());
+    assert_ne!(rendered, "");
 }
 
 #[test]

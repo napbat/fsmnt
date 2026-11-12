@@ -37,8 +37,8 @@ fn build_on_flag_only_orphan_fixture_succeeds_and_clears_ro_bit() {
     let journal = crate::JournalReplay::build(&pre, &mut fs).expect("journal");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan build");
     assert!(replay.orphan_plan().stop.is_none());
-    assert!(replay.orphan_plan().legacy.is_empty());
-    assert!(replay.orphan_plan().orphan_file.is_empty());
+    assert_eq!(replay.orphan_plan().legacy, [] as [crate::LegacyOrphanEntry; 0]);
+    assert_eq!(replay.orphan_plan().orphan_file, [] as [crate::OrphanFileEntry; 0]);
 
     // Strict reopen through the composed overlay should succeed.
     let mut overlay = crate::OverlayReader::new(&mut fs, &replay);

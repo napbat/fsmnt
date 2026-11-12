@@ -733,7 +733,7 @@ mod tests {
         let writer = BitWriter::with_capacity(1024);
         assert_eq!(writer.position(), 0);
         let data = writer.finish();
-        assert!(data.is_empty());
+        assert_eq!(data, [] as [u8; 0]);
     }
 
     #[test]
