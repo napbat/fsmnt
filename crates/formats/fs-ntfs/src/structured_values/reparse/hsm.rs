@@ -373,7 +373,7 @@ mod tests {
         let rp =
             NtfsReparsePoint::from_bytes(&raw, NtfsPosition::none()).expect("valid reparse point");
         let hsm = rp.as_hsm().expect("valid HSM parse");
-        assert!(hsm.provider_data().is_empty());
+        assert_eq!(hsm.provider_data(), []);
     }
 
     #[test]

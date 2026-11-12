@@ -424,7 +424,7 @@ mod tests {
         // data_size == allocated_size: start >= end, so slack is empty.
         let data = build_indx(0x55, 16, 200, 200, HAS_SUBNODES_FLAG);
         let record = NtfsIndexRecord::from_raw_data(data, NtfsPosition::new(0x10000)).unwrap();
-        assert!(record.slack_data().is_empty());
+        assert_eq!(record.slack_data(), []);
     }
 
     #[test]

@@ -440,7 +440,7 @@ mod tests {
         let rp =
             NtfsReparsePoint::from_bytes(&raw, NtfsPosition::none()).expect("valid reparse point");
         let wci = rp.as_wci().expect("valid WCI parse");
-        assert!(wci.path_bytes().is_empty());
+        assert_eq!(wci.path_bytes(), []);
         assert_eq!(wci.path().expect("valid empty path"), "");
     }
 

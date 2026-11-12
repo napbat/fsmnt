@@ -450,7 +450,7 @@ fn dir_entry_long_name_utf16_returns_buffer_contents() {
 
     // Empty buffer when there's no LFN.
     let no_lfn = build_dir_entry(b"TEST    TXT", 0x20, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0);
-    assert!(no_lfn.long_name_utf16().is_empty());
+    assert_eq!(no_lfn.long_name_utf16(), []);
 }
 
 #[test]

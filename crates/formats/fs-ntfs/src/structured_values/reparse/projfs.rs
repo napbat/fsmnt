@@ -227,7 +227,7 @@ mod tests {
         let projfs = rp.as_projfs().expect("valid ProjFS parse");
         assert_eq!(projfs.tag(), ProjFsTag::Tombstone);
         assert!(projfs.is_tombstone());
-        assert!(projfs.provider_data().is_empty());
+        assert_eq!(projfs.provider_data(), []);
         assert!(rp.is_projfs());
         assert!(rp.is_projfs_tombstone());
     }
@@ -259,6 +259,6 @@ mod tests {
         let rp =
             NtfsReparsePoint::from_bytes(&raw, NtfsPosition::none()).expect("valid reparse point");
         let projfs = rp.as_projfs().expect("valid ProjFS parse");
-        assert!(projfs.provider_data().is_empty());
+        assert_eq!(projfs.provider_data(), []);
     }
 }

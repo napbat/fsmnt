@@ -513,7 +513,7 @@ fn test_synthetic_flags_display() {
     // The Display impl renders the active flag names; the
     // Ok(Default::default()) mutant would render an empty string.
     assert_eq!(rendered, "IN_USE | IS_DIRECTORY");
-    assert!(!rendered.is_empty());
+    assert_ne!(rendered, "");
 }
 
 #[test]

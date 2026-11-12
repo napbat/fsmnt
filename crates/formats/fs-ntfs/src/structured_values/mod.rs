@@ -226,7 +226,7 @@ mod tests {
         // The genuine Display renders the flag names; the mutated body
         // (`Ok(Default::default())`) would produce an empty string.
         assert_eq!(s, "READ_ONLY | ARCHIVE");
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
         assert_ne!(s, std::string::String::default());
     }
 

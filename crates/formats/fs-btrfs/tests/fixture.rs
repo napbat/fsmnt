@@ -622,7 +622,10 @@ fn mirrored_metadata_retries_after_checksum_failure() {
     let mut volume = Btrfs::from_devices(readers).expect("open both members");
     volume.initialize().expect("retry valid mirrored metadata");
     let root = volume.root().expect("root after mirror retry");
-    assert!(!volume.read_dir(root).expect("root entries").is_empty());
+    assert_ne!(
+        volume.read_dir(root).expect("root entries"),
+        [] as [fs_btrfs::BtrfsDirEntry; 0]
+    );
     assert!(
         corruptions.get() > 0,
         "the faulty mirror must have been exercised"

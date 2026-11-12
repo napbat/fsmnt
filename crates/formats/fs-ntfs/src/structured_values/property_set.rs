@@ -125,7 +125,7 @@ mod tests {
         let ps = NtfsPropertySet::new(&mut cursor, NtfsPosition::none(), 0)
             .expect("should parse empty property set");
 
-        assert!(ps.data().is_empty());
+        assert_eq!(ps.data(), []);
         assert_eq!(ps.data_length(), 0);
     }
 

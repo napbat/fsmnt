@@ -217,7 +217,7 @@ fn descriptor_parse_round_trip() {
     assert_eq!(parsed.data_size(), 4096);
     assert_eq!(parsed.root_hash(), &[0x5Au8; 32]);
     assert_eq!(parsed.salt(), b"SALT");
-    assert!(parsed.signature().is_empty());
+    assert_eq!(parsed.signature(), []);
 }
 
 #[test]
@@ -601,7 +601,7 @@ fn verity_descriptor_is_introspectable() {
     assert_eq!(descriptor.data_size(), DATA_SIZE as u64);
     assert_eq!(descriptor.log_blocksize(), 12);
     assert_eq!(descriptor.root_hash().len(), 32);
-    assert!(descriptor.signature().is_empty());
+    assert_eq!(descriptor.signature(), []);
 
     let data: Vec<u8> = (0..DATA_SIZE).map(|i| (i % 251).to_le_bytes()[0]).collect();
     let (root, _, _) = build_merkle_tree(&data);

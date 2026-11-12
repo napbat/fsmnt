@@ -468,6 +468,6 @@ mod tests {
 
         let result = find_system_data(&buf, EXTRA_ISIZE, TEST_INODE);
         let data = result.unwrap().unwrap();
-        assert!(data.is_empty());
+        assert_eq!(data, []);
     }
 }

@@ -233,7 +233,10 @@ mod tests {
 
     #[test]
     fn empty_region_parses_to_no_fields() {
-        assert!(ExtendedFields::parse(&[]).unwrap().fields.is_empty());
+        assert_eq!(
+            ExtendedFields::parse(&[]).unwrap().fields,
+            [] as [XField; 0]
+        );
     }
 
     #[test]

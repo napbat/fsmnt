@@ -52,7 +52,7 @@ fn test_parse_restart_page_real() {
     assert!(info.system_page_size() > 0);
     assert!(info.file_size() > 0);
     assert!(info.seq_number_bits() > 0);
-    assert!(!info.client_name().is_empty());
+    assert_ne!(info.client_name(), "");
 }
 
 /// Build a synthetic RSTR page (4096 bytes) for unit testing.
@@ -334,7 +334,7 @@ fn test_logfile_load() {
         Ok(logfile) => {
             let restart = logfile.restart_info();
             assert!(restart.log_page_size() > 0);
-            assert!(!restart.client_name().is_empty());
+            assert_ne!(restart.client_name(), "");
             assert!(!logfile.records().is_empty());
         }
         Err(e) => {

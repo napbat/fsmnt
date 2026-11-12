@@ -277,7 +277,7 @@ fn logical_qnx6_partitions_are_listed_and_opened_by_ordinal() {
             assert_eq!(opened.filesystem.notices().len(), 1);
             assert!(opened.filesystem.notices()[0].contains("primary superblock"));
         } else {
-            assert!(opened.filesystem.notices().is_empty());
+            assert_eq!(opened.filesystem.notices(), [] as [String; 0]);
         }
         assert_eq!(
             opened

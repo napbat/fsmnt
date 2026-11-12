@@ -387,6 +387,6 @@ mod tests {
         assert_eq!(wrapped.len(), OBJ_PHYS_SIZE + KB_LOCKER_HEADER_SIZE);
         let kb = Keybag::parse(&wrapped).unwrap();
         assert_eq!(kb.version, 2);
-        assert!(kb.entries.is_empty());
+        assert_eq!(kb.entries, [] as [KeybagEntry; 0]);
     }
 }

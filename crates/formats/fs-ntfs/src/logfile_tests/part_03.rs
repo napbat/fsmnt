@@ -241,7 +241,7 @@ fn test_resident_data_value_unnamed() {
     };
     assert!(!val.is_named());
     assert_eq!(val.name_length(), 0);
-    assert!(val.data().is_empty());
+    assert_eq!(val.data(), []);
 }
 
 #[test]

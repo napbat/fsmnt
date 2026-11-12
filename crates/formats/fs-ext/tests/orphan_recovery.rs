@@ -22,8 +22,14 @@ fn flag_only_orphan_fixture_recovers_and_strict_reopen_succeeds() {
     let journal = JournalReplay::build(&pre, &mut fs).expect("journal");
     let replay = OrphanReplay::build(journal, &pre, &mut fs).expect("orphan");
     assert!(replay.orphan_plan().stop.is_none());
-    assert!(replay.orphan_plan().legacy.is_empty());
-    assert!(replay.orphan_plan().orphan_file.is_empty());
+    assert_eq!(
+        replay.orphan_plan().legacy,
+        [] as [fs_ext::LegacyOrphanEntry; 0]
+    );
+    assert_eq!(
+        replay.orphan_plan().orphan_file,
+        [] as [fs_ext::OrphanFileEntry; 0]
+    );
 
     let mut overlay = OverlayReader::new(&mut fs, &replay);
     let _ext = Ext::new(&mut overlay).expect("strict reopen");

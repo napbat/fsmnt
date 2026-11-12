@@ -477,7 +477,7 @@ mod tests {
         // record and must parse, not be rejected by a `<=` guard.
         let fdh = FileDataHash::parse(&[0u8, 0, 0]).unwrap();
         assert_eq!(fdh.hashed_len, 0);
-        assert!(fdh.hash.is_empty());
+        assert_eq!(fdh.hash, [] as [u8; 0]);
     }
 
     #[test]

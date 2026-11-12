@@ -451,7 +451,7 @@ mod tests {
             (10u64, alloc::vec![classified(500, 1)]),
             (11u64, alloc::vec![classified(600, 1)]),
         ];
-        assert!(build_clone_map(&files).is_empty());
+        assert_eq!(build_clone_map(&files), [] as [CloneSet; 0]);
     }
 
     #[test]
@@ -461,6 +461,6 @@ mod tests {
         // single-member group. The filter `members.len() > 1` must drop it;
         // a `>= 1` mutant would let it through as a fake clone set.
         let files = [(10u64, alloc::vec![classified(500, 2)])];
-        assert!(build_clone_map(&files).is_empty());
+        assert_eq!(build_clone_map(&files), [] as [CloneSet; 0]);
     }
 }

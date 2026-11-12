@@ -166,7 +166,7 @@ mod tests {
         let lus = NtfsLoggedUtilityStream::new(&mut cursor, NtfsPosition::none(), 0)
             .expect("should parse empty stream");
 
-        assert!(lus.data().is_empty());
+        assert_eq!(lus.data(), []);
         assert_eq!(lus.data_length(), 0);
     }
 

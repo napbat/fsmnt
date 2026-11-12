@@ -401,7 +401,7 @@ mod tests {
                 }
             })
             .collect();
-        assert!(!matches.is_empty());
+        assert_ne!(matches, [] as [Match; 0]);
         // The match should capture at least 6 bytes
         assert!(
             matches[0].length >= 6,
@@ -413,7 +413,7 @@ mod tests {
     fn empty_input() {
         let mut finder = MatchFinder::new(default_config());
         let tokens = finder.tokenize(&[]);
-        assert!(tokens.is_empty());
+        assert_eq!(tokens, [] as [Token; 0]);
     }
 
     #[test]

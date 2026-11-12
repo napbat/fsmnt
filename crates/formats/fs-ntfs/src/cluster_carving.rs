@@ -657,7 +657,7 @@ mod tests {
             // Structural invariants for every reported fragment.
             assert!(recovered.end_cluster >= recovered.start_cluster);
             assert!(recovered.length > 0);
-            assert!(!recovered.signature.is_empty());
+            assert_ne!(recovered.signature, "");
             count += 1;
             assert!(count <= 10_000, "carver did not terminate");
         }

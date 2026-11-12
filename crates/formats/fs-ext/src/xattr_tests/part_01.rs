@@ -151,7 +151,7 @@ fn parse_ibody_ea_inode_entry() {
     parse_ibody_entries(&buf, 42, &mut out).unwrap();
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].name(), "user.big");
-    assert!(out[0].value().is_empty());
+    assert_eq!(out[0].value(), []);
     assert_eq!(out[0].ea_inode(), Some(500));
 }
 

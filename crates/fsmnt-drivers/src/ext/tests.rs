@@ -23,8 +23,8 @@ fn opening_a_non_ext_image_fails() {
 
 #[test]
 fn canonicalise_handles_root_and_empty_paths() {
-    assert!(canonicalise_ext_path("").is_empty());
-    assert!(canonicalise_ext_path("/").is_empty());
+    assert_eq!(canonicalise_ext_path(""), [] as [&str; 0]);
+    assert_eq!(canonicalise_ext_path("/"), [] as [&str; 0]);
 }
 
 #[test]

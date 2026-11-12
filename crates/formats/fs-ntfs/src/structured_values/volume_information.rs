@@ -222,7 +222,7 @@ mod tests {
         let flags = NtfsVolumeFlags::IS_DIRTY | NtfsVolumeFlags::CHKDSK_UNDERWAY;
         let s = format!("{flags}");
         // Display is implemented via bitflags, just verify it doesn't panic.
-        assert!(!s.is_empty());
+        assert_ne!(s, "");
     }
 
     /// Builds a 12-byte $`VOLUME_INFORMATION` value (MS-FSCC 2.5.10):

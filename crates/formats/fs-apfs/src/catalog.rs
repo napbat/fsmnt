@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(object3.len(), 1);
 
         let missing = catalog.records_for(&mut reader, 99).unwrap();
-        assert!(missing.is_empty());
+        assert_eq!(missing, [] as [CatalogRecord; 0]);
     }
 
     /// A two-level catalog: an index root over two leaves. Object 5's records
@@ -742,7 +742,10 @@ mod tests {
         // Objects confined to a single leaf.
         assert_eq!(catalog.records_for(&mut reader, 2).unwrap().len(), 1);
         assert_eq!(catalog.records_for(&mut reader, 8).unwrap().len(), 1);
-        assert!(catalog.records_for(&mut reader, 99).unwrap().is_empty());
+        assert_eq!(
+            catalog.records_for(&mut reader, 99).unwrap(),
+            [] as [CatalogRecord; 0]
+        );
     }
 
     #[test]
